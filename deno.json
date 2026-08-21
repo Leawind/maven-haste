@@ -1,0 +1,27 @@
+{
+    "fmt": {
+        "bracePosition": "sameLine",
+        "indentWidth": 4,
+        "lineWidth": 120,
+        "newLineKind": "lf",
+        "nextControlFlowPosition": "sameLine",
+        "operatorPosition": "nextLine",
+        "proseWrap": "preserve",
+        "quoteProps": "asNeeded",
+        "semiColons": false,
+        "singleBodyPosition": "sameLine",
+        "useBraces": "always",
+        "useTabs": false,
+        "singleQuote": true,
+        "spaceAround": false,
+        "spaceSurroundingProperties": true,
+        "trailingCommas": "onlyMultiLine",
+        "typeLiteral.separatorKind": "semiColon",
+        "include": [
+            "**/*.md",
+            "**/*.json",
+            "**/*.yml",
+            "**/*.yaml"
+        ]
+    }
+}
