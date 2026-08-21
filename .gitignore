@@ -1,0 +1,35 @@
+# IDE
+.idea/
+.vscode/
+.vs/
+
+# AI tools
+/.ai/
+.agents/
+.claude/
+.clinerules/
+.codebuddy/
+.codex/
+.cursorrules/
+.kilo/
+.kilocode/
+.lingma/
+.marscode/
+.mimocode/
+.opencode/
+.qoder/
+.trae/
+
+AGENTS-*.md
+
+# dotenv
+.env
+.env.*
+!.env.example
+
+
+# Rust
+target/
+
+# docs
+docs-dev/
