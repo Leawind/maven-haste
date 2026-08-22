@@ -158,9 +158,12 @@ mod tests {
         let handler_calls = Arc::clone(&calls);
         let upstream = Router::new().route(
             "/{*path}",
-            get(move || {
+            get(move |OriginalUri(uri): OriginalUri| {
                 let calls = Arc::clone(&handler_calls);
                 async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
                     calls.fetch_add(1, Ordering::SeqCst);
                     let mut response = Response::new(Body::from("artifact-body"));
                     response
@@ -218,11 +221,14 @@ mod tests {
         let handler_calls = Arc::clone(&calls);
         let upstream = Router::new().route(
             "/{*path}",
-            get(move || {
+            get(move |OriginalUri(uri): OriginalUri| {
                 let calls = Arc::clone(&handler_calls);
                 async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
                     calls.fetch_add(1, Ordering::SeqCst);
-                    "case-body"
+                    Response::new(Body::from("case-body"))
                 }
             }),
         );
@@ -276,12 +282,15 @@ mod tests {
         let handler_calls = Arc::clone(&calls);
         let upstream = Router::new().route(
             "/{*path}",
-            get(move || {
+            get(move |OriginalUri(uri): OriginalUri| {
                 let calls = Arc::clone(&handler_calls);
                 async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
                     calls.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    "shared"
+                    Response::new(Body::from("shared"))
                 }
             }),
         );
@@ -320,9 +329,12 @@ mod tests {
         let fallback_handler_calls = Arc::clone(&fallback_calls);
         let fallback = Router::new().route(
             "/{*path}",
-            get(move || {
+            get(move |OriginalUri(uri): OriginalUri| {
                 let calls = Arc::clone(&fallback_handler_calls);
                 async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
                     let attempt = calls.fetch_add(1, Ordering::SeqCst);
                     if attempt < 2 {
                         error_response(StatusCode::INTERNAL_SERVER_ERROR, "retry")
@@ -360,15 +372,319 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn returns_stale_metadata_while_refreshing_in_background() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
+                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        Response::new(Body::from("metadata-v1"))
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                        Response::new(Body::from("metadata-v2"))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let mut cache_config = CacheConfig::default();
+        cache_config.metadata_ttl = Duration::ZERO;
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("central", &url, &[])],
+            cache_config,
+        )
+        .await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "metadata-v1"
+        );
+        let stale_requests = (0..8).map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move { body(request(&app, Method::GET, metadata).await).await })
+        });
+        for stale in futures_util::future::join_all(stale_requests).await {
+            assert_eq!(stale.unwrap(), "metadata-v1");
+        }
+        wait_for(|| calls.load(Ordering::SeqCst) >= 2).await;
+        wait_for_file(
+            &directory
+                .path()
+                .join("repository/com/example/demo/maven-metadata.xml"),
+            b"metadata-v2",
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "metadata-v2"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn conditional_refresh_accepts_not_modified() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let saw_condition = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_calls = Arc::clone(&calls);
+        let handler_condition = Arc::clone(&saw_condition);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(
+                move |OriginalUri(uri): OriginalUri, headers: axum::http::HeaderMap| {
+                    let calls = Arc::clone(&handler_calls);
+                    let saw_condition = Arc::clone(&handler_condition);
+                    async move {
+                        if is_checksum_uri(&uri) {
+                            return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                        }
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        if headers.get(reqwest::header::IF_NONE_MATCH).is_some() {
+                            saw_condition.store(true, Ordering::SeqCst);
+                            return error_response(StatusCode::NOT_MODIFIED, "");
+                        }
+                        let mut response = Response::new(Body::from("unchanged"));
+                        response
+                            .headers_mut()
+                            .insert(ETAG, HeaderValue::from_static("\"metadata-tag\""));
+                        response
+                    }
+                },
+            ),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let mut cache_config = CacheConfig::default();
+        cache_config.metadata_ttl = Duration::ZERO;
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("central", &url, &[])],
+            cache_config,
+        )
+        .await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "unchanged"
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "unchanged"
+        );
+        wait_for(|| saw_condition.load(Ordering::SeqCst)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn caches_not_found_only_for_mutable_files() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move || {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    error_response(StatusCode::NOT_FOUND, "missing")
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            database
+                .get("com/example/demo/maven-metadata.xml")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_not_found
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn retries_mutable_not_found_after_negative_ttl_expires() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move || {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    error_response(StatusCode::NOT_FOUND, "missing")
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let mut cache_config = CacheConfig::default();
+        cache_config.negative_ttl = Duration::ZERO;
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("central", &url, &[])],
+            cache_config,
+        )
+        .await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn generates_and_serves_missing_checksums() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        error_response(StatusCode::NOT_FOUND, "missing checksum")
+                    } else {
+                        Response::new(Body::from("abc"))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "abc"
+        );
+        let sha1_path = format!("{ARTIFACT_PATH}.sha1");
+        let sha256_path = format!("{ARTIFACT_PATH}.sha256");
+        assert_eq!(
+            body(request(&app, Method::GET, &sha1_path).await).await,
+            "a9993e364706816aba3e25717850c26c9cd0d89d\n"
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, &sha256_path).await).await,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let record = database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.sha1.as_deref(),
+            Some("a9993e364706816aba3e25717850c26c9cd0d89d")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_falls_back_to_next_repository() {
+        let bad_calls = Arc::new(AtomicUsize::new(0));
+        let bad_handler_calls = Arc::clone(&bad_calls);
+        let bad = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&bad_handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if uri.path().ends_with(".sha1") {
+                        Response::new(Body::from("0000000000000000000000000000000000000000\n"))
+                    } else {
+                        Response::new(Body::from("abc"))
+                    }
+                }
+            }),
+        );
+        let (bad_url, bad_task) = spawn_upstream(bad).await;
+
+        let good_calls = Arc::new(AtomicUsize::new(0));
+        let good_handler_calls = Arc::clone(&good_calls);
+        let good = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&good_handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        error_response(StatusCode::NOT_FOUND, "missing checksum")
+                    } else {
+                        Response::new(Body::from("xyz"))
+                    }
+                }
+            }),
+        );
+        let (good_url, good_task) = spawn_upstream(good).await;
+        let directory = TempDir::new().unwrap();
+        let repositories = vec![
+            repository("bad", &bad_url, &[]),
+            repository("good", &good_url, &[]),
+        ];
+        let (app, _) = test_app(&directory, repositories).await;
+
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "xyz"
+        );
+        assert_eq!(bad_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(good_calls.load(Ordering::SeqCst), 3);
+        bad_task.abort();
+        good_task.abort();
+    }
+
     async fn test_app(
         directory: &TempDir,
         repositories: Vec<RepositoryConfig>,
+    ) -> (Router, Database) {
+        test_app_with_cache(directory, repositories, CacheConfig::default()).await
+    }
+
+    async fn test_app_with_cache(
+        directory: &TempDir,
+        repositories: Vec<RepositoryConfig>,
+        cache_config: CacheConfig,
     ) -> (Router, Database) {
         let storage = StorageConfig::resolved_for_test(directory.path().join("repository"));
         let config = Config {
             server: ServerConfig::default(),
             storage,
-            cache: CacheConfig::default(),
+            cache: cache_config,
             circuit_breaker: CircuitBreakerConfig::default(),
             repositories,
         };
@@ -412,5 +728,32 @@ mod tests {
     async fn body(response: Response<Body>) -> String {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn is_checksum_uri(uri: &Uri) -> bool {
+        uri.path().ends_with(".sha1") || uri.path().ends_with(".sha256")
+    }
+
+    async fn wait_for(condition: impl Fn() -> bool) {
+        for _ in 0..100 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition was not met before timeout");
+    }
+
+    async fn wait_for_file(path: &std::path::Path, expected: &[u8]) {
+        for _ in 0..100 {
+            if tokio::fs::read(path)
+                .await
+                .is_ok_and(|content| content == expected)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("file {} was not updated before timeout", path.display());
     }
 }

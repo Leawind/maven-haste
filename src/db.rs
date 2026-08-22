@@ -48,6 +48,8 @@ pub struct ArtifactRecord {
     pub version: String,
     pub file_type: String,
     pub upstream: String,
+    pub sha1: Option<String>,
+    pub sha256: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub file_size: i64,
@@ -97,8 +99,8 @@ impl Database {
             .interact(move |connection| {
                 connection
                     .query_row(
-                        "SELECT path, group_id, artifact_id, version, file_type, upstream, etag, \
-                         last_modified, file_size, created_at, last_refresh_attempt, is_not_found \
+                        "SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, \
+                         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, is_not_found \
                          FROM artifacts WHERE path = ?1",
                         [path],
                         |row| {
@@ -109,12 +111,14 @@ impl Database {
                                 version: row.get(3)?,
                                 file_type: row.get(4)?,
                                 upstream: row.get(5)?,
-                                etag: row.get(6)?,
-                                last_modified: row.get(7)?,
-                                file_size: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
-                                created_at: row.get(9)?,
-                                last_refresh_attempt: row.get(10)?,
-                                is_not_found: row.get::<_, i64>(11)? != 0,
+                                sha1: row.get(6)?,
+                                sha256: row.get(7)?,
+                                etag: row.get(8)?,
+                                last_modified: row.get(9)?,
+                                file_size: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
+                                created_at: row.get(11)?,
+                                last_refresh_attempt: row.get(12)?,
+                                is_not_found: row.get::<_, i64>(13)? != 0,
                             })
                         },
                     )
@@ -160,34 +164,32 @@ impl Database {
     }
 
     pub async fn upsert(&self, record: ArtifactRecord) -> Result<(), AppError> {
+        self.upsert_many(vec![record]).await
+    }
+
+    pub async fn upsert_many(&self, records: Vec<ArtifactRecord>) -> Result<(), AppError> {
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                let transaction = connection.transaction()?;
+                for record in records {
+                    upsert_record(&transaction, record)?;
+                }
+                transaction.commit()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn touch_refresh_attempt(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
+        let path = path.to_owned();
         let connection = self.connection().await?;
         connection
             .interact(move |connection| {
                 connection.execute(
-                    "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, \
-                     upstream, etag, last_modified, file_size, created_at, last_refresh_attempt, \
-                     is_not_found) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
-                     ON CONFLICT(path) DO UPDATE SET group_id = excluded.group_id, \
-                     artifact_id = excluded.artifact_id, version = excluded.version, \
-                     file_type = excluded.file_type, upstream = excluded.upstream, \
-                     etag = excluded.etag, last_modified = excluded.last_modified, \
-                     file_size = excluded.file_size, created_at = excluded.created_at, \
-                     last_refresh_attempt = excluded.last_refresh_attempt, \
-                     is_not_found = excluded.is_not_found",
-                    params![
-                        record.path,
-                        record.group_id,
-                        record.artifact_id,
-                        record.version,
-                        record.file_type,
-                        record.upstream,
-                        record.etag,
-                        record.last_modified,
-                        record.file_size,
-                        record.created_at,
-                        record.last_refresh_attempt,
-                        i64::from(record.is_not_found),
-                    ],
+                    "UPDATE artifacts SET last_refresh_attempt = ?2 WHERE path = ?1",
+                    params![path, timestamp],
                 )?;
                 Ok(())
             })
@@ -202,6 +204,41 @@ impl Database {
             .await
             .map_err(|error| AppError::Runtime(format!("failed to get SQLite connection: {error}")))
     }
+}
+
+fn upsert_record(
+    connection: &deadpool_sqlite::rusqlite::Connection,
+    record: ArtifactRecord,
+) -> Result<(), deadpool_sqlite::rusqlite::Error> {
+    connection.execute(
+        "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, upstream, sha1, \
+         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, is_not_found) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+         ON CONFLICT(path) DO UPDATE SET group_id = excluded.group_id, \
+         artifact_id = excluded.artifact_id, version = excluded.version, \
+         file_type = excluded.file_type, upstream = excluded.upstream, sha1 = excluded.sha1, \
+         sha256 = excluded.sha256, etag = excluded.etag, \
+         last_modified = excluded.last_modified, file_size = excluded.file_size, \
+         created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt, \
+         is_not_found = excluded.is_not_found",
+        params![
+            record.path,
+            record.group_id,
+            record.artifact_id,
+            record.version,
+            record.file_type,
+            record.upstream,
+            record.sha1,
+            record.sha256,
+            record.etag,
+            record.last_modified,
+            record.file_size,
+            record.created_at,
+            record.last_refresh_attempt,
+            i64::from(record.is_not_found),
+        ],
+    )?;
+    Ok(())
 }
 
 fn worker_error(error: deadpool_sqlite::InteractError) -> AppError {
@@ -276,6 +313,8 @@ mod tests {
             version: "1.0".into(),
             file_type: "jar".into(),
             upstream: "central".into(),
+            sha1: None,
+            sha256: None,
             etag: Some("tag".into()),
             last_modified: None,
             file_size: 42,

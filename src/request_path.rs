@@ -10,6 +10,14 @@ pub struct MavenPath {
     pub artifact_id: String,
     pub version: String,
     pub file_type: String,
+    policy: CachePolicy,
+    checksum: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CachePolicy {
+    Permanent,
+    Mutable,
 }
 
 impl MavenPath {
@@ -57,6 +65,8 @@ impl MavenPath {
             artifact_id: coordinates.artifact_id,
             version: coordinates.version,
             file_type: coordinates.file_type,
+            policy: coordinates.policy,
+            checksum: coordinates.checksum,
         })
     }
 
@@ -68,6 +78,14 @@ impl MavenPath {
         self.segments
             .iter()
             .fold(root.to_path_buf(), |path, segment| path.join(segment))
+    }
+
+    pub fn policy(&self) -> CachePolicy {
+        self.policy
+    }
+
+    pub fn is_checksum(&self) -> bool {
+        self.checksum
     }
 }
 
@@ -84,6 +102,8 @@ struct Coordinates {
     artifact_id: String,
     version: String,
     file_type: String,
+    policy: CachePolicy,
+    checksum: bool,
 }
 
 impl Coordinates {
@@ -91,8 +111,10 @@ impl Coordinates {
         let filename = segments
             .last()
             .expect("a Maven path always has at least one segment");
-        let metadata =
-            filename == "maven-metadata.xml" || filename.starts_with("maven-metadata.xml.");
+        let metadata = filename == "maven-metadata.xml"
+            || ["sha1", "sha256", "md5"]
+                .iter()
+                .any(|suffix| filename == &format!("maven-metadata.xml.{suffix}"));
 
         if metadata {
             if segments.len() < 2 {
@@ -129,6 +151,8 @@ impl Coordinates {
                 } else {
                     checksum_file_type(filename).into()
                 },
+                policy: CachePolicy::Mutable,
+                checksum: filename != "maven-metadata.xml",
             });
         }
 
@@ -138,13 +162,39 @@ impl Coordinates {
             ));
         }
         let artifact_index = segments.len() - 3;
+        let checksum = has_checksum_suffix(filename);
+        let content_filename = strip_checksum_suffix(filename);
+        let version = &segments[artifact_index + 1];
+        let snapshot_alias = version.ends_with("-SNAPSHOT")
+            && content_filename
+                .strip_prefix(&format!("{}-{version}", segments[artifact_index]))
+                .is_some_and(|suffix| suffix.starts_with(['.', '-']));
         Ok(Self {
             group_id: segments[..artifact_index].join("."),
             artifact_id: segments[artifact_index].clone(),
-            version: segments[artifact_index + 1].clone(),
+            version: version.clone(),
             file_type: regular_file_type(filename).into(),
+            policy: if snapshot_alias {
+                CachePolicy::Mutable
+            } else {
+                CachePolicy::Permanent
+            },
+            checksum,
         })
     }
+}
+
+fn has_checksum_suffix(filename: &str) -> bool {
+    [".sha1", ".sha256", ".md5"]
+        .iter()
+        .any(|suffix| filename.ends_with(suffix))
+}
+
+fn strip_checksum_suffix(filename: &str) -> &str {
+    [".sha1", ".sha256", ".md5"]
+        .iter()
+        .find_map(|suffix| filename.strip_suffix(suffix))
+        .unwrap_or(filename)
 }
 
 fn regular_file_type(filename: &str) -> &'static str {
@@ -253,5 +303,31 @@ mod tests {
         let parsed = MavenPath::parse("/g/a/1/a-1.jar", "/").unwrap();
         assert_eq!(parsed.relative(), "g/a/1/a-1.jar");
         assert!(MavenPath::parse("/maven//g/a/1/a-1.jar", "/maven").is_err());
+    }
+
+    #[test]
+    fn classifies_mutable_aliases_and_permanent_timestamped_snapshots() {
+        let alias = MavenPath::parse(
+            "/maven/com/example/demo/1.0-SNAPSHOT/demo-1.0-SNAPSHOT.jar.sha1",
+            "/maven",
+        )
+        .unwrap();
+        assert_eq!(alias.policy(), CachePolicy::Mutable);
+        assert!(alias.is_checksum());
+
+        let timestamped = MavenPath::parse(
+            "/maven/com/example/demo/1.0-SNAPSHOT/demo-1.0-20260823.120000-1.jar",
+            "/maven",
+        )
+        .unwrap();
+        assert_eq!(timestamped.policy(), CachePolicy::Permanent);
+
+        let metadata_checksum = MavenPath::parse(
+            "/maven/com/example/demo/maven-metadata.xml.sha256",
+            "/maven",
+        )
+        .unwrap();
+        assert_eq!(metadata_checksum.policy(), CachePolicy::Mutable);
+        assert!(metadata_checksum.is_checksum());
     }
 }

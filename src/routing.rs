@@ -16,6 +16,12 @@ impl RouteEngine {
             .filter(|repository| participates(repository, relative_path))
             .collect()
     }
+
+    pub fn repository(&self, name: &str) -> Option<&RepositoryConfig> {
+        self.repositories
+            .iter()
+            .find(|repository| repository.name == name)
+    }
 }
 
 fn participates(repository: &RepositoryConfig, path: &str) -> bool {

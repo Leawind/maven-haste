@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{Client, StatusCode, Url};
 
 use crate::circuit::CircuitBreaker;
@@ -22,8 +24,15 @@ pub enum FetchResult {
         repository: String,
         response: reqwest::Response,
     },
+    NotModified,
     NotFound,
     GatewayFailure,
+}
+
+#[derive(Clone)]
+struct ConditionalHeaders {
+    etag: Option<String>,
+    last_modified: Option<String>,
 }
 
 impl UpstreamClient {
@@ -52,17 +61,80 @@ impl UpstreamClient {
         })
     }
 
-    pub async fn fetch(&self, relative_path: &str) -> FetchResult {
-        let candidates = self.routes.candidates(relative_path);
+    pub async fn fetch(&self, relative_path: &str, excluded: &HashSet<String>) -> FetchResult {
+        let repositories = self
+            .routes
+            .candidates(relative_path)
+            .into_iter()
+            .filter(|repository| !excluded.contains(&repository.name))
+            .cloned()
+            .map(|repository| (repository, None))
+            .collect();
+        self.fetch_ordered(relative_path, repositories).await
+    }
+
+    pub async fn refresh(
+        &self,
+        relative_path: &str,
+        preferred: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        excluded: &HashSet<String>,
+    ) -> FetchResult {
+        let mut repositories = Vec::new();
+        if !excluded.contains(preferred)
+            && let Some(repository) = self.routes.repository(preferred)
+        {
+            repositories.push((
+                repository.clone(),
+                Some(ConditionalHeaders {
+                    etag: etag.map(str::to_owned),
+                    last_modified: last_modified.map(str::to_owned),
+                }),
+            ));
+        }
+        repositories.extend(
+            self.routes
+                .candidates(relative_path)
+                .into_iter()
+                .filter(|repository| {
+                    repository.name != preferred && !excluded.contains(&repository.name)
+                })
+                .cloned()
+                .map(|repository| (repository, None)),
+        );
+        self.fetch_ordered(relative_path, repositories).await
+    }
+
+    pub async fn fetch_from(&self, repository: &str, relative_path: &str) -> FetchResult {
+        let Some(repository) = self.routes.repository(repository).cloned() else {
+            return FetchResult::GatewayFailure;
+        };
+        self.fetch_ordered(relative_path, vec![(repository, None)])
+            .await
+    }
+
+    pub fn record_body_success(&self, repository: &str) {
+        self.circuits.record_success(repository);
+    }
+
+    pub fn record_body_failure(&self, repository: &str) {
+        self.circuits.record_failure(repository);
+    }
+
+    async fn fetch_ordered(
+        &self,
+        relative_path: &str,
+        repositories: Vec<(RepositoryConfig, Option<ConditionalHeaders>)>,
+    ) -> FetchResult {
         let mut gateway_failure = false;
 
-        for repository in candidates {
+        for (repository, conditional) in repositories {
             if !self.circuits.allow(&repository.name) {
                 tracing::debug!(upstream = %repository.name, "skipping open circuit");
                 gateway_failure = true;
                 continue;
             }
-
             let url = match build_url(&repository.url, relative_path) {
                 Ok(url) => url,
                 Err(error) => {
@@ -72,12 +144,19 @@ impl UpstreamClient {
                 }
             };
 
-            match self.fetch_repository(repository, url).await {
+            match self
+                .fetch_repository(&repository, url, conditional.as_ref())
+                .await
+            {
                 RepositoryResult::Found(response) => {
                     return FetchResult::Found {
-                        repository: repository.name.clone(),
+                        repository: repository.name,
                         response,
                     };
+                }
+                RepositoryResult::NotModified => {
+                    self.circuits.record_success(&repository.name);
+                    return FetchResult::NotModified;
                 }
                 RepositoryResult::NotFound => self.circuits.record_success(&repository.name),
                 RepositoryResult::GatewayFailure { breaker_failure } => {
@@ -98,19 +177,29 @@ impl UpstreamClient {
         }
     }
 
-    pub fn record_body_success(&self, repository: &str) {
-        self.circuits.record_success(repository);
-    }
-
-    pub fn record_body_failure(&self, repository: &str) {
-        self.circuits.record_failure(repository);
-    }
-
-    async fn fetch_repository(&self, repository: &RepositoryConfig, url: Url) -> RepositoryResult {
+    async fn fetch_repository(
+        &self,
+        repository: &RepositoryConfig,
+        url: Url,
+        conditional: Option<&ConditionalHeaders>,
+    ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
-            match self.client.get(url.clone()).send().await {
+            let mut request = self.client.get(url.clone());
+            if let Some(conditional) = conditional {
+                if let Some(etag) = &conditional.etag {
+                    request = request.header(IF_NONE_MATCH, etag);
+                }
+                if let Some(last_modified) = &conditional.last_modified {
+                    request = request.header(IF_MODIFIED_SINCE, last_modified);
+                }
+            }
+
+            match request.send().await {
                 Ok(response) if response.status() == StatusCode::OK => {
                     return RepositoryResult::Found(response);
+                }
+                Ok(response) if response.status() == StatusCode::NOT_MODIFIED => {
+                    return RepositoryResult::NotModified;
                 }
                 Ok(response) if response.status() == StatusCode::NOT_FOUND => {
                     return RepositoryResult::NotFound;
@@ -170,6 +259,7 @@ impl UpstreamClient {
 
 enum RepositoryResult {
     Found(reqwest::Response),
+    NotModified,
     NotFound,
     GatewayFailure { breaker_failure: bool },
 }

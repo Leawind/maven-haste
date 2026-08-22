@@ -180,4 +180,18 @@ mod tests {
         assert!(root.is_dir());
         assert!(!config.tmp_dir().join("abandoned.part").exists());
     }
+
+    #[tokio::test]
+    async fn rename_atomically_replaces_existing_file() {
+        let directory = TempDir::new().unwrap();
+        let source = directory.path().join("source.part");
+        let destination = directory.path().join("destination.jar");
+        fs::write(&source, b"new").await.unwrap();
+        fs::write(&destination, b"old").await.unwrap();
+
+        fs::rename(&source, &destination).await.unwrap();
+
+        assert_eq!(fs::read(&destination).await.unwrap(), b"new");
+        assert!(!source.exists());
+    }
 }
