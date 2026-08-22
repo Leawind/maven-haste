@@ -58,6 +58,13 @@ pub struct ArtifactRecord {
     pub is_not_found: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DatabaseStats {
+    pub files: u64,
+    pub total_size: u64,
+    pub negative_entries: u64,
+}
+
 impl Database {
     pub async fn open(path: &Path) -> Result<Self, AppError> {
         let config = Config::new(path);
@@ -192,6 +199,38 @@ impl Database {
                     params![path, timestamp],
                 )?;
                 Ok(())
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn ping(&self) -> Result<(), AppError> {
+        let connection = self.connection().await?;
+        connection
+            .interact(|connection| connection.query_row("SELECT 1", [], |_| Ok(())))
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn stats(&self) -> Result<DatabaseStats, AppError> {
+        let connection = self.connection().await?;
+        connection
+            .interact(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FILTER (WHERE is_not_found = 0), \
+                     COALESCE(SUM(file_size) FILTER (WHERE is_not_found = 0), 0), \
+                     COUNT(*) FILTER (WHERE is_not_found = 1) FROM artifacts",
+                    [],
+                    |row| {
+                        Ok(DatabaseStats {
+                            files: row.get::<_, u64>(0)?,
+                            total_size: row.get::<_, u64>(1)?,
+                            negative_entries: row.get::<_, u64>(2)?,
+                        })
+                    },
+                )
             })
             .await
             .map_err(worker_error)?

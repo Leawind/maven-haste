@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures_util::StreamExt;
 use reqwest::header::{ETAG, LAST_MODIFIED};
+use serde::Serialize;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use tokio::fs::{self, OpenOptions};
@@ -38,12 +40,49 @@ struct CacheInner {
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
     refresh_permits: Arc<Semaphore>,
+    requests: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    stale_hits: AtomicU64,
+    negative_hits: AtomicU64,
 }
 
 #[derive(Debug)]
 pub struct CachedArtifact {
     pub file_path: PathBuf,
     pub record: ArtifactRecord,
+    pub status: CacheStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheStatus {
+    Hit,
+    Miss,
+    Stale,
+}
+
+impl CacheStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheStats {
+    pub files: u64,
+    pub total_size: u64,
+    pub negative_entries: u64,
+    pub requests: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub stale_hits: u64,
+    pub negative_hits: u64,
+    pub hit_rate: f64,
+    pub upstreams: Vec<crate::upstream::UpstreamStatus>,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -99,11 +138,17 @@ impl CacheManager {
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
                 refresh_permits: Arc::new(Semaphore::new(config.cache.refresh_max_concurrency)),
+                requests: AtomicU64::new(0),
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
+                stale_hits: AtomicU64::new(0),
+                negative_hits: AtomicU64::new(0),
             }),
         })
     }
 
     pub async fn get(&self, request: &MavenPath) -> Result<CachedArtifact, CacheFailure> {
+        self.inner.requests.fetch_add(1, Ordering::Relaxed);
         let record = self
             .inner
             .database
@@ -115,18 +160,26 @@ impl CacheManager {
             if let Some(record) = record.as_ref().filter(|record| record.is_not_found)
                 && is_fresh(record, self.inner.config.negative_ttl)
             {
+                self.inner.hits.fetch_add(1, Ordering::Relaxed);
+                self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
                 return Err(CacheFailure::NotFound);
             }
-            if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
-                if !is_fresh(&cached.record, self.inner.config.metadata_ttl) {
+            if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
+                let stale = !is_fresh(&cached.record, self.inner.config.metadata_ttl);
+                if stale {
+                    cached.status = CacheStatus::Stale;
+                    self.inner.stale_hits.fetch_add(1, Ordering::Relaxed);
                     self.trigger_refresh(request.clone(), cached.record.clone());
                 }
+                self.inner.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(cached);
             }
         } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
+            self.inner.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(cached);
         }
 
+        self.inner.misses.fetch_add(1, Ordering::Relaxed);
         self.synchronous_download(request).await?;
         let record = self
             .inner
@@ -137,11 +190,55 @@ impl CacheManager {
         if record.as_ref().is_some_and(|record| record.is_not_found) {
             return Err(CacheFailure::NotFound);
         }
-        self.positive_cache(request, record.as_ref())
+        let mut cached = self
+            .positive_cache(request, record.as_ref())
             .await?
             .ok_or_else(|| {
                 CacheFailure::Internal("download completed without a cache record".into())
-            })
+            })?;
+        cached.status = CacheStatus::Miss;
+        Ok(cached)
+    }
+
+    pub async fn health(&self) -> Result<(), CacheFailure> {
+        self.inner.database.ping().await.map_err(internal)?;
+        for path in [&self.inner.storage.root, self.inner.storage.tmp_dir()] {
+            let metadata = fs::metadata(path).await.map_err(|error| {
+                CacheFailure::Internal(format!(
+                    "failed to inspect storage path {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if !metadata.is_dir() {
+                return Err(CacheFailure::Internal(format!(
+                    "storage path {} is not a directory",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn stats(&self) -> Result<CacheStats, CacheFailure> {
+        let database = self.inner.database.stats().await.map_err(internal)?;
+        let requests = self.inner.requests.load(Ordering::Relaxed);
+        let hits = self.inner.hits.load(Ordering::Relaxed);
+        Ok(CacheStats {
+            files: database.files,
+            total_size: database.total_size,
+            negative_entries: database.negative_entries,
+            requests,
+            hits,
+            misses: self.inner.misses.load(Ordering::Relaxed),
+            stale_hits: self.inner.stale_hits.load(Ordering::Relaxed),
+            negative_hits: self.inner.negative_hits.load(Ordering::Relaxed),
+            hit_rate: if requests == 0 {
+                0.0
+            } else {
+                hits as f64 / requests as f64
+            },
+            upstreams: self.inner.upstream.statuses(),
+        })
     }
 
     async fn synchronous_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
@@ -173,6 +270,7 @@ impl CacheManager {
             Ok(metadata) if metadata.is_file() => Ok(Some(CachedArtifact {
                 file_path,
                 record: record.clone(),
+                status: CacheStatus::Hit,
             })),
             Ok(_) => Ok(None),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),

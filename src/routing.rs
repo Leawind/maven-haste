@@ -22,6 +22,10 @@ impl RouteEngine {
             .iter()
             .find(|repository| repository.name == name)
     }
+
+    pub fn repositories(&self) -> &[RepositoryConfig] {
+        &self.repositories
+    }
 }
 
 fn participates(repository: &RepositoryConfig, path: &str) -> bool {

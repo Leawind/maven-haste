@@ -60,6 +60,29 @@ impl CircuitBreaker {
             }
         }
     }
+
+    pub fn status(&self, repository: &str) -> CircuitStatus {
+        let Some(state) = self.states.get(repository) else {
+            return CircuitStatus {
+                state: "closed",
+                failures: 0,
+            };
+        };
+        CircuitStatus {
+            state: match state.mode {
+                CircuitMode::Closed => "closed",
+                CircuitMode::Open { .. } => "open",
+                CircuitMode::HalfOpen { .. } => "half_open",
+            },
+            failures: state.failures,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CircuitStatus {
+    pub state: &'static str,
+    pub failures: u32,
 }
 
 #[derive(Debug)]
@@ -109,5 +132,19 @@ mod tests {
         assert!(!breaker.allow("central"));
         breaker.record_success("central");
         assert!(breaker.allow("central"));
+    }
+
+    #[test]
+    fn reports_current_status_without_mutating_unknown_repositories() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(60));
+        assert_eq!(
+            breaker.status("central"),
+            CircuitStatus {
+                state: "closed",
+                failures: 0
+            }
+        );
+        breaker.record_failure("central");
+        assert_eq!(breaker.status("central").state, "open");
     }
 }

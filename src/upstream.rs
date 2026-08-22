@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{Client, StatusCode, Url};
+use serde::Serialize;
 
 use crate::circuit::CircuitBreaker;
 use crate::config::{CircuitBreakerConfig, RepositoryConfig};
@@ -27,6 +28,13 @@ pub enum FetchResult {
     NotModified,
     NotFound,
     GatewayFailure,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpstreamStatus {
+    pub name: String,
+    pub circuit: String,
+    pub failures: u32,
 }
 
 #[derive(Clone)]
@@ -120,6 +128,21 @@ impl UpstreamClient {
 
     pub fn record_body_failure(&self, repository: &str) {
         self.circuits.record_failure(repository);
+    }
+
+    pub fn statuses(&self) -> Vec<UpstreamStatus> {
+        self.routes
+            .repositories()
+            .iter()
+            .map(|repository| {
+                let status = self.circuits.status(&repository.name);
+                UpstreamStatus {
+                    name: repository.name.clone(),
+                    circuit: status.state.into(),
+                    failures: status.failures,
+                }
+            })
+            .collect()
     }
 
     async fn fetch_ordered(

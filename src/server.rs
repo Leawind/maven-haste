@@ -1,8 +1,12 @@
+use std::time::Instant;
+
+use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use axum::http::{HeaderValue, Method, Response, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use tokio::fs::File;
 use tokio::net::TcpListener;
@@ -41,8 +45,33 @@ pub fn router(base_path: String, cache: CacheManager) -> Router {
         format!("{base_path}/{{*path}}")
     };
     Router::new()
+        .route("/__health", get(health))
+        .route("/__cache/stats", get(cache_stats))
         .route(&route, get(artifact).head(artifact))
         .with_state(AppState { cache, base_path })
+}
+
+async fn health(State(state): State<AppState>) -> Response<Body> {
+    match state.cache.health().await {
+        Ok(()) => Response::new(Body::from("OK")),
+        Err(error) => {
+            tracing::error!(%error, "health check failed");
+            error_response(StatusCode::SERVICE_UNAVAILABLE, "unhealthy")
+        }
+    }
+}
+
+async fn cache_stats(State(state): State<AppState>) -> Response<Body> {
+    match state.cache.stats().await {
+        Ok(stats) => Json(stats).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "failed to collect cache statistics");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cache statistics unavailable",
+            )
+        }
+    }
 }
 
 async fn artifact(
@@ -50,22 +79,73 @@ async fn artifact(
     OriginalUri(uri): OriginalUri,
     method: Method,
 ) -> Response<Body> {
+    let started = Instant::now();
     let request = match MavenPath::parse(uri.path(), &state.base_path) {
         Ok(request) => request,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => {
+            let response = error_response(StatusCode::BAD_REQUEST, error.to_string());
+            log_request(uri.path(), &method, &response, "invalid", None, started);
+            return response;
+        }
     };
 
-    match state.cache.get(&request).await {
-        Ok(cached) => cached_response(cached, method == Method::HEAD).await,
-        Err(CacheFailure::NotFound) => error_response(StatusCode::NOT_FOUND, "artifact not found"),
-        Err(CacheFailure::Gateway) => {
-            error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed")
+    let (response, cache_status, upstream) = match state.cache.get(&request).await {
+        Ok(cached) => {
+            let cache_status = cached.status.as_str();
+            let upstream = cached.record.upstream.clone();
+            (
+                cached_response(cached, method == Method::HEAD).await,
+                cache_status,
+                Some(upstream),
+            )
         }
+        Err(CacheFailure::NotFound) => (
+            error_response(StatusCode::NOT_FOUND, "artifact not found"),
+            "none",
+            None,
+        ),
+        Err(CacheFailure::Gateway) => (
+            error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed"),
+            "none",
+            None,
+        ),
         Err(CacheFailure::Internal(error)) => {
             tracing::error!(path = request.relative(), %error, "cache request failed");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error")
+            (
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error"),
+                "error",
+                None,
+            )
         }
-    }
+    };
+    log_request(
+        request.relative(),
+        &method,
+        &response,
+        cache_status,
+        upstream.as_deref(),
+        started,
+    );
+    response
+}
+
+fn log_request(
+    path: &str,
+    method: &Method,
+    response: &Response<Body>,
+    cache: &str,
+    upstream: Option<&str>,
+    started: Instant,
+) {
+    tracing::info!(
+        %method,
+        path,
+        status = response.status().as_u16(),
+        cache,
+        upstream = upstream.unwrap_or("-"),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "HTTP request"
+    );
 }
 
 async fn cached_response(cached: CachedArtifact, head: bool) -> Response<Body> {
@@ -212,6 +292,53 @@ mod tests {
         assert_eq!(record.group_id, "com.example");
         assert_eq!(record.artifact_id, "demo");
         assert_eq!(record.upstream, "central");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn reports_health_and_cache_statistics() {
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                if is_checksum_uri(&uri) {
+                    error_response(StatusCode::NOT_FOUND, "missing checksum")
+                } else {
+                    Response::new(Body::from("abc"))
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+        let health = request(&app, Method::GET, "/__health").await;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(body(health).await, "OK");
+
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::OK
+        );
+        let stats = request(&app, Method::GET, "/__cache/stats").await;
+        assert_eq!(stats.status(), StatusCode::OK);
+        assert_eq!(stats.headers()[CONTENT_TYPE], "application/json");
+        let stats = body(stats).await;
+        for expected in [
+            "\"files\":3",
+            "\"total_size\":109",
+            "\"requests\":2",
+            "\"hits\":1",
+            "\"misses\":1",
+            "\"hit_rate\":0.5",
+            "\"name\":\"central\"",
+            "\"circuit\":\"closed\"",
+        ] {
+            assert!(stats.contains(expected), "missing {expected} in {stats}");
+        }
         task.abort();
     }
 
