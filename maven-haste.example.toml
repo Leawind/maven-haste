@@ -1,0 +1,26 @@
+[server]
+bind = '127.0.0.1:8080'
+base_path = '/maven'
+
+[storage]
+root = './repository'
+
+[cache]
+metadata_ttl = '5m'
+negative_ttl = '5m'
+refresh_max_concurrency = 10
+refresh_timeout = '10s'
+serve_stale_on_error = true
+
+[circuit_breaker]
+failure_threshold = 3
+recovery_timeout = '30s'
+
+[[repositories]]
+name = 'fabric'
+url = 'https://maven.fabricmc.net/'
+rules = ['net/fabricmc/*', '!*']
+
+[[repositories]]
+name = 'central'
+url = 'https://repo1.maven.org/maven2/'
