@@ -294,6 +294,9 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         || config.server.base_path.contains('?')
         || config.server.base_path.contains('#')
         || config.server.base_path.contains("//")
+        || !config.server.base_path.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '-' | '_' | '.')
+        })
         || config
             .server
             .base_path
@@ -306,6 +309,17 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     }
     if config.storage.root.as_os_str().is_empty() {
         return Err(ConfigError::new("storage.root must not be empty"));
+    }
+    let internal = config.storage.root.join(".maven-haste");
+    for (name, path) in [
+        ("storage.tmp_dir", config.storage.tmp_dir()),
+        ("storage.db_path", config.storage.db_path()),
+    ] {
+        if path_is_within(path, &config.storage.root) && !path_is_within(path, &internal) {
+            return Err(ConfigError::new(format!(
+                "{name} must be outside storage.root or inside its reserved .maven-haste directory"
+            )));
+        }
     }
     if config.cache.refresh_max_concurrency == 0 {
         return Err(ConfigError::new(
@@ -387,6 +401,26 @@ fn validate_rule(repository: &str, rule: &str) -> Result<(), ConfigError> {
         )));
     }
     Ok(())
+}
+
+fn path_is_within(path: &Path, base: &Path) -> bool {
+    let mut path_components = path.components();
+    base.components().all(|base_component| {
+        path_components.next().is_some_and(|path_component| {
+            component_eq(path_component.as_os_str(), base_component.as_os_str())
+        })
+    })
+}
+
+#[cfg(windows)]
+fn component_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn component_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left == right
 }
 
 #[cfg(test)]
@@ -514,5 +548,29 @@ url = "https://repo.example/"
         assert!(serialized.contains("metadata_ttl = \"5m\""));
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.storage.root, loaded.config.storage.root);
+    }
+
+    #[test]
+    fn rejects_internal_files_in_addressable_repository_paths() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+db_path = "repository/com/example/cache.db"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let error = load(&cli(&path)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reserved .maven-haste directory")
+        );
     }
 }

@@ -1,8 +1,14 @@
+mod cache;
+mod circuit;
 mod cli;
 mod config;
 mod db;
 mod error;
+mod request_path;
+mod routing;
+mod server;
 mod storage;
+mod upstream;
 
 use std::process::ExitCode;
 
@@ -46,9 +52,14 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         "storage initialized"
     );
 
-    let _database = db::Database::open(loaded.config.storage.db_path()).await?;
-    tracing::info!("initialization complete");
-    Ok(())
+    let database = db::Database::open(loaded.config.storage.db_path()).await?;
+    let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
+    server::serve(
+        loaded.config.server.bind,
+        loaded.config.server.base_path,
+        cache,
+    )
+    .await
 }
 
 fn init_tracing() -> Result<(), AppError> {
