@@ -311,6 +311,9 @@ impl CacheManager {
                 }
                 Err(CacheFailure::NotFound)
             }
+            PreparedFetch::Gateway if request.policy() == CachePolicy::Permanent => {
+                Err(CacheFailure::NotFound)
+            }
             PreparedFetch::Gateway | PreparedFetch::NotModified => Err(CacheFailure::Gateway),
         }
     }

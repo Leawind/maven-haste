@@ -500,6 +500,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn distinguishes_permanent_and_mutable_upstream_failures() {
+        let directory = TempDir::new().unwrap();
+        let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
+        let cache_config = CacheConfig {
+            refresh_timeout: Duration::from_millis(100),
+            ..CacheConfig::default()
+        };
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("unreachable", &unreachable, &[])],
+            cache_config,
+        )
+        .await;
+
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                &app,
+                Method::GET,
+                "/maven/com/example/demo/maven-metadata.xml",
+            )
+            .await
+            .status(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[tokio::test]
     async fn returns_stale_metadata_while_refreshing_in_background() {
         let calls = Arc::new(AtomicUsize::new(0));
         let handler_calls = Arc::clone(&calls);
@@ -523,8 +554,10 @@ mod tests {
         );
         let (url, task) = spawn_upstream(upstream).await;
         let directory = TempDir::new().unwrap();
-        let mut cache_config = CacheConfig::default();
-        cache_config.metadata_ttl = Duration::ZERO;
+        let cache_config = CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        };
         let (app, _) = test_app_with_cache(
             &directory,
             vec![repository("central", &url, &[])],
@@ -592,8 +625,10 @@ mod tests {
         );
         let (url, task) = spawn_upstream(upstream).await;
         let directory = TempDir::new().unwrap();
-        let mut cache_config = CacheConfig::default();
-        cache_config.metadata_ttl = Duration::ZERO;
+        let cache_config = CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        };
         let (app, _) = test_app_with_cache(
             &directory,
             vec![repository("central", &url, &[])],
@@ -670,8 +705,10 @@ mod tests {
         );
         let (url, task) = spawn_upstream(upstream).await;
         let directory = TempDir::new().unwrap();
-        let mut cache_config = CacheConfig::default();
-        cache_config.negative_ttl = Duration::ZERO;
+        let cache_config = CacheConfig {
+            negative_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        };
         let (app, _) = test_app_with_cache(
             &directory,
             vec![repository("central", &url, &[])],
