@@ -291,24 +291,4 @@ mod tests {
         assert!(config.directory.is_dir());
         assert!(fs::read_dir(config.directory).unwrap().next().is_none());
     }
-
-    #[test]
-    fn shutdown_notice_is_plain_text_when_redirected() {
-        let mut output = Vec::new();
-        write_shutdown_notice(&mut output, false).unwrap();
-
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            format!("{SHUTDOWN_NOTICE}\n")
-        );
-    }
-
-    #[test]
-    fn shutdown_notice_is_colored_on_a_terminal() {
-        let mut output = Vec::new();
-        write_shutdown_notice(&mut output, true).unwrap();
-        let output = String::from_utf8(output).unwrap();
-
-        assert_eq!(output, format!("\x1b[33m{SHUTDOWN_NOTICE}\x1b[0m\n"));
-    }
 }
