@@ -1,10 +1,13 @@
+| [中文](README.zh.md) | English |
+| -------------------- | ------- |
+
 # Maven Haste
 
-Maven Haste 是本地 Maven 仓库代理缓存服务。固定版本文件会永久缓存；`maven-metadata.xml` 和 `-SNAPSHOT` 别名使用 stale-while-revalidate，并支持负缓存、校验和验证、按请求路径路由和上游熔断。
+Maven Haste is a local Maven repository proxy cache. Fixed-version files are cached permanently; `maven-metadata.xml` and `-SNAPSHOT` aliases use stale-while-revalidate, with support for negative caching, checksum verification, per-path routing, and upstream circuit breaking.
 
-## 开始使用
+## Getting Started
 
-从 [Releases](https://github.com/Leawind/maven-haste/releases) 下载可执行文件，或自行构建后运行：
+Download a binary from [Releases](https://github.com/Leawind/maven-haste/releases), or build it yourself and run:
 
 ```bash
 maven-haste config init
@@ -12,17 +15,17 @@ maven-haste check -c ./maven-haste.toml
 maven-haste run -c ./maven-haste.toml
 ```
 
-`config init` 会在当前目录创建带英文注释的示例配置，且绝不覆盖已有文件；`config example` 可将同一示例输出到终端。`check` 会检查配置和存储目录后退出；不指定 `-c/--config` 时，程序会依次在当前目录和系统用户配置目录中查找 `maven-haste.toml`。配置中的相对存储路径始终相对于配置文件所在目录解析。
+`config init` creates a sample config with English comments in the current directory and never overwrites existing files; `config example` prints the same sample to the terminal. `check` validates the config and storage directory, then exits. Without `-c/--config`, the program looks for `maven-haste.toml` in the current directory, then in the system user config directory. Relative storage paths in the config are always resolved relative to the config file's directory.
 
-按需修改生成配置中的缓存目录、监听地址与上游仓库。仓库 `rules` 是有序的请求路径 glob：首条匹配规则决定该仓库是否参与，`!` 表示排除，`*` 可以跨 `/` 匹配；省略 `rules` 表示全局 fallback。
+Edit the generated config to adjust cache directories, listen addresses, and upstream repositories. Repository `rules` are ordered request-path globs: the first matching rule decides whether that repository participates, `!` means exclude, and `*` matches across `/`. Omitting `rules` makes the repository a global fallback.
 
-`[upstream]` 中的 `connect_timeout` 限制建立上游连接的时间，`read_timeout` 限制每次响应体读取允许的空闲时间；每收到一个数据块，读取计时就会重置，因此不会限制大文件的总下载时长。旧的 `cache.refresh_timeout` 已被删除，升级配置时请改用这两个字段。
+In `[upstream]`, `connect_timeout` limits how long establishing an upstream connection may take, and `read_timeout` limits idle time allowed per response body read; the read timer resets on every chunk received, so it does not cap total download time for large files. The old `cache.refresh_timeout` has been removed — use these two fields instead when upgrading configs.
 
-上游请求同时受 `max_concurrency` 全局上限和 `default_repository_max_concurrency` 单仓库默认上限约束；仓库可通过自身的 `max_concurrency` 覆盖后者。首次下载优先于后台缓存更新，但两类请求都会排队并最终执行；`foreground_priority_burst` 控制持续繁忙时每放行多少个首次下载后给缓存更新一次执行机会。
+Upstream requests are bounded by a global `max_concurrency` and a per-repository default `default_repository_max_concurrency`; individual repositories can override the latter with their own `max_concurrency`. First-time downloads take priority over background cache refreshes, but both are queued and eventually executed; `foreground_priority_burst` controls how many first-time downloads are admitted before a cache refresh gets a turn under sustained load.
 
-## Gradle 接入
+## Gradle Integration
 
-在 `~/.gradle/init.d/maven-haste.gradle`（Windows 为 `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`）中加入：
+Add the following to `~/.gradle/init.d/maven-haste.gradle` (on Windows: `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`):
 
 ```gradle
 allprojects {
@@ -41,20 +44,20 @@ allprojects {
 }
 ```
 
-代理仓库会被置于项目已有仓库之前。若 Maven Haste 未启动，Gradle 会连接失败并继续尝试后续仓库。
+The proxy repository is placed before the project's existing repositories. If Maven Haste is not running, Gradle will fail to connect and fall through to the remaining repositories.
 
-## 缓存行为
+## Caching Behavior
 
-- 固定版本、时间戳快照及其校验和文件首次下载后永久缓存。
-- `maven-metadata.xml` 与 `-SNAPSHOT` 别名会在 TTL 到期后立即返回旧缓存，并在后台刷新。
-- 上游未提供 `.sha1` 或 `.sha256` 时，服务会计算并生成对应文件。
-- 仅可变文件的上游 404 会被短暂负缓存，避免重复请求。
+- Fixed versions, timestamped snapshots, and their checksum files are cached permanently after first download.
+- `maven-metadata.xml` and `-SNAPSHOT` aliases serve stale cached content immediately after TTL expiry and refresh in the background.
+- When the upstream does not provide `.sha1` or `.sha256`, the service computes and generates the corresponding files.
+- Only upstream 404s for mutable files are briefly negatively cached to avoid repeated requests.
 
-## 运维
+## Operations
 
-- `GET /api/v1/health`：检查 SQLite 连接以及缓存和临时目录，健康时返回 `200 OK`。
-- `GET /api/v1/cache/stats`：返回缓存文件数量和大小、命中率、负缓存数量及上游熔断状态。
+- `GET /api/v1/health`: checks the SQLite connection and cache/temp directories; returns `200 OK` when healthy.
+- `GET /api/v1/cache/stats`: returns cached file count and size, hit rate, negative cache count, and upstream circuit breaker status.
 
-使用 `RUST_LOG` 调整日志级别，例如 `RUST_LOG=maven_haste=debug`。服务收到 Ctrl-C 后会优雅停止接受请求。
+Use `RUST_LOG` to adjust log levels, e.g. `RUST_LOG=maven_haste=debug`. The service gracefully stops accepting requests on Ctrl-C.
 
-也可以在启动时使用 `--verbose` 启用调试日志，例如 `maven-haste --verbose run -c ./maven-haste.toml`；若同时设置了 `RUST_LOG`，环境变量优先。
+You can also enable debug logging at startup with `--verbose`, e.g. `maven-haste --verbose run -c ./maven-haste.toml`; if `RUST_LOG` is also set, the environment variable takes precedence.
