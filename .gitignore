@@ -33,3 +33,7 @@ target/
 
 # docs
 docs-dev/
+
+# maven-haste
+/maven-haste.toml
+/run/
