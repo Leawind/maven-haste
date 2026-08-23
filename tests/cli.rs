@@ -12,7 +12,7 @@ fn check_mode_runs_through_the_built_binary() {
     let config = write_config(&directory, "127.0.0.1:0");
 
     let output = Command::new(binary())
-        .args(["--check", "--config"])
+        .args(["check", "--config"])
         .arg(&config)
         .output()
         .unwrap();
@@ -35,6 +35,7 @@ fn check_mode_runs_through_the_built_binary() {
 fn missing_explicit_config_exits_with_configuration_error() {
     let directory = TempDir::new().unwrap();
     let output = Command::new(binary())
+        .arg("run")
         .arg("--config")
         .arg(directory.path().join("missing.toml"))
         .output()
@@ -49,11 +50,57 @@ fn missing_explicit_config_exits_with_configuration_error() {
 }
 
 #[test]
+fn config_init_creates_a_commented_example_without_overwriting() {
+    let directory = TempDir::new().unwrap();
+    let first = Command::new(binary())
+        .args(["config", "init"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(first.status.success());
+    assert!(
+        String::from_utf8(first.stdout)
+            .unwrap()
+            .contains("next: maven-haste check")
+    );
+    let config = std::fs::read_to_string(directory.path().join("maven-haste.toml")).unwrap();
+    assert!(config.contains("# Address on which Maven Haste accepts HTTP requests."));
+    assert!(config.contains("negative_ttl = '5m'"));
+
+    let second = Command::new(binary())
+        .args(["config", "init"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8(second.stderr)
+            .unwrap()
+            .contains("refusing to create configuration")
+    );
+}
+
+#[test]
+fn config_example_prints_the_embedded_commented_template() {
+    let output = Command::new(binary())
+        .args(["config", "example"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let example = String::from_utf8(output.stdout).unwrap();
+    assert!(example.contains("# Base URL of the upstream Maven repository."));
+    assert!(example.contains("url = 'https://repo1.maven.org/maven2/'"));
+}
+
+#[test]
 fn running_binary_serves_health_endpoint() {
     let directory = TempDir::new().unwrap();
     let address = unused_address();
     let config = write_config(&directory, &address.to_string());
     let child = Command::new(binary())
+        .arg("run")
         .arg("--config")
         .arg(config)
         .stdout(Stdio::null())

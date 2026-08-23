@@ -12,6 +12,13 @@ use crate::cli::Cli;
 use crate::error::ConfigError;
 
 const CONFIG_FILE_NAME: &str = "maven-haste.toml";
+pub const EXAMPLE_CONFIG: &str = include_str!("../maven-haste.example.toml");
+
+pub fn default_config_path() -> Result<PathBuf, ConfigError> {
+    let current_dir = env::current_dir()
+        .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
+    Ok(current_dir.join(CONFIG_FILE_NAME))
+}
 
 #[derive(Debug)]
 pub struct LoadedConfig {
@@ -215,7 +222,7 @@ fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(ConfigError::new(format!(
-        "configuration file not found; attempted:\n{paths}\ncreate one or pass --config <PATH>"
+        "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
     )))
 }
 

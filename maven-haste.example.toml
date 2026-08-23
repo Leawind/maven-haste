@@ -1,28 +1,46 @@
 [server]
+# Address on which Maven Haste accepts HTTP requests.
 bind = '127.0.0.1:8080'
+# URL prefix for the local Maven repository endpoint.
 base_path = '/maven'
 
 [storage]
+# Directory used for cached artifacts, temporary downloads, and the SQLite database.
+# Relative paths are resolved relative to this configuration file.
 root = './repository'
 
 [cache]
+# How long mutable metadata may be served before a background refresh starts.
 metadata_ttl = '5m'
+# How long a confirmed 404 is remembered for one path in one upstream repository.
 negative_ttl = '5m'
+# Maximum number of simultaneous background metadata refreshes.
 refresh_max_concurrency = 10
+# Serve the last cached mutable file when refreshing it encounters an upstream failure.
 serve_stale_on_error = true
 
 [upstream]
+# Maximum time allowed to establish a connection to an upstream repository.
 connect_timeout = '10s'
+# Maximum idle time while reading each upstream response body.
+# This is not a limit on the total download time of a large file.
 read_timeout = '60s'
 
 [circuit_breaker]
+# Consecutive upstream failures required before temporarily skipping that repository.
 failure_threshold = 3
+# Time to wait before probing an upstream repository after its circuit opens.
 recovery_timeout = '30s'
 
-[[repositories]]
-name = 'fabric'
-url = 'https://maven.fabricmc.net/'
-rules = ['net/fabricmc/*', '!*']
+# # Upstream repositories
+# [[repositories]]
+# # A human-readable name shown in logs and cache statistics.
+# name = 'central'
+# # Base URL of the upstream Maven repository.
+# url = 'https://repo1.maven.org/maven2/'
+# # Ordered request-path glob rules. The first matching rule decides participation.
+# # Prefix a rule with ! to exclude it; * may match across path separators.
+# rules = ['*']
 
 [[repositories]]
 name = 'central'

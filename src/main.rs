@@ -10,10 +10,12 @@ mod server;
 mod storage;
 mod upstream;
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Command, ConfigCommand};
 use error::AppError;
 
 #[tokio::main]
@@ -30,17 +32,50 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), AppError> {
+    if let Some(Command::Config {
+        command: ConfigCommand::Init { path },
+    }) = &cli.command
+    {
+        let path = path.as_deref().or(cli.config.as_deref());
+        let path = initialize_config(path)?;
+        println!(
+            "created commented example configuration: {}",
+            path.display()
+        );
+        println!("next: maven-haste check --config {}", path.display());
+        println!("then: maven-haste run --config {}", path.display());
+        return Ok(());
+    }
+    if matches!(
+        cli.command.as_ref(),
+        Some(Command::Config {
+            command: ConfigCommand::Example
+        })
+    ) {
+        print!("{}", config::EXAMPLE_CONFIG);
+        return Ok(());
+    }
+
     let loaded = config::load(&cli)?;
 
-    if cli.print_config {
+    if matches!(
+        cli.command.as_ref(),
+        Some(Command::Config {
+            command: ConfigCommand::Show
+        })
+    ) {
         print!("{}", toml::to_string_pretty(&loaded.config)?);
         return Ok(());
     }
 
     let storage = storage::prepare(&loaded.config.storage).await?;
 
-    if cli.check {
+    if matches!(cli.command.as_ref(), Some(Command::Check)) {
         println!("configuration is valid: {}", loaded.path.display());
+        println!(
+            "start the proxy: maven-haste run --config {}",
+            loaded.path.display()
+        );
         return Ok(());
     }
 
@@ -51,6 +86,11 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         case_sensitive = storage.case_sensitive,
         "storage initialized"
     );
+    tracing::info!(
+        maven_endpoint = %maven_endpoint(loaded.config.server.bind, &loaded.config.server.base_path),
+        health_endpoint = %format!("http://{}/__health", loaded.config.server.bind),
+        "Maven proxy is ready"
+    );
 
     let database = db::Database::open(loaded.config.storage.db_path()).await?;
     let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
@@ -60,6 +100,49 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         cache,
     )
     .await
+}
+
+fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
+    let default_path = config::default_config_path()?;
+    let path = match destination {
+        Some(path) if path.is_absolute() => path.to_owned(),
+        Some(path) => default_path
+            .parent()
+            .expect("current directory configuration path has a parent")
+            .join(path),
+        None => default_path,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to create configuration directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "refusing to create configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+    file.write_all(config::EXAMPLE_CONFIG.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to write configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+    Ok(path)
+}
+
+fn maven_endpoint(bind: std::net::SocketAddr, base_path: &str) -> String {
+    format!("http://{bind}{base_path}")
 }
 
 fn init_tracing() -> Result<(), AppError> {
@@ -97,7 +180,7 @@ url = "https://repo.example/"
         .unwrap();
         let cli = Cli::try_parse_from([
             "maven-haste",
-            "--check",
+            "check",
             "--config",
             config_path.to_str().unwrap(),
         ])

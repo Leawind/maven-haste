@@ -7,13 +7,14 @@ Maven Haste 是本地 Maven 仓库代理缓存服务。固定版本文件会永�
 从 [Releases](https://github.com/Leawind/maven-haste/releases) 下载可执行文件，或自行构建后运行：
 
 ```bash
-maven-haste --check -c ./maven-haste.toml
-maven-haste -c ./maven-haste.toml
+maven-haste config init
+maven-haste check -c ./maven-haste.toml
+maven-haste run -c ./maven-haste.toml
 ```
 
-`--check` 会检查配置和存储目录后退出；不指定 `-c/--config` 时，程序会依次在当前目录和系统用户配置目录中查找 `maven-haste.toml`。配置中的相对存储路径始终相对于配置文件所在目录解析。
+`config init` 会在当前目录创建带英文注释的示例配置，且绝不覆盖已有文件；`config example` 可将同一示例输出到终端。`check` 会检查配置和存储目录后退出；不指定 `-c/--config` 时，程序会依次在当前目录和系统用户配置目录中查找 `maven-haste.toml`。配置中的相对存储路径始终相对于配置文件所在目录解析。
 
-将 [maven-haste.example.toml](./maven-haste.example.toml) 复制为 `maven-haste.toml` 后，按需修改缓存目录、监听地址与上游仓库。仓库 `rules` 是有序的请求路径 glob：首条匹配规则决定该仓库是否参与，`!` 表示排除，`*` 可以跨 `/` 匹配；省略 `rules` 表示全局 fallback。
+按需修改生成配置中的缓存目录、监听地址与上游仓库。仓库 `rules` 是有序的请求路径 glob：首条匹配规则决定该仓库是否参与，`!` 表示排除，`*` 可以跨 `/` 匹配；省略 `rules` 表示全局 fallback。
 
 `[upstream]` 中的 `connect_timeout` 限制建立上游连接的时间，`read_timeout` 限制每次响应体读取允许的空闲时间；每收到一个数据块，读取计时就会重置，因此不会限制大文件的总下载时长。旧的 `cache.refresh_timeout` 已被删除，升级配置时请改用这两个字段。
 
