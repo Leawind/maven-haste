@@ -323,8 +323,13 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response<Bo
 }
 
 async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to install Ctrl-C handler");
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => {
+            if let Err(error) = crate::logging::notify_shutdown_requested() {
+                tracing::error!(%error, "failed to print shutdown notice");
+            }
+        }
+        Err(error) => tracing::error!(%error, "failed to install Ctrl-C handler"),
     }
 }
 

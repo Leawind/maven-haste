@@ -1,5 +1,6 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,6 +22,24 @@ use crate::error::AppError;
 
 pub struct LoggingGuard {
     _file: Option<WorkerGuard>,
+}
+
+const SHUTDOWN_NOTICE: &str =
+    "Ctrl+C received; shutting down gracefully and waiting for active requests to finish...";
+
+pub fn notify_shutdown_requested() -> io::Result<()> {
+    let stderr = io::stderr();
+    let ansi = stderr.is_terminal();
+    write_shutdown_notice(stderr.lock(), ansi)
+}
+
+fn write_shutdown_notice(mut writer: impl Write, ansi: bool) -> io::Result<()> {
+    if ansi {
+        writeln!(writer, "\x1b[33m{SHUTDOWN_NOTICE}\x1b[0m")?;
+    } else {
+        writeln!(writer, "{SHUTDOWN_NOTICE}")?;
+    }
+    writer.flush()
 }
 
 pub fn validate_directory(config: &FileLoggingConfig) -> Result<(), AppError> {
@@ -271,5 +290,25 @@ mod tests {
         validate_directory(&config).unwrap();
         assert!(config.directory.is_dir());
         assert!(fs::read_dir(config.directory).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn shutdown_notice_is_plain_text_when_redirected() {
+        let mut output = Vec::new();
+        write_shutdown_notice(&mut output, false).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("{SHUTDOWN_NOTICE}\n")
+        );
+    }
+
+    #[test]
+    fn shutdown_notice_is_colored_on_a_terminal() {
+        let mut output = Vec::new();
+        write_shutdown_notice(&mut output, true).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert_eq!(output, format!("\x1b[33m{SHUTDOWN_NOTICE}\x1b[0m\n"));
     }
 }
