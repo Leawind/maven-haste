@@ -3,61 +3,125 @@
 
 # Maven Haste
 
-Maven Haste is a local Maven repository proxy cache. Fixed-version files are cached permanently; `maven-metadata.xml` and `-SNAPSHOT` aliases use stale-while-revalidate, with support for negative caching, checksum verification, per-path routing, and upstream circuit breaking.
+A lightweight, self-hostable local caching proxy for Maven repositories.
+
+It sits between your build tool and upstream Maven repositories: on first request, dependencies are downloaded from upstream and stored locally; subsequent requests are served from cache. Ideal for personal dev machines, LAN build servers, and CI, reducing repeated downloads and improving build reliability on unstable networks.
+
+- Multi-upstream fallback with path-based routing
+- Persistent caching for release versions and timestamped snapshots
+- Background refresh of expired mutable files
+- Negative caching for mutable-file 404s, upstream circuit breaking, and concurrency control
 
 ## Getting Started
 
-Download a binary from [Releases](https://github.com/Leawind/maven-haste/releases), or build it yourself and run:
+maven-haste ships as a single command-line tool.
+
+- Build and install from [crates.io](https://crates.io/crates/maven-haste)
+  ```bash
+  cargo install maven-haste
+  ```
+- Build and install from [source](https://github.com/Leawind/maven-haste)
+  ```bash
+  git clone https://github.com/Leawind/maven-haste
+  cd maven-haste
+  ```
+  ```bash
+  cargo install --path .
+  ```
+- Download from [GitHub Releases](https://github.com/Leawind/maven-haste/releases)
+
+## Running
+
+Generate a config template in the current working directory (never overwrites existing files)
 
 ```bash
-maven-haste config init
-maven-haste check -c ./maven-haste.toml
-maven-haste run -c ./maven-haste.toml
+maven-haste config init [PATH]
 ```
 
-`config init` creates a sample config with English comments in the current directory and never overwrites existing files; `config example` prints the same sample to the terminal. `check` validates the config and storage directory, then exits. Without `-c/--config`, the program looks for `maven-haste.toml` in the current directory, then in the system user config directory. Relative storage paths in the config are always resolved relative to the config file's directory.
+Start using `maven-haste.toml` in the current working directory
 
-Edit the generated config to adjust cache directories, listen addresses, and upstream repositories. Repository `rules` are ordered request-path globs: the first matching rule decides whether that repository participates, `!` means exclude, and `*` matches across `/`. Omitting `rules` makes the repository a global fallback.
+```bash
+maven-haste run
+```
 
-In `[upstream]`, `connect_timeout` limits how long establishing an upstream connection may take, and `read_timeout` limits idle time allowed per response body read; the read timer resets on every chunk received, so it does not cap total download time for large files. The old `cache.refresh_timeout` has been removed — use these two fields instead when upgrading configs.
+Use `-c --config <PATH>` to specify a config file path.
 
-Upstream requests are bounded by a global `max_concurrency` and a per-repository default `default_repository_max_concurrency`; individual repositories can override the latter with their own `max_concurrency`. First-time downloads take priority over background cache refreshes, but both are queued and eventually executed; `foreground_priority_burst` controls how many first-time downloads are admitted before a cache refresh gets a turn under sustained load.
+## Configuration
+
+> [!TIP]
+>
+> See [maven-haste.example.toml](https://github.com/Leawind/maven-haste/blob/main/maven-haste.example.toml) for a full template and descriptions of all options.
+
+Recommended steps:
+
+1. Configure upstream Maven repositories under `[[repositories]]`.
+2. Adjust the listen address and local endpoint prefix in `[server]` as needed.
+3. Set the storage root in `[storage]`. Relative paths are resolved against the config file's directory.
+4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
+5. Run `maven-haste check -c <config>` to validate the config and storage directory before starting.
+
+Without `-c/--config`, maven-haste looks for `maven-haste.toml` in the current directory and the system user config directory. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the TOML file.
+
+### Upstream Routing
+
+Repositories are tried in configuration order. `rules` is an ordered list of glob patterns matched against the Maven relative request path: the first matching rule determines whether the repository participates, `!` means exclude, and `*` matches across `/`. Repositories without `rules` act as a global fallback.
+
+When an upstream lacks a file, fails, or returns a checksum mismatch, the service continues to the next upstream where applicable. Repository names are used for logging, statistics, and circuit breaker identification.
 
 ## Gradle Integration
 
-Add the following to `~/.gradle/init.d/maven-haste.gradle` (on Windows: `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`):
+Add the following to `~/.gradle/init.d/maven-haste.gradle` (`%USERPROFILE%\.gradle\init.d\maven-haste.gradle` on Windows):
 
 ```gradle
 allprojects {
     buildscript.repositories {
         maven {
-            url = uri('http://127.0.0.1:8080/maven')
+            url = uri("${maven_haste_url}")
             allowInsecureProtocol = true
         }
     }
     repositories {
         maven {
-            url = uri('http://127.0.0.1:8080/maven')
+            url = uri("${maven_haste_url}")
             allowInsecureProtocol = true
         }
     }
 }
 ```
 
-The proxy repository is placed before the project's existing repositories. If Maven Haste is not running, Gradle will fail to connect and fall through to the remaining repositories.
+Replace `${maven_haste_url}` with your maven-haste URL, e.g. `http://127.0.0.1:8080/maven`.
 
-## Caching Behavior
+The proxy repository is placed before the project's existing repositories. If Maven Haste is down, Gradle fails to connect and falls through to the remaining repositories.
 
-- Fixed versions, timestamped snapshots, and their checksum files are cached permanently after first download.
-- `maven-metadata.xml` and `-SNAPSHOT` aliases serve stale cached content immediately after TTL expiry and refresh in the background.
-- When the upstream does not provide `.sha1` or `.sha256`, the service computes and generates the corresponding files.
-- Only upstream 404s for mutable files are briefly negatively cached to avoid repeated requests.
+## Details
 
-## Operations
+### Cache Semantics
 
-- `GET /api/v1/health`: checks the SQLite connection and cache/temp directories; returns `200 OK` when healthy.
-- `GET /api/v1/cache/stats`: returns cached file count and size, hit rate, negative cache count, and upstream circuit breaker status.
+- Release versions, timestamped snapshots, and their checksums are cached persistently after successful download.
+- `maven-metadata.xml` and `-SNAPSHOT` aliases are mutable content. When expired, cached content is served immediately while refresh happens in the background.
+- With stale-on-error enabled, stale content continues to be served if background refresh hits upstream failures.
+- Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
+- When upstream provides checksums, downloaded content is verified; on mismatch the source is discarded and others are tried. If `.sha1` or `.sha256` is missing, the service can compute it from file content.
 
-Use `RUST_LOG` to adjust log levels, e.g. `RUST_LOG=maven_haste=debug`. The service gracefully stops accepting requests on Ctrl-C.
+Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes.
 
-You can also enable debug logging at startup with `--verbose`, e.g. `maven-haste --verbose run -c ./maven-haste.toml`; if `RUST_LOG` is also set, the environment variable takes precedence.
+### HTTP API
+
+The local Maven endpoint is set by `[server].base_path`, defaulting to `/maven`. The root path and `/api` are reserved for the service itself and cannot be used as the Maven endpoint.
+
+- `GET /api/v1/health`: checks SQLite, cache directory, and temp directory; returns `200 OK` when healthy, otherwise service unavailable.
+- `GET /api/v1/cache/stats`: returns cached file count, total size, hit rate, negative cache count, and per-upstream circuit breaker status.
+
+Both endpoints are suitable for liveness/readiness checks in containers or process managers. Cache stats are intended for low-frequency monitoring, not per-request polling.
+
+### Logging
+
+Use `RUST_LOG` to adjust log levels, e.g.:
+
+```bash
+RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
+```
+
+`--verbose` also enables debug logging; if both are set, the environment variable takes precedence.
+
+By default logs are not written to a file. Configure `[logging.file]` to set the log path, retention, etc.
