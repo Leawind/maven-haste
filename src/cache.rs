@@ -24,6 +24,7 @@ use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
 
 const MAX_CHECKSUM_BYTES: usize = 64 * 1024;
+const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
 type Flight = OnceCell<Result<(), CacheFailure>>;
 
 #[derive(Clone)]
@@ -280,6 +281,47 @@ impl CacheManager {
     }
 
     async fn download_initial(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+        if let Some(source) = request.generated_checksum_source() {
+            self.synchronous_main_download(&source).await?;
+            let record = self
+                .inner
+                .database
+                .get(request.relative())
+                .await
+                .map_err(internal)?;
+            if self
+                .positive_cache(request, record.as_ref())
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+            return Err(CacheFailure::Internal(format!(
+                "downloaded {} without generating {}",
+                source.relative(),
+                request.relative()
+            )));
+        }
+        self.download_main_initial(request).await
+    }
+
+    async fn synchronous_main_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+        let key = request.relative().to_owned();
+        let flight = self
+            .inner
+            .flights
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        let result = flight
+            .get_or_init(|| async { self.download_main_initial(request).await })
+            .await
+            .clone();
+        self.remove_completed_flight(&key, &flight);
+        result
+    }
+
+    async fn download_main_initial(&self, request: &MavenPath) -> Result<(), CacheFailure> {
         let existing = self
             .inner
             .database
@@ -431,11 +473,11 @@ impl CacheManager {
                         .await
                     {
                         Ok(files) => return Ok(PreparedFetch::Bundle(files)),
-                        Err(BundleError::ChecksumMismatch(error)) => {
+                        Err(BundleError::Unstable(error)) => {
                             upstream_failure = true;
                             excluded.insert(repository.clone());
                             self.inner.upstream.record_body_failure(&repository);
-                            tracing::warn!(upstream = %repository, %error, "upstream checksum mismatch");
+                            tracing::warn!(upstream = %repository, %error, "upstream content remained unstable");
                         }
                         Err(BundleError::Internal(error)) => return Err(error),
                     }
@@ -491,6 +533,9 @@ impl CacheManager {
         downloaded: DownloadedMain,
         priority: RequestPriority,
     ) -> Result<Vec<PreparedFile>, BundleError> {
+        let downloaded = self
+            .select_stable_download(request, repository, downloaded, priority)
+            .await?;
         let now = unix_timestamp();
         let refresh_attempt = (request.policy() == CachePolicy::Mutable).then_some(now);
         let main_record = ArtifactRecord {
@@ -518,44 +563,8 @@ impl CacheManager {
             return Ok(files);
         }
 
-        for (extension, expected) in [
-            ("sha1", downloaded.sha1.as_str()),
-            ("sha256", downloaded.sha256.as_str()),
-        ] {
+        for (extension, expected) in [("sha1", &downloaded.sha1), ("sha256", &downloaded.sha256)] {
             let relative = format!("{}.{extension}", request.relative());
-            if let FetchResult::Found {
-                repository: checksum_repository,
-                repository_id: _,
-                response,
-            } = self
-                .inner
-                .upstream
-                .fetch_from(repository, &relative, priority)
-                .await
-            {
-                let supplied = match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
-                    Ok(supplied) => supplied,
-                    Err(error) => {
-                        cleanup_prepared(&files).await;
-                        return Err(BundleError::ChecksumMismatch(error.to_string()));
-                    }
-                };
-                let parsed = supplied
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if parsed != expected {
-                    cleanup_prepared(&files).await;
-                    return Err(BundleError::ChecksumMismatch(format!(
-                        "{relative} expected {expected}, upstream supplied {parsed}"
-                    )));
-                }
-                self.inner
-                    .upstream
-                    .record_body_success(&checksum_repository);
-            }
-
             let content = format!("{expected}\n");
             let temporary = temporary_path(self.inner.storage.tmp_dir());
             if let Err(error) = write_temporary(&temporary, content.as_bytes()).await {
@@ -583,6 +592,136 @@ impl CacheManager {
             });
         }
         Ok(files)
+    }
+
+    async fn select_stable_download(
+        &self,
+        request: &MavenPath,
+        repository: &str,
+        initial: DownloadedMain,
+        priority: RequestPriority,
+    ) -> Result<DownloadedMain, BundleError> {
+        if request.is_checksum() {
+            return Ok(initial);
+        }
+
+        let mut rejected = Vec::new();
+        let mut candidate = initial;
+        for attempt in 1..=MAX_CHECKSUM_VALIDATION_ATTEMPTS {
+            let issues = self
+                .checksum_issues(request, repository, &candidate, priority)
+                .await;
+            if issues.is_empty() {
+                cleanup_downloads(&rejected).await;
+                if attempt > 1 {
+                    tracing::warn!(
+                        upstream = %repository,
+                        path = request.relative(),
+                        attempt,
+                        "upstream checksum mismatch recovered by retry"
+                    );
+                }
+                return Ok(candidate);
+            }
+
+            if rejected.iter().any(|previous: &DownloadedMain| {
+                previous.sha1 == candidate.sha1 && previous.sha256 == candidate.sha256
+            }) {
+                cleanup_downloads(&rejected).await;
+                tracing::warn!(
+                    upstream = %repository,
+                    path = request.relative(),
+                    issues = %issues.join("; "),
+                    attempt,
+                    "accepting stable upstream content with inconsistent checksums"
+                );
+                return Ok(candidate);
+            }
+
+            rejected.push(candidate);
+            if attempt == MAX_CHECKSUM_VALIDATION_ATTEMPTS {
+                let hashes = rejected
+                    .iter()
+                    .map(|download| download.sha256.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                cleanup_downloads(&rejected).await;
+                return Err(BundleError::Unstable(format!(
+                    "{} produced {attempt} distinct unverified downloads with SHA-256 values {hashes}",
+                    request.relative()
+                )));
+            }
+
+            let retry = match self
+                .inner
+                .upstream
+                .fetch_from(repository, request.relative(), priority)
+                .await
+            {
+                FetchResult::Found { response, .. } => {
+                    self.download_main(repository, response).await.ok()
+                }
+                _ => None,
+            };
+            let Some(retry) = retry else {
+                let accepted = rejected.remove(0);
+                cleanup_downloads(&rejected).await;
+                tracing::warn!(
+                    upstream = %repository,
+                    path = request.relative(),
+                    issues = %issues.join("; "),
+                    attempt,
+                    "accepting complete upstream download after checksum validation retry failed"
+                );
+                return Ok(accepted);
+            };
+            candidate = retry;
+        }
+        unreachable!("checksum validation loop always returns")
+    }
+
+    async fn checksum_issues(
+        &self,
+        request: &MavenPath,
+        repository: &str,
+        downloaded: &DownloadedMain,
+        priority: RequestPriority,
+    ) -> Vec<String> {
+        let mut issues = Vec::new();
+        for (extension, expected) in [("sha1", &downloaded.sha1), ("sha256", &downloaded.sha256)] {
+            let relative = format!("{}.{extension}", request.relative());
+            let FetchResult::Found {
+                repository: checksum_repository,
+                response,
+                ..
+            } = self
+                .inner
+                .upstream
+                .fetch_from(repository, &relative, priority)
+                .await
+            else {
+                continue;
+            };
+            match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
+                Ok(supplied) => {
+                    self.inner
+                        .upstream
+                        .record_body_success(&checksum_repository);
+                    let parsed = supplied
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if parsed != *expected {
+                        issues.push(format!(
+                            "{relative} expected {expected}, upstream supplied {parsed}"
+                        ));
+                    }
+                }
+                Err(error) => issues.push(format!("{relative}: {error}")),
+            }
+        }
+        issues
     }
 
     async fn install_bundle(&self, files: Vec<PreparedFile>) -> Result<(), CacheFailure> {
@@ -694,7 +833,7 @@ impl CacheManager {
 }
 
 enum BundleError {
-    ChecksumMismatch(String),
+    Unstable(String),
     Internal(CacheFailure),
 }
 
@@ -703,6 +842,7 @@ async fn stream_to_file(
     destination: &Path,
 ) -> Result<(u64, String, String), CacheFailure> {
     let (response, _permit) = response.into_parts();
+    let expected_size = response.content_length();
     let mut file = create_temporary(destination).await?;
     let mut stream = response.bytes_stream();
     let mut size = 0_u64;
@@ -721,6 +861,12 @@ async fn stream_to_file(
         sha1.update(&chunk);
         sha256.update(&chunk);
         size = size.saturating_add(chunk.len() as u64);
+    }
+    if expected_size.is_some_and(|expected| expected != size) {
+        return Err(CacheFailure::Internal(format!(
+            "upstream response length mismatch: expected {} bytes, received {size}",
+            expected_size.expect("expected size is present")
+        )));
     }
     flush_temporary(file, destination).await?;
     Ok((
@@ -806,6 +952,12 @@ async fn flush_temporary(mut file: fs::File, path: &Path) -> Result<(), CacheFai
 async fn cleanup_prepared(files: &[PreparedFile]) {
     for file in files {
         let _ = remove_file_if_exists(&file.temporary).await;
+    }
+}
+
+async fn cleanup_downloads(downloads: &[DownloadedMain]) {
+    for download in downloads {
+        let _ = remove_file_if_exists(&download.temporary).await;
     }
 }
 

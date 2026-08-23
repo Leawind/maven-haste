@@ -769,6 +769,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_upstream_body_shorter_than_content_length() {
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(|| async {
+                Response::builder()
+                    .header(CONTENT_LENGTH, "4")
+                    .body(Body::from("abc"))
+                    .unwrap()
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app(&directory, vec![repository("short", &url, &[])]).await;
+
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn returns_gateway_and_cleans_temporary_file_after_read_stalls() {
         let upstream = Router::new().route(
             "/{*path}",
@@ -1302,7 +1331,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checksum_mismatch_falls_back_to_next_repository() {
+    async fn checksum_first_request_is_generated_from_cached_content() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        Response::new(Body::from("upstream-is-wrong\n"))
+                    } else {
+                        Response::new(Body::from("abc"))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("wrong", &url, &[])]).await;
+        let sha1_path = format!("{ARTIFACT_PATH}.sha1");
+
+        assert_eq!(
+            body(request(&app, Method::GET, &sha1_path).await).await,
+            "a9993e364706816aba3e25717850c26c9cd0d89d\n"
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "abc"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn stable_checksum_mismatch_keeps_first_repository() {
         let bad_calls = Arc::new(AtomicUsize::new(0));
         let bad_handler_calls = Arc::clone(&bad_calls);
         let bad = Router::new().route(
@@ -1347,9 +1411,179 @@ mod tests {
 
         assert_eq!(
             body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "abc"
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, &format!("{ARTIFACT_PATH}.sha1")).await).await,
+            "a9993e364706816aba3e25717850c26c9cd0d89d\n"
+        );
+        assert_eq!(bad_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(good_calls.load(Ordering::SeqCst), 0);
+        let stats: Value = serde_json::from_str(
+            &body(request(&app, Method::GET, "/api/v1/cache/stats").await).await,
+        )
+        .unwrap();
+        let bad_status = stats["upstreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|upstream| upstream["name"] == "bad")
+            .unwrap();
+        assert_eq!(bad_status["failures"], 0);
+        bad_task.abort();
+        good_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stable_metadata_with_inconsistent_checksums_returns_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        Response::new(Body::from("invalid-checksum\n"))
+                    } else {
+                        Response::new(Body::from("<metadata/>"))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("metadata", &url, &[])]).await;
+        let metadata = "/maven/com/example/demo/1.0-SNAPSHOT/maven-metadata.xml";
+
+        let response = request(&app, Method::GET, metadata).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "<metadata/>");
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn checksum_retry_uses_subsequent_verified_download() {
+        let main_calls = Arc::new(AtomicUsize::new(0));
+        let handler_main_calls = Arc::clone(&main_calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_main_calls);
+                async move {
+                    if uri.path().ends_with(".sha1") {
+                        Response::new(Body::from("66b27417d37e024c46526c2f6d358a754fc552f3\n"))
+                    } else if uri.path().ends_with(".sha256") {
+                        Response::new(Body::from(
+                            "3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282\n",
+                        ))
+                    } else if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Response::new(Body::from("abc"))
+                    } else {
+                        Response::new(Body::from("xyz"))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("changing", &url, &[])]).await;
+
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
             "xyz"
         );
-        assert_eq!(bad_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(main_calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn checksum_retry_failure_keeps_first_complete_download() {
+        let main_calls = Arc::new(AtomicUsize::new(0));
+        let handler_main_calls = Arc::clone(&main_calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_main_calls);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        Response::new(Body::from("invalid-checksum\n"))
+                    } else if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Response::new(Body::from("abc"))
+                    } else {
+                        error_response(StatusCode::NOT_FOUND, "retry unavailable")
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("retry", &url, &[])]).await;
+
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "abc"
+        );
+        assert_eq!(main_calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn unstable_checksum_mismatch_falls_back_to_next_repository() {
+        let bad_main_calls = Arc::new(AtomicUsize::new(0));
+        let bad_handler_main_calls = Arc::clone(&bad_main_calls);
+        let bad = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&bad_handler_main_calls);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return Response::new(Body::from(
+                            "0000000000000000000000000000000000000000\n",
+                        ));
+                    }
+                    let body = match calls.fetch_add(1, Ordering::SeqCst) {
+                        0 => "abc",
+                        1 => "def",
+                        _ => "ghi",
+                    };
+                    Response::new(Body::from(body))
+                }
+            }),
+        );
+        let (bad_url, bad_task) = spawn_upstream(bad).await;
+
+        let good_calls = Arc::new(AtomicUsize::new(0));
+        let good_handler_calls = Arc::clone(&good_calls);
+        let good = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&good_handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        error_response(StatusCode::NOT_FOUND, "missing checksum")
+                    } else {
+                        Response::new(Body::from("xyz"))
+                    }
+                }
+            }),
+        );
+        let (good_url, good_task) = spawn_upstream(good).await;
+        let directory = TempDir::new().unwrap();
+        let repositories = vec![
+            repository("unstable", &bad_url, &[]),
+            repository("good", &good_url, &[]),
+        ];
+        let (app, _) = test_app(&directory, repositories).await;
+
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "xyz"
+        );
+        assert_eq!(bad_main_calls.load(Ordering::SeqCst), 3);
         assert_eq!(good_calls.load(Ordering::SeqCst), 3);
         bad_task.abort();
         good_task.abort();

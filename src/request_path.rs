@@ -87,6 +87,27 @@ impl MavenPath {
     pub fn is_checksum(&self) -> bool {
         self.checksum
     }
+
+    pub fn generated_checksum_source(&self) -> Option<Self> {
+        let filename = self.segments.last()?;
+        let content_filename = filename
+            .strip_suffix(".sha1")
+            .or_else(|| filename.strip_suffix(".sha256"))?;
+        let mut segments = self.segments.clone();
+        *segments.last_mut()? = content_filename.to_owned();
+        let coordinates = Coordinates::parse(&segments)
+            .expect("removing a checksum suffix preserves a valid Maven path");
+        Some(Self {
+            relative: segments.join("/"),
+            segments,
+            group_id: coordinates.group_id,
+            artifact_id: coordinates.artifact_id,
+            version: coordinates.version,
+            file_type: coordinates.file_type,
+            policy: coordinates.policy,
+            checksum: coordinates.checksum,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

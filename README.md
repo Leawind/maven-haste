@@ -66,7 +66,7 @@ Without `-c/--config`, maven-haste looks for `maven-haste.toml` in the current d
 
 Repositories are tried in configuration order. `rules` is an ordered list of glob patterns matched against the Maven relative request path: the first matching rule determines whether the repository participates, `!` means exclude, and `*` matches across `/`. Repositories without `rules` act as a global fallback.
 
-When an upstream lacks a file, fails, or returns a checksum mismatch, the service continues to the next upstream where applicable. Repository names are used for logging, statistics, and circuit breaker identification.
+When an upstream lacks a file, fails, or repeatedly returns different content that cannot be verified against its checksums, the service continues to the next upstream where applicable. Repository names are used for logging, statistics, and circuit breaker identification.
 
 ## Gradle Integration
 
@@ -101,7 +101,7 @@ The proxy repository is placed before the project's existing repositories. If Ma
 - `maven-metadata.xml` and `-SNAPSHOT` aliases are mutable content. When expired, cached content is served immediately while refresh happens in the background.
 - With stale-on-error enabled, stale content continues to be served if background refresh hits upstream failures.
 - Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
-- When upstream provides checksums, downloaded content is verified; on mismatch the source is discarded and others are tried. If `.sha1` or `.sha256` is missing, the service can compute it from file content.
+- When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1` and `.sha256` files are always computed from the bytes actually stored.
 
 Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes.
 
