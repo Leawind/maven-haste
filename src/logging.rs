@@ -1,11 +1,19 @@
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::time::Duration;
 
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::{FilterExt, filter_fn};
+use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::FileLoggingConfig;
@@ -46,9 +54,17 @@ pub fn init(verbose: bool, file: Option<&FileLoggingConfig>) -> Result<LoggingGu
             )));
         }
     };
-    let console = tracing_subscriber::fmt::layer()
-        .compact()
-        .with_filter(console_filter);
+    let console =
+        tracing_subscriber::fmt::layer()
+            .compact()
+            .with_filter(console_filter.clone().and(filter_fn(|metadata| {
+                metadata.target() != "maven_haste::access"
+            })));
+    let access_console = tracing_subscriber::fmt::layer()
+        .event_format(AccessConsoleFormat)
+        .with_filter(console_filter.and(filter_fn(|metadata| {
+            metadata.target() == "maven_haste::access"
+        })));
 
     if let Some(config) = file {
         validate_directory(config)?;
@@ -70,6 +86,7 @@ pub fn init(verbose: bool, file: Option<&FileLoggingConfig>) -> Result<LoggingGu
             .with_filter(file_filter);
         tracing_subscriber::registry()
             .with(console)
+            .with(access_console)
             .with(file_layer)
             .try_init()
             .map_err(|error| AppError::Runtime(error.to_string()))?;
@@ -78,9 +95,78 @@ pub fn init(verbose: bool, file: Option<&FileLoggingConfig>) -> Result<LoggingGu
     } else {
         tracing_subscriber::registry()
             .with(console)
+            .with(access_console)
             .try_init()
             .map_err(|error| AppError::Runtime(error.to_string()))?;
         Ok(LoggingGuard { _file: None })
+    }
+}
+
+struct AccessConsoleFormat;
+
+impl<S, N> FormatEvent<S, N> for AccessConsoleFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _context: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        SystemTime.format_time(&mut writer)?;
+        write_colored_level(&mut writer, event.metadata().level())?;
+        write_colored_access_message(&mut writer, &visitor.message)
+    }
+}
+
+fn write_colored_level(writer: &mut Writer<'_>, level: &Level) -> fmt::Result {
+    let color = match *level {
+        Level::TRACE => "35",
+        Level::DEBUG => "34",
+        Level::INFO => "32",
+        Level::WARN => "33",
+        Level::ERROR => "31",
+    };
+    if writer.has_ansi_escapes() {
+        write!(writer, " \x1b[{color}m{level}\x1b[0m ")
+    } else {
+        write!(writer, " {level} ")
+    }
+}
+
+fn write_colored_access_message(writer: &mut Writer<'_>, message: &str) -> fmt::Result {
+    let Some(prefix_end) = message.find(']').map(|index| index + 1) else {
+        return writeln!(writer, "{message}");
+    };
+    let (prefix, remainder) = message.split_at(prefix_end);
+    let color = match prefix {
+        "[HIT]" => "32",
+        "[MISS]" => "33",
+        "[STALE]" => "36",
+        "[ERROR]" => "31",
+        _ => "37",
+    };
+    if writer.has_ansi_escapes() {
+        writeln!(writer, "\x1b[{color}m{prefix}\x1b[0m{remainder}")
+    } else {
+        writeln!(writer, "{message}")
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+}
+
+impl Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
     }
 }
 

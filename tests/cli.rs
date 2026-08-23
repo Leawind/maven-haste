@@ -188,6 +188,53 @@ fn file_logging_writes_daily_json_access_events() {
     child.0.wait().unwrap();
 }
 
+#[test]
+fn verbose_access_logs_are_compact_without_losing_regular_log_fields() {
+    let directory = TempDir::new().unwrap();
+    let address = unused_address();
+    let config = write_config(&directory, &address.to_string());
+    let child = Command::new(binary())
+        .args(["--verbose", "run", "--config"])
+        .arg(config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+
+    wait_for_health(address);
+    let response = wait_for_response(address, "/maven/com/example/demo/1.0/demo-1.0.jar");
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+
+    let mut stdout = child.0.stdout.take().unwrap();
+    let mut stderr = child.0.stderr.take().unwrap();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut output = String::new();
+    stdout.read_to_string(&mut output).unwrap();
+    stderr.read_to_string(&mut output).unwrap();
+
+    let access = output
+        .lines()
+        .find(|line| line.contains("[NONE] GET /maven/com/example/demo/1.0/demo-1.0.jar"))
+        .unwrap_or_else(|| panic!("verbose access log was not written: {output}"));
+    assert!(access.contains(" DEBUG [NONE]"), "{access}");
+    for field in [
+        "maven_haste::access",
+        "cache=",
+        "method=",
+        "path=",
+        "status=",
+        "upstream=\"",
+        "elapsed_ms=",
+        "bytes_sent=",
+        "completion=",
+    ] {
+        assert!(!access.contains(field), "{access}");
+    }
+    assert!(output.contains("loaded configuration") && output.contains("config="));
+}
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_maven-haste")
 }
