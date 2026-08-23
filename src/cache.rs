@@ -125,7 +125,7 @@ impl CacheManager {
     ) -> Result<Self, AppError> {
         let upstream = UpstreamClient::new(
             config.repositories.clone(),
-            config.cache.refresh_timeout,
+            &config.upstream,
             &config.circuit_breaker,
         )?;
         Ok(Self {
@@ -309,9 +309,6 @@ impl CacheManager {
                 if request.policy() == CachePolicy::Mutable {
                     self.store_negative(request).await?;
                 }
-                Err(CacheFailure::NotFound)
-            }
-            PreparedFetch::Gateway if request.policy() == CachePolicy::Permanent => {
                 Err(CacheFailure::NotFound)
             }
             PreparedFetch::Gateway | PreparedFetch::NotModified => Err(CacheFailure::Gateway),

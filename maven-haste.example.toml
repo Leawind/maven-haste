@@ -9,8 +9,11 @@ root = './repository'
 metadata_ttl = '5m'
 negative_ttl = '5m'
 refresh_max_concurrency = 10
-refresh_timeout = '10s'
 serve_stale_on_error = true
+
+[upstream]
+connect_timeout = '10s'
+read_timeout = '60s'
 
 [circuit_breaker]
 failure_threshold = 3

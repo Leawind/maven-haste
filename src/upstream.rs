@@ -7,7 +7,7 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
 
 use crate::circuit::CircuitBreaker;
-use crate::config::{CircuitBreakerConfig, RepositoryConfig};
+use crate::config::{CircuitBreakerConfig, RepositoryConfig, UpstreamConfig};
 use crate::error::AppError;
 use crate::routing::RouteEngine;
 
@@ -46,11 +46,12 @@ struct ConditionalHeaders {
 impl UpstreamClient {
     pub fn new(
         repositories: Vec<RepositoryConfig>,
-        timeout: Duration,
+        config: &UpstreamConfig,
         circuit: &CircuitBreakerConfig,
     ) -> Result<Self, AppError> {
         let client = Client::builder()
-            .timeout(timeout)
+            .connect_timeout(config.connect_timeout)
+            .read_timeout(config.read_timeout)
             .redirect(reqwest::redirect::Policy::limited(5))
             .user_agent(concat!("maven-haste/", env!("CARGO_PKG_VERSION")))
             .build()

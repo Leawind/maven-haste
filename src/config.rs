@@ -28,6 +28,8 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub upstream: UpstreamConfig,
+    #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig,
     pub repositories: Vec<RepositoryConfig>,
 }
@@ -90,8 +92,6 @@ pub struct CacheConfig {
     #[serde(with = "humantime_serde")]
     pub negative_ttl: Duration,
     pub refresh_max_concurrency: usize,
-    #[serde(with = "humantime_serde")]
-    pub refresh_timeout: Duration,
     pub serve_stale_on_error: bool,
 }
 
@@ -101,8 +101,25 @@ impl Default for CacheConfig {
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
             refresh_max_concurrency: 10,
-            refresh_timeout: Duration::from_secs(10),
             serve_stale_on_error: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamConfig {
+    #[serde(with = "humantime_serde")]
+    pub connect_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub read_timeout: Duration,
+}
+
+impl Default for UpstreamConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            read_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -326,9 +343,14 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "cache.refresh_max_concurrency must be greater than zero",
         ));
     }
-    if config.cache.refresh_timeout.is_zero() {
+    if config.upstream.connect_timeout.is_zero() {
         return Err(ConfigError::new(
-            "cache.refresh_timeout must be greater than zero",
+            "upstream.connect_timeout must be greater than zero",
+        ));
+    }
+    if config.upstream.read_timeout.is_zero() {
+        return Err(ConfigError::new(
+            "upstream.read_timeout must be greater than zero",
         ));
     }
     if config.circuit_breaker.failure_threshold == 0 {
@@ -503,6 +525,11 @@ url = "https://repo.example/"
         assert_eq!(loaded.config.server.bind, "0.0.0.0:9000".parse().unwrap());
         assert_eq!(loaded.config.server.base_path, "/maven");
         assert_eq!(loaded.config.cache.metadata_ttl, Duration::from_secs(300));
+        assert_eq!(
+            loaded.config.upstream.connect_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(loaded.config.upstream.read_timeout, Duration::from_secs(60));
     }
 
     #[test]
@@ -546,6 +573,8 @@ url = "https://repo.example/"
         assert!(serialized.contains("tmp_dir = "));
         assert!(serialized.contains("db_path = "));
         assert!(serialized.contains("metadata_ttl = \"5m\""));
+        assert!(serialized.contains("connect_timeout = \"10s\""));
+        assert!(serialized.contains("read_timeout = \"1m\""));
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.storage.root, loaded.config.storage.root);
     }
@@ -572,5 +601,48 @@ url = "https://repo.example/"
                 .to_string()
                 .contains("reserved .maven-haste directory")
         );
+    }
+
+    #[test]
+    fn rejects_zero_upstream_timeouts_and_removed_refresh_timeout() {
+        let directory = TempDir::new().unwrap();
+        for body in [
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+connect_timeout = "0s"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+read_timeout = "0s"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[cache]
+refresh_timeout = "10s"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        ] {
+            let path = write_config(&directory, body);
+            assert!(load(&cli(&path)).is_err());
+        }
     }
 }

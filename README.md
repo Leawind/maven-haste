@@ -15,6 +15,8 @@ maven-haste -c ./maven-haste.toml
 
 将 [maven-haste.example.toml](./maven-haste.example.toml) 复制为 `maven-haste.toml` 后，按需修改缓存目录、监听地址与上游仓库。仓库 `rules` 是有序的请求路径 glob：首条匹配规则决定该仓库是否参与，`!` 表示排除，`*` 可以跨 `/` 匹配；省略 `rules` 表示全局 fallback。
 
+`[upstream]` 中的 `connect_timeout` 限制建立上游连接的时间，`read_timeout` 限制每次响应体读取允许的空闲时间；每收到一个数据块，读取计时就会重置，因此不会限制大文件的总下载时长。旧的 `cache.refresh_timeout` 已被删除，升级配置时请改用这两个字段。
+
 ## Gradle 接入
 
 在 `~/.gradle/init.d/maven-haste.gradle`（Windows 为 `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`）中加入：

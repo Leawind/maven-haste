@@ -213,10 +213,12 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use axum::body::Bytes;
     use axum::http::{Request, Uri};
     use http_body_util::BodyExt;
     use tempfile::TempDir;
@@ -226,6 +228,7 @@ mod tests {
     use super::*;
     use crate::config::{
         CacheConfig, CircuitBreakerConfig, Config, RepositoryConfig, ServerConfig, StorageConfig,
+        UpstreamConfig,
     };
     use crate::db::Database;
     use crate::storage;
@@ -366,6 +369,7 @@ mod tests {
             server: ServerConfig::default(),
             storage,
             cache: CacheConfig::default(),
+            upstream: UpstreamConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
             repositories: vec![repository("central", &url, &[])],
         };
@@ -503,20 +507,21 @@ mod tests {
     async fn distinguishes_permanent_and_mutable_upstream_failures() {
         let directory = TempDir::new().unwrap();
         let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
-        let cache_config = CacheConfig {
-            refresh_timeout: Duration::from_millis(100),
-            ..CacheConfig::default()
+        let upstream_config = UpstreamConfig {
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
         };
         let (app, _) = test_app_with_cache(
             &directory,
             vec![repository("unreachable", &unreachable, &[])],
-            cache_config,
+            CacheConfig::default(),
+            upstream_config,
         )
         .await;
 
         assert_eq!(
             request(&app, Method::GET, ARTIFACT_PATH).await.status(),
-            StatusCode::NOT_FOUND
+            StatusCode::BAD_GATEWAY
         );
         assert_eq!(
             request(
@@ -528,6 +533,92 @@ mod tests {
             .status(),
             StatusCode::BAD_GATEWAY
         );
+    }
+
+    #[tokio::test]
+    async fn downloads_slow_streams_that_continue_before_read_timeout() {
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                Response::new(delayed_body(vec![
+                    (Duration::from_millis(30), b"slow-"),
+                    (Duration::from_millis(30), b"stream-"),
+                    (Duration::from_millis(30), b"still-"),
+                    (Duration::from_millis(30), b"works"),
+                ]))
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("slow", &url, &[])],
+            CacheConfig::default(),
+            UpstreamConfig {
+                connect_timeout: Duration::from_millis(100),
+                read_timeout: Duration::from_millis(50),
+            },
+        )
+        .await;
+
+        let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "slow-stream-still-works");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn returns_gateway_and_cleans_temporary_file_after_read_stalls() {
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                Response::new(delayed_body(vec![
+                    (Duration::ZERO, b"first"),
+                    (Duration::from_millis(150), b"never-received"),
+                ]))
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app_with_cache(
+            &directory,
+            vec![repository("stalled", &url, &[])],
+            CacheConfig::default(),
+            UpstreamConfig {
+                connect_timeout: Duration::from_millis(100),
+                read_timeout: Duration::from_millis(50),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let tmp = directory.path().join("repository/.maven-haste/tmp");
+        assert!(
+            tokio::fs::read_dir(tmp)
+                .await
+                .unwrap()
+                .next_entry()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        task.abort();
     }
 
     #[tokio::test]
@@ -562,6 +653,7 @@ mod tests {
             &directory,
             vec![repository("central", &url, &[])],
             cache_config,
+            UpstreamConfig::default(),
         )
         .await;
         let metadata = "/maven/com/example/demo/maven-metadata.xml";
@@ -633,6 +725,7 @@ mod tests {
             &directory,
             vec![repository("central", &url, &[])],
             cache_config,
+            UpstreamConfig::default(),
         )
         .await;
         let metadata = "/maven/com/example/demo/maven-metadata.xml";
@@ -713,6 +806,7 @@ mod tests {
             &directory,
             vec![repository("central", &url, &[])],
             cache_config,
+            UpstreamConfig::default(),
         )
         .await;
         let metadata = "/maven/com/example/demo/maven-metadata.xml";
@@ -836,19 +930,27 @@ mod tests {
         directory: &TempDir,
         repositories: Vec<RepositoryConfig>,
     ) -> (Router, Database) {
-        test_app_with_cache(directory, repositories, CacheConfig::default()).await
+        test_app_with_cache(
+            directory,
+            repositories,
+            CacheConfig::default(),
+            UpstreamConfig::default(),
+        )
+        .await
     }
 
     async fn test_app_with_cache(
         directory: &TempDir,
         repositories: Vec<RepositoryConfig>,
         cache_config: CacheConfig,
+        upstream_config: UpstreamConfig,
     ) -> (Router, Database) {
         let storage = StorageConfig::resolved_for_test(directory.path().join("repository"));
         let config = Config {
             server: ServerConfig::default(),
             storage,
             cache: cache_config,
+            upstream: upstream_config,
             circuit_breaker: CircuitBreakerConfig::default(),
             repositories,
         };
@@ -896,6 +998,17 @@ mod tests {
 
     fn is_checksum_uri(uri: &Uri) -> bool {
         uri.path().ends_with(".sha1") || uri.path().ends_with(".sha256")
+    }
+
+    fn delayed_body(chunks: Vec<(Duration, &'static [u8])>) -> Body {
+        Body::from_stream(futures_util::stream::unfold(
+            chunks.into_iter(),
+            |mut chunks| async move {
+                let (delay, bytes) = chunks.next()?;
+                tokio::time::sleep(delay).await;
+                Some((Ok::<_, Infallible>(Bytes::from_static(bytes)), chunks))
+            },
+        ))
     }
 
     async fn wait_for(condition: impl Fn() -> bool) {
