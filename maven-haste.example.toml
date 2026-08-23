@@ -1,60 +1,69 @@
-[server]
-# Address on which Maven Haste accepts HTTP requests.
-bind = '127.0.0.1:8080'
-# URL prefix for the local Maven repository endpoint.
-# The root path and /api namespace are reserved for Maven Haste itself.
-base_path = '/maven'
+# # Optional server settings. Omit this table to use 127.0.0.1:8080 and /maven.
+# [server]
+# # Address on which Maven Haste accepts HTTP requests.
+# bind = '127.0.0.1:8080'
+# # URL prefix for the local Maven repository endpoint.
+# # The root path and /api namespace are reserved for Maven Haste itself.
+# base_path = '/maven'
 
 [storage]
-# Directory used for cached artifacts, temporary downloads, and the SQLite database.
+# Required directory used for cached artifacts, temporary downloads, and the SQLite database.
 # Relative paths are resolved relative to this configuration file.
 root = './repository'
+# # Optional directory for temporary downloads. Defaults to <root>/.maven-haste/tmp.
+# tmp_dir = './repository/.maven-haste/tmp'
+# # Optional SQLite database path. Defaults to <root>/.maven-haste/cache.db.
+# db_path = './repository/.maven-haste/cache.db'
 
-[cache]
-# How long mutable metadata may be served before a background refresh starts.
-metadata_ttl = '5m'
-# How long a confirmed 404 is remembered for one path in one upstream repository.
-negative_ttl = '5m'
-# Serve the last cached mutable file when refreshing it encounters an upstream failure.
-serve_stale_on_error = true
+# # Optional cache settings. Omit this table to use the defaults below.
+# [cache]
+# # How long mutable metadata may be served before a background refresh starts.
+# metadata_ttl = '5m'
+# # How long a confirmed 404 is remembered for one path in one upstream repository.
+# negative_ttl = '5m'
+# # Serve the last cached mutable file when refreshing it encounters an upstream failure.
+# serve_stale_on_error = true
 
 # # Optional JSON Lines file logging. Omit this table to log only to the console.
 # [logging.file]
+# # Directory for daily JSON Lines log files.
 # directory = './logs'
+# # Retention period for completed daily log files.
 # retention = '30d'
+# # Rust log filter for file output.
 # filter = 'maven_haste=info,maven_haste::access=debug'
 
-[upstream]
-# Maximum time allowed to establish a connection to an upstream repository.
-connect_timeout = '10s'
-# Maximum idle time while reading each upstream response body.
-# This is not a limit on the total download time of a large file.
-read_timeout = '60s'
-# Maximum number of simultaneous requests across all upstream repositories.
-max_concurrency = 32
-# Per-repository concurrency limit when a repository does not override it.
-default_repository_max_concurrency = 10
-# Admit one queued cache refresh after this many foreground downloads while both are waiting.
-foreground_priority_burst = 8
+# # Optional upstream settings. Omit this table to use the defaults below.
+# [upstream]
+# # Maximum time allowed to establish a connection to an upstream repository.
+# connect_timeout = '10s'
+# # Maximum idle time while reading each upstream response body.
+# # This is not a limit on the total download time of a large file.
+# read_timeout = '60s'
+# # Maximum number of simultaneous requests across all upstream repositories.
+# max_concurrency = 32
+# # Per-repository concurrency limit when a repository does not override it.
+# default_repository_max_concurrency = 10
+# # Admit one queued cache refresh after this many foreground downloads while both are waiting.
+# foreground_priority_burst = 8
 
-[circuit_breaker]
-# Consecutive upstream failures required before temporarily skipping that repository.
-failure_threshold = 3
-# Time to wait before probing an upstream repository after its circuit opens.
-recovery_timeout = '30s'
+# # Optional circuit-breaker settings. Omit this table to use the defaults below.
+# [circuit_breaker]
+# # Consecutive upstream failures required before temporarily skipping that repository.
+# failure_threshold = 3
+# # Time to wait before probing an upstream repository after its circuit opens.
+# recovery_timeout = '30s'
 
-# # Upstream repositories
+# # At least one upstream repository is required.
 # [[repositories]]
-# # A human-readable name shown in logs and cache statistics.
-# name = 'central'
-# # Base URL of the upstream Maven repository.
-# url = 'https://repo1.maven.org/maven2/'
-# # Ordered request-path glob rules. The first matching rule decides participation.
+# Required human-readable name shown in logs and cache statistics.
+# name = 'Gradle Plugin'
+# # Optional per-repository override of default_repository_max_concurrency.
+# url = 'https://plugins.gradle.org/m2/'
+# # Optional ordered request-path glob rules. The first matching rule decides participation.
 # # Prefix a rule with ! to exclude it; * matches within one path segment and ** may match across path separators.
-# rules = ['**']
+# rules = ['gradle/plugin/**', '!**']
 
 [[repositories]]
 name = 'central'
 url = 'https://repo1.maven.org/maven2/'
-# Optional per-repository override of default_repository_max_concurrency.
-# max_concurrency = 16
