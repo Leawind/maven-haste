@@ -99,7 +99,7 @@ async fn run(cli: Cli) -> Result<(), AppError> {
     tracing::info!(
         %bind,
         maven_endpoint = %maven_endpoint(bind, &loaded.config.server.base_path),
-        health_endpoint = %format!("http://{bind}/__health"),
+        health_endpoint = %format!("http://{bind}{}", server::HEALTH_PATH),
         "Maven proxy is ready"
     );
     server::serve(listener, loaded.config.server.base_path, cache).await

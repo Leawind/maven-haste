@@ -2,6 +2,7 @@
 # Address on which Maven Haste accepts HTTP requests.
 bind = '127.0.0.1:8080'
 # URL prefix for the local Maven repository endpoint.
+# The root path and /api namespace are reserved for Maven Haste itself.
 base_path = '/maven'
 
 [storage]

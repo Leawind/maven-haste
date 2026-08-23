@@ -22,6 +22,9 @@ use crate::cache::{CacheFailure, CacheManager, CachedArtifact};
 use crate::error::AppError;
 use crate::request_path::MavenPath;
 
+pub const HEALTH_PATH: &str = "/api/v1/health";
+const CACHE_STATS_PATH: &str = "/api/v1/cache/stats";
+
 #[derive(Clone)]
 struct AppState {
     cache: CacheManager,
@@ -53,8 +56,8 @@ pub fn router(base_path: String, cache: CacheManager) -> Router {
         format!("{base_path}/{{*path}}")
     };
     Router::new()
-        .route("/__health", get(health))
-        .route("/__cache/stats", get(cache_stats))
+        .route(HEALTH_PATH, get(health))
+        .route(CACHE_STATS_PATH, get(cache_stats))
         .route(&route, get(artifact).head(artifact))
         .with_state(AppState { cache, base_path })
 }
@@ -437,9 +440,15 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
 
-        let health = request(&app, Method::GET, "/__health").await;
+        let health = request(&app, Method::GET, "/api/v1/health").await;
         assert_eq!(health.status(), StatusCode::OK);
         assert_eq!(body(health).await, "OK");
+        for removed_path in ["/", "/__health", "/__cache/stats"] {
+            assert_eq!(
+                request(&app, Method::GET, removed_path).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
 
         assert_eq!(
             request(&app, Method::GET, ARTIFACT_PATH).await.status(),
@@ -449,7 +458,7 @@ mod tests {
             request(&app, Method::GET, ARTIFACT_PATH).await.status(),
             StatusCode::OK
         );
-        let stats = request(&app, Method::GET, "/__cache/stats").await;
+        let stats = request(&app, Method::GET, "/api/v1/cache/stats").await;
         assert_eq!(stats.status(), StatusCode::OK);
         assert_eq!(stats.headers()[CONTENT_TYPE], "application/json");
         let stats: Value = serde_json::from_str(&body(stats).await).unwrap();

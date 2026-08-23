@@ -388,6 +388,14 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "server.base_path must be a canonical absolute URL path",
         ));
     }
+    if config.server.base_path == "/"
+        || config.server.base_path == "/api"
+        || config.server.base_path.starts_with("/api/")
+    {
+        return Err(ConfigError::new(
+            "server.base_path must not be '/' or overlap the reserved '/api' path",
+        ));
+    }
     if config.storage.root.as_os_str().is_empty() {
         return Err(ConfigError::new("storage.root must not be empty"));
     }
@@ -620,6 +628,49 @@ url = "https://repo.example/"
         assert_eq!(loaded.config.upstream.foreground_priority_burst, 8);
         assert_eq!(loaded.config.repositories[0].max_concurrency, None);
         assert!(loaded.config.logging.file.is_none());
+    }
+
+    #[test]
+    fn rejects_maven_base_paths_that_overlap_reserved_routes() {
+        let directory = TempDir::new().unwrap();
+        for base_path in ["/", "/api", "/api/v1", "/api/custom"] {
+            let path = write_config(
+                &directory,
+                &format!(
+                    "[server]\nbase_path = '{base_path}'\n\n[storage]\nroot = 'repository'\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
+                ),
+            );
+
+            let error = load(&cli(&path)).unwrap_err();
+            assert!(
+                error.to_string().contains("reserved '/api' path"),
+                "unexpected error for {base_path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_maven_base_path_with_a_similar_non_reserved_segment() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[server]
+base_path = "/apiary"
+
+[storage]
+root = "repository"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        assert_eq!(
+            load(&cli(&path)).unwrap().config.server.base_path,
+            "/apiary"
+        );
     }
 
     #[test]

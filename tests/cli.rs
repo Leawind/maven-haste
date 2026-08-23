@@ -265,7 +265,7 @@ fn wait_for_health(address: SocketAddr) -> String {
                 .unwrap();
             stream
                 .write_all(
-                    b"GET /__health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                 )
                 .unwrap();
             let mut response = String::new();

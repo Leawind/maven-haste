@@ -52,8 +52,8 @@ allprojects {
 
 ## 运维
 
-- `GET /__health`：检查 SQLite 连接以及缓存和临时目录，健康时返回 `200 OK`。
-- `GET /__cache/stats`：返回缓存文件数量和大小、命中率、负缓存数量及上游熔断状态。
+- `GET /api/v1/health`：检查 SQLite 连接以及缓存和临时目录，健康时返回 `200 OK`。
+- `GET /api/v1/cache/stats`：返回缓存文件数量和大小、命中率、负缓存数量及上游熔断状态。
 
 使用 `RUST_LOG` 调整日志级别，例如 `RUST_LOG=maven_haste=debug`。服务收到 Ctrl-C 后会优雅停止接受请求。
 
