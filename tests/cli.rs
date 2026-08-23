@@ -52,6 +52,7 @@ fn missing_explicit_config_exits_with_configuration_error() {
 #[test]
 fn config_init_creates_a_commented_example_without_overwriting() {
     let directory = TempDir::new().unwrap();
+    let expected = example_config();
     let first = Command::new(binary())
         .args(["config", "init"])
         .current_dir(directory.path())
@@ -59,14 +60,16 @@ fn config_init_creates_a_commented_example_without_overwriting() {
         .unwrap();
 
     assert!(first.status.success());
+    let config_path = directory.path().join("maven-haste.toml");
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), expected);
     assert!(
-        String::from_utf8(first.stdout)
+        Command::new(binary())
+            .args(["check", "--config"])
+            .arg(&config_path)
+            .status()
             .unwrap()
-            .contains("next: maven-haste check")
+            .success()
     );
-    let config = std::fs::read_to_string(directory.path().join("maven-haste.toml")).unwrap();
-    assert!(config.contains("# Address on which Maven Haste accepts HTTP requests."));
-    assert!(config.contains("negative_ttl = '5m'"));
 
     let second = Command::new(binary())
         .args(["config", "init"])
@@ -74,11 +77,7 @@ fn config_init_creates_a_commented_example_without_overwriting() {
         .output()
         .unwrap();
     assert!(!second.status.success());
-    assert!(
-        String::from_utf8(second.stderr)
-            .unwrap()
-            .contains("refusing to create configuration")
-    );
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), expected);
 }
 
 #[test]
@@ -89,9 +88,11 @@ fn config_example_prints_the_embedded_commented_template() {
         .unwrap();
 
     assert!(output.status.success());
-    let example = String::from_utf8(output.stdout).unwrap();
-    assert!(example.contains("# Base URL of the upstream Maven repository."));
-    assert!(example.contains("url = 'https://repo1.maven.org/maven2/'"));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), example_config());
+}
+
+fn example_config() -> &'static str {
+    include_str!("../maven-haste.example.toml")
 }
 
 #[test]
