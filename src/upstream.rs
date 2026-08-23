@@ -492,12 +492,11 @@ impl UpstreamClient {
                     };
                 }
                 Ok(response) if response.status().is_server_error() => {
-                    tracing::warn!(
-                        upstream = %repository.name,
-                        status = %response.status(),
-                        attempt = attempt + 1,
-                        "upstream server error"
-                    );
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        tracing::debug!(upstream = %repository.name, status = %response.status(), attempt = attempt + 1, "retryable upstream server error");
+                    } else {
+                        tracing::warn!(upstream = %repository.name, status = %response.status(), attempt = attempt + 1, "upstream server error after retries");
+                    }
                 }
                 Ok(response) => {
                     tracing::warn!(
@@ -510,12 +509,11 @@ impl UpstreamClient {
                     };
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        upstream = %repository.name,
-                        attempt = attempt + 1,
-                        %error,
-                        "upstream request failed"
-                    );
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        tracing::debug!(upstream = %repository.name, attempt = attempt + 1, %error, "retryable upstream request failure");
+                    } else {
+                        tracing::warn!(upstream = %repository.name, attempt = attempt + 1, %error, "upstream request failed after retries");
+                    }
                 }
             }
 

@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod db;
 mod error;
+mod logging;
 mod request_path;
 mod routing;
 mod server;
@@ -71,6 +72,9 @@ async fn run(cli: Cli) -> Result<(), AppError> {
     let storage = storage::prepare(&loaded.config.storage).await?;
 
     if matches!(cli.command.as_ref(), Some(Command::Check)) {
+        if let Some(file) = &loaded.config.logging.file {
+            logging::validate_directory(file)?;
+        }
         println!("configuration is valid: {}", loaded.path.display());
         println!(
             "start the proxy: maven-haste run --config {}",
@@ -79,27 +83,26 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         return Ok(());
     }
 
-    init_tracing(cli.verbose)?;
+    let _logging_guard = logging::init(cli.verbose, loaded.config.logging.file.as_ref())?;
     tracing::info!(config = %loaded.path.display(), "loaded configuration");
     tracing::info!(
         root = %loaded.config.storage.root.display(),
         case_sensitive = storage.case_sensitive,
         "storage initialized"
     );
-    tracing::info!(
-        maven_endpoint = %maven_endpoint(loaded.config.server.bind, &loaded.config.server.base_path),
-        health_endpoint = %format!("http://{}/__health", loaded.config.server.bind),
-        "Maven proxy is ready"
-    );
-
     let database = db::Database::open(loaded.config.storage.db_path()).await?;
     let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
-    server::serve(
-        loaded.config.server.bind,
-        loaded.config.server.base_path,
-        cache,
-    )
-    .await
+    let listener = server::bind(loaded.config.server.bind).await?;
+    let bind = listener
+        .local_addr()
+        .map_err(|error| AppError::Runtime(format!("failed to inspect HTTP listener: {error}")))?;
+    tracing::info!(
+        %bind,
+        maven_endpoint = %maven_endpoint(bind, &loaded.config.server.base_path),
+        health_endpoint = %format!("http://{bind}/__health"),
+        "Maven proxy is ready"
+    );
+    server::serve(listener, loaded.config.server.base_path, cache).await
 }
 
 fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
@@ -143,20 +146,6 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
 
 fn maven_endpoint(bind: std::net::SocketAddr, base_path: &str) -> String {
     format!("http://{bind}{base_path}")
-}
-
-fn init_tracing(verbose: bool) -> Result<(), AppError> {
-    let default_filter = if verbose {
-        "maven_haste=debug"
-    } else {
-        "maven_haste=info"
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .try_init()
-        .map_err(|error| AppError::Runtime(error.to_string()))
 }
 
 #[cfg(test)]

@@ -17,6 +17,12 @@ negative_ttl = '5m'
 # Serve the last cached mutable file when refreshing it encounters an upstream failure.
 serve_stale_on_error = true
 
+# # Optional JSON Lines file logging. Omit this table to log only to the console.
+# [logging.file]
+# directory = './logs'
+# retention = '30d'
+# filter = 'maven_haste=info,maven_haste::access=debug'
+
 [upstream]
 # Maximum time allowed to establish a connection to an upstream repository.
 connect_timeout = '10s'

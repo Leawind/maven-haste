@@ -40,6 +40,43 @@ fn missing_explicit_config_exits_with_configuration_error() {
 }
 
 #[test]
+fn invalid_rust_log_is_reported_instead_of_ignored() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, "127.0.0.1:0");
+    let output = Command::new(binary())
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .env("RUST_LOG", "maven_haste=[broken")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid RUST_LOG"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bind_failure_does_not_announce_readiness() {
+    let directory = TempDir::new().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = write_config(&directory, &listener.local_addr().unwrap().to_string());
+    let output = Command::new(binary())
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Maven proxy is ready"), "{stderr}");
+}
+
+#[test]
 fn config_init_creates_a_commented_example_without_overwriting() {
     let directory = TempDir::new().unwrap();
     let expected = example_config();
@@ -108,6 +145,49 @@ fn running_binary_serves_health_endpoint() {
     child.0.wait().unwrap();
 }
 
+#[test]
+fn file_logging_writes_daily_json_access_events() {
+    let directory = TempDir::new().unwrap();
+    let address = unused_address();
+    let config = write_config(&directory, &address.to_string());
+    let mut source = std::fs::read_to_string(&config).unwrap();
+    source.push_str("\n[logging.file]\ndirectory = './logs'\n");
+    std::fs::write(&config, source).unwrap();
+    let child = Command::new(binary())
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+
+    wait_for_health(address);
+    let response = wait_for_response(address, "/maven/com/example/demo/1.0/demo-1.0.jar");
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+
+    let log = wait_for_access_log(&directory);
+    let events = std::fs::read_to_string(log).unwrap();
+    assert!(
+        events
+            .lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    );
+    assert!(
+        events.lines().any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["target"] == "maven_haste::access"
+                && event["fields"]["completion"] == "complete"
+                && event["fields"]["bytes_sent"].as_u64().is_some()
+        }),
+        "{events}"
+    );
+
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+}
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_maven-haste")
 }
@@ -148,6 +228,40 @@ fn wait_for_health(address: SocketAddr) -> String {
         thread::sleep(Duration::from_millis(20));
     }
     panic!("server did not listen on {address}");
+}
+
+fn wait_for_response(address: SocketAddr, path: &str) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn wait_for_access_log(directory: &TempDir) -> std::path::PathBuf {
+    for _ in 0..100 {
+        if let Ok(entries) = std::fs::read_dir(directory.path().join("logs")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("maven-haste.")
+                    && name.ends_with(".jsonl")
+                    && std::fs::read_to_string(entry.path())
+                        .is_ok_and(|source| source.contains("maven_haste::access"))
+                {
+                    return entry.path();
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("access event was not written to the daily JSON log");
 }
 
 struct KillOnDrop(Child);

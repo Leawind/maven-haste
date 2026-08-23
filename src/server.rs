@@ -1,13 +1,19 @@
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use axum::http::{HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use http_body::Body as _;
+use pin_project_lite::pin_project;
 use tokio::fs::File;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
@@ -23,19 +29,21 @@ struct AppState {
 }
 
 pub async fn serve(
-    bind: std::net::SocketAddr,
+    listener: TcpListener,
     base_path: String,
     cache: CacheManager,
 ) -> Result<(), AppError> {
     let app = router(base_path, cache);
-    let listener = TcpListener::bind(bind)
-        .await
-        .map_err(|error| AppError::Runtime(format!("failed to bind {bind}: {error}")))?;
-    tracing::info!(%bind, "HTTP server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| AppError::Runtime(format!("HTTP server failed: {error}")))
+}
+
+pub async fn bind(bind: std::net::SocketAddr) -> Result<TcpListener, AppError> {
+    TcpListener::bind(bind)
+        .await
+        .map_err(|error| AppError::Runtime(format!("failed to bind {bind}: {error}")))
 }
 
 pub fn router(base_path: String, cache: CacheManager) -> Router {
@@ -84,8 +92,7 @@ async fn artifact(
         Ok(request) => request,
         Err(error) => {
             let response = error_response(StatusCode::BAD_REQUEST, error.to_string());
-            log_request(uri.path(), &method, &response, "invalid", None, started);
-            return response;
+            return track_response(response, method, uri.path(), "invalid", None, started);
         }
     };
 
@@ -118,33 +125,143 @@ async fn artifact(
             )
         }
     };
-    log_request(
-        request.relative(),
-        &method,
-        &response,
+    track_response(
+        response,
+        method,
+        uri.path(),
         cache_status,
         upstream.as_deref(),
         started,
-    );
-    response
+    )
 }
 
-fn log_request(
+fn track_response(
+    response: Response<Body>,
+    method: Method,
     path: &str,
-    method: &Method,
-    response: &Response<Body>,
     cache: &str,
     upstream: Option<&str>,
     started: Instant,
-) {
+) -> Response<Body> {
+    let status = response.status().as_u16();
+    let (parts, body) = response.into_parts();
+    let expected_bytes = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .or_else(|| body.size_hint().exact());
+    let state = Arc::new(Mutex::new(AccessState {
+        method: method.to_string(),
+        path: path.to_owned(),
+        status,
+        cache: cache.to_owned(),
+        upstream: upstream.unwrap_or("-").to_owned(),
+        started,
+        bytes_sent: 0,
+        completion: None,
+    }));
+    if body.is_end_stream() {
+        finish_access(&state, "complete");
+    }
+    Response::from_parts(
+        parts,
+        Body::new(TrackedBody {
+            body,
+            state,
+            expected_bytes,
+        }),
+    )
+}
+
+pin_project! {
+    struct TrackedBody {
+        #[pin]
+        body: Body,
+        state: Arc<Mutex<AccessState>>,
+        expected_bytes: Option<u64>,
+    }
+
+    impl PinnedDrop for TrackedBody {
+        fn drop(this: Pin<&mut Self>) {
+            finish_access(this.project().state, "aborted");
+        }
+    }
+}
+
+impl http_body::Body for TrackedBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.project();
+        match this.body.poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    this.state.lock().expect("access state poisoned").bytes_sent +=
+                        data.len() as u64;
+                }
+                if this.expected_bytes.is_some_and(|expected| {
+                    this.state.lock().expect("access state poisoned").bytes_sent >= expected
+                }) {
+                    finish_access(this.state, "complete");
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                finish_access(this.state, "body_error");
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                finish_access(this.state, "complete");
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+struct AccessState {
+    method: String,
+    path: String,
+    status: u16,
+    cache: String,
+    upstream: String,
+    started: Instant,
+    bytes_sent: u64,
+    completion: Option<&'static str>,
+}
+
+fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
+    let mut state = state.lock().expect("access state poisoned");
+    if state.completion.is_some() {
+        return;
+    }
+    state.completion = Some(completion);
+    let elapsed_ms = state.started.elapsed().as_millis() as u64;
+    let prefix = state.cache.to_ascii_uppercase();
     tracing::debug!(
-        %method,
-        path,
-        status = response.status().as_u16(),
-        cache,
-        upstream = upstream.unwrap_or("-"),
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "HTTP request"
+        target: "maven_haste::access",
+        cache = state.cache,
+        method = state.method,
+        path = state.path,
+        status = state.status,
+        upstream = state.upstream,
+        elapsed_ms,
+        bytes_sent = state.bytes_sent,
+        completion,
+        "[{}] {} {} {} {}ms {}B upstream={}",
+        prefix, state.method, state.path, state.status, elapsed_ms, state.bytes_sent, state.upstream
     );
 }
 
@@ -372,6 +489,7 @@ mod tests {
             cache: CacheConfig::default(),
             upstream: UpstreamConfig::default(),
             circuit_breaker: CircuitBreakerConfig::default(),
+            logging: crate::config::LoggingConfig::default(),
             repositories: vec![repository("central", &url, &[])],
         };
         storage::prepare(&config.storage).await.unwrap();
@@ -1249,6 +1367,7 @@ mod tests {
             cache: cache_config,
             upstream: upstream_config,
             circuit_breaker: CircuitBreakerConfig::default(),
+            logging: crate::config::LoggingConfig::default(),
             repositories,
         };
         let environment = storage::prepare(&config.storage).await.unwrap();
@@ -1330,5 +1449,56 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("file {} was not updated before timeout", path.display());
+    }
+
+    fn access_state() -> Arc<Mutex<AccessState>> {
+        Arc::new(Mutex::new(AccessState {
+            method: "GET".into(),
+            path: "/maven/test".into(),
+            status: 200,
+            cache: "hit".into(),
+            upstream: "central".into(),
+            started: Instant::now(),
+            bytes_sent: 0,
+            completion: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn tracked_body_records_complete_bytes_once() {
+        let state = access_state();
+        let body = TrackedBody {
+            body: Body::from("abcdef"),
+            state: state.clone(),
+            expected_bytes: Some(6),
+        };
+        Body::new(body).collect().await.unwrap();
+        finish_access(&state, "aborted");
+        let state = state.lock().unwrap();
+        assert_eq!(state.bytes_sent, 6);
+        assert_eq!(state.completion, Some("complete"));
+    }
+
+    #[tokio::test]
+    async fn tracked_body_distinguishes_errors_and_aborts() {
+        let error_state = access_state();
+        let stream = futures_util::stream::iter([Err::<Bytes, _>(std::io::Error::other("broken"))]);
+        let body = TrackedBody {
+            body: Body::from_stream(stream),
+            state: error_state.clone(),
+            expected_bytes: None,
+        };
+        assert!(Body::new(body).collect().await.is_err());
+        assert_eq!(error_state.lock().unwrap().completion, Some("body_error"));
+
+        let aborted_state = access_state();
+        drop(TrackedBody {
+            body: Body::from_stream(
+                futures_util::stream::pending::<Result<Bytes, std::io::Error>>(),
+            ),
+            state: aborted_state.clone(),
+            expected_bytes: None,
+        });
+        assert_eq!(aborted_state.lock().unwrap().completion, Some("aborted"));
     }
 }
