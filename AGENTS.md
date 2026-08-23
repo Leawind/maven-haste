@@ -18,6 +18,8 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 
 在提交文档或配置更改之前运行 `deno fmt`。
 
+运行会写入构建目录的 Cargo 命令前，先通过 `cargo metadata` 确认 `target_directory`；若它位于工作区外，首次执行就使用可写该目录的本机权限。
+
 ## 编码风格与命名约定
 
 使用稳定的、符合惯用法的 Rust：4 空格；函数和模块使用 `snake_case`；类型使用 `PascalCase`；常量使用 `SCREAMING_SNAKE_CASE`。围绕配置、路由、缓存、上游客户端和 HTTP 服务器组织小型模块。保持 I/O 在 Tokio 上运行，避免阻塞请求路径。
