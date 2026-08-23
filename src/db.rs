@@ -25,8 +25,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
     last_modified TEXT,
     file_size INTEGER,
     created_at INTEGER NOT NULL,
-    last_refresh_attempt INTEGER,
-    is_not_found INTEGER NOT NULL DEFAULT 0
+    last_refresh_attempt INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS negative_cache (
+    path TEXT NOT NULL COLLATE BINARY,
+    repository_id TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (path, repository_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_group ON artifacts(group_id);
@@ -55,7 +61,12 @@ pub struct ArtifactRecord {
     pub file_size: i64,
     pub created_at: i64,
     pub last_refresh_attempt: Option<i64>,
-    pub is_not_found: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NegativeCacheEntry {
+    pub repository_id: String,
+    pub observed_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,7 +118,7 @@ impl Database {
                 connection
                     .query_row(
                         "SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, \
-                         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, is_not_found \
+                         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt \
                          FROM artifacts WHERE path = ?1",
                         [path],
                         |row| {
@@ -125,7 +136,6 @@ impl Database {
                                 file_size: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
                                 created_at: row.get(11)?,
                                 last_refresh_attempt: row.get(12)?,
-                                is_not_found: row.get::<_, i64>(13)? != 0,
                             })
                         },
                     )
@@ -161,17 +171,14 @@ impl Database {
             .interact(move |connection| {
                 let transaction = connection.transaction()?;
                 for path in paths {
-                    transaction.execute("DELETE FROM artifacts WHERE path = ?1", [path])?;
+                    transaction.execute("DELETE FROM artifacts WHERE path = ?1", [&path])?;
+                    transaction.execute("DELETE FROM negative_cache WHERE path = ?1", [&path])?;
                 }
                 transaction.commit()
             })
             .await
             .map_err(worker_error)?
             .map_err(sqlite_error)
-    }
-
-    pub async fn upsert(&self, record: ArtifactRecord) -> Result<(), AppError> {
-        self.upsert_many(vec![record]).await
     }
 
     pub async fn upsert_many(&self, records: Vec<ArtifactRecord>) -> Result<(), AppError> {
@@ -181,6 +188,103 @@ impl Database {
                 let transaction = connection.transaction()?;
                 for record in records {
                     upsert_record(&transaction, record)?;
+                }
+                transaction.commit()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn negative_entries(&self, path: &str) -> Result<Vec<NegativeCacheEntry>, AppError> {
+        let path = path.to_owned();
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                let mut statement = connection.prepare(
+                    "SELECT repository_id, observed_at FROM negative_cache WHERE path = ?1",
+                )?;
+                let rows = statement.query_map([path], |row| {
+                    Ok(NegativeCacheEntry {
+                        repository_id: row.get(0)?,
+                        observed_at: row.get(1)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn upsert_negative_entries(
+        &self,
+        path: &str,
+        repository_ids: Vec<String>,
+        observed_at: i64,
+    ) -> Result<(), AppError> {
+        if repository_ids.is_empty() {
+            return Ok(());
+        }
+        let path = path.to_owned();
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                let transaction = connection.transaction()?;
+                for repository_id in repository_ids {
+                    transaction.execute(
+                        "INSERT INTO negative_cache (path, repository_id, observed_at) \
+                         VALUES (?1, ?2, ?3) ON CONFLICT(path, repository_id) DO UPDATE SET \
+                         observed_at = excluded.observed_at",
+                        params![path, repository_id, observed_at],
+                    )?;
+                }
+                transaction.commit()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn delete_negative_entry(
+        &self,
+        path: &str,
+        repository_id: &str,
+    ) -> Result<(), AppError> {
+        let path = path.to_owned();
+        let repository_id = repository_id.to_owned();
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                connection.execute(
+                    "DELETE FROM negative_cache WHERE path = ?1 AND repository_id = ?2",
+                    params![path, repository_id],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn delete_negative_entries(
+        &self,
+        path: &str,
+        repository_ids: Vec<String>,
+    ) -> Result<(), AppError> {
+        if repository_ids.is_empty() {
+            return Ok(());
+        }
+        let path = path.to_owned();
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                let transaction = connection.transaction()?;
+                for repository_id in repository_ids {
+                    transaction.execute(
+                        "DELETE FROM negative_cache WHERE path = ?1 AND repository_id = ?2",
+                        params![path, repository_id],
+                    )?;
                 }
                 transaction.commit()
             })
@@ -219,9 +323,9 @@ impl Database {
         connection
             .interact(|connection| {
                 connection.query_row(
-                    "SELECT COUNT(*) FILTER (WHERE is_not_found = 0), \
-                     COALESCE(SUM(file_size) FILTER (WHERE is_not_found = 0), 0), \
-                     COUNT(*) FILTER (WHERE is_not_found = 1) FROM artifacts",
+                    "SELECT (SELECT COUNT(*) FROM artifacts), \
+                     (SELECT COALESCE(SUM(file_size), 0) FROM artifacts), \
+                     (SELECT COUNT(*) FROM negative_cache)",
                     [],
                     |row| {
                         Ok(DatabaseStats {
@@ -251,15 +355,14 @@ fn upsert_record(
 ) -> Result<(), deadpool_sqlite::rusqlite::Error> {
     connection.execute(
         "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, upstream, sha1, \
-         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, is_not_found) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
          ON CONFLICT(path) DO UPDATE SET group_id = excluded.group_id, \
          artifact_id = excluded.artifact_id, version = excluded.version, \
          file_type = excluded.file_type, upstream = excluded.upstream, sha1 = excluded.sha1, \
          sha256 = excluded.sha256, etag = excluded.etag, \
          last_modified = excluded.last_modified, file_size = excluded.file_size, \
-         created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt, \
-         is_not_found = excluded.is_not_found",
+         created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt",
         params![
             record.path,
             record.group_id,
@@ -274,7 +377,6 @@ fn upsert_record(
             record.file_size,
             record.created_at,
             record.last_refresh_attempt,
-            i64::from(record.is_not_found),
         ],
     )?;
     Ok(())
@@ -359,9 +461,8 @@ mod tests {
             file_size: 42,
             created_at: 123,
             last_refresh_attempt: None,
-            is_not_found: false,
         };
-        database.upsert(record.clone()).await.unwrap();
+        database.upsert_many(vec![record.clone()]).await.unwrap();
 
         assert_eq!(
             database.get(&record.path).await.unwrap().unwrap().file_size,

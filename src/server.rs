@@ -771,13 +771,13 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(
+        assert_eq!(
             database
-                .get("com/example/demo/maven-metadata.xml")
+                .negative_entries("com/example/demo/maven-metadata.xml")
                 .await
                 .unwrap()
-                .unwrap()
-                .is_not_found
+                .len(),
+            1
         );
         task.abort();
     }

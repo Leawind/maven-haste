@@ -5,6 +5,7 @@ use std::time::Duration;
 use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::circuit::CircuitBreaker;
 use crate::config::{CircuitBreakerConfig, RepositoryConfig, UpstreamConfig};
@@ -23,11 +24,19 @@ pub struct UpstreamClient {
 pub enum FetchResult {
     Found {
         repository: String,
+        repository_id: String,
         response: reqwest::Response,
     },
-    NotModified,
+    NotModified {
+        repository_id: String,
+    },
     NotFound,
     GatewayFailure,
+}
+
+pub struct FetchOutcome {
+    pub result: FetchResult,
+    pub not_found: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,12 +79,18 @@ impl UpstreamClient {
         })
     }
 
-    pub async fn fetch(&self, relative_path: &str, excluded: &HashSet<String>) -> FetchResult {
+    pub async fn fetch(
+        &self,
+        relative_path: &str,
+        excluded: &HashSet<String>,
+        negative: &HashSet<String>,
+    ) -> FetchOutcome {
         let repositories = self
             .routes
             .candidates(relative_path)
             .into_iter()
             .filter(|repository| !excluded.contains(&repository.name))
+            .filter(|repository| !negative.contains(&repository_id(repository)))
             .cloned()
             .map(|repository| (repository, None))
             .collect();
@@ -89,10 +104,12 @@ impl UpstreamClient {
         etag: Option<&str>,
         last_modified: Option<&str>,
         excluded: &HashSet<String>,
-    ) -> FetchResult {
+        negative: &HashSet<String>,
+    ) -> FetchOutcome {
         let mut repositories = Vec::new();
         if !excluded.contains(preferred)
             && let Some(repository) = self.routes.repository(preferred)
+            && !negative.contains(&repository_id(repository))
         {
             repositories.push((
                 repository.clone(),
@@ -109,6 +126,7 @@ impl UpstreamClient {
                 .filter(|repository| {
                     repository.name != preferred && !excluded.contains(&repository.name)
                 })
+                .filter(|repository| !negative.contains(&repository_id(repository)))
                 .cloned()
                 .map(|repository| (repository, None)),
         );
@@ -121,6 +139,7 @@ impl UpstreamClient {
         };
         self.fetch_ordered(relative_path, vec![(repository, None)])
             .await
+            .result
     }
 
     pub fn record_body_success(&self, repository: &str) {
@@ -146,12 +165,21 @@ impl UpstreamClient {
             .collect()
     }
 
+    pub fn all_candidates_negative(&self, relative_path: &str, negative: &HashSet<String>) -> bool {
+        let candidates = self.routes.candidates(relative_path);
+        !candidates.is_empty()
+            && candidates
+                .into_iter()
+                .all(|repository| negative.contains(&repository_id(repository)))
+    }
+
     async fn fetch_ordered(
         &self,
         relative_path: &str,
         repositories: Vec<(RepositoryConfig, Option<ConditionalHeaders>)>,
-    ) -> FetchResult {
+    ) -> FetchOutcome {
         let mut gateway_failure = false;
+        let mut not_found = Vec::new();
 
         for (repository, conditional) in repositories {
             if !self.circuits.allow(&repository.name) {
@@ -173,16 +201,28 @@ impl UpstreamClient {
                 .await
             {
                 RepositoryResult::Found(response) => {
-                    return FetchResult::Found {
-                        repository: repository.name,
-                        response,
+                    return FetchOutcome {
+                        result: FetchResult::Found {
+                            repository_id: repository_id(&repository),
+                            repository: repository.name,
+                            response,
+                        },
+                        not_found,
                     };
                 }
                 RepositoryResult::NotModified => {
                     self.circuits.record_success(&repository.name);
-                    return FetchResult::NotModified;
+                    return FetchOutcome {
+                        result: FetchResult::NotModified {
+                            repository_id: repository_id(&repository),
+                        },
+                        not_found,
+                    };
                 }
-                RepositoryResult::NotFound => self.circuits.record_success(&repository.name),
+                RepositoryResult::NotFound => {
+                    self.circuits.record_success(&repository.name);
+                    not_found.push(repository_id(&repository));
+                }
                 RepositoryResult::GatewayFailure { breaker_failure } => {
                     gateway_failure = true;
                     if breaker_failure {
@@ -194,11 +234,12 @@ impl UpstreamClient {
             }
         }
 
-        if gateway_failure {
+        let result = if gateway_failure {
             FetchResult::GatewayFailure
         } else {
             FetchResult::NotFound
-        }
+        };
+        FetchOutcome { result, not_found }
     }
 
     async fn fetch_repository(
@@ -279,6 +320,10 @@ impl UpstreamClient {
             breaker_failure: true,
         }
     }
+}
+
+fn repository_id(repository: &RepositoryConfig) -> String {
+    format!("{:x}", Sha256::digest(repository.url.as_str().as_bytes()))
 }
 
 enum RepositoryResult {

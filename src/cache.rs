@@ -18,7 +18,7 @@ use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
 
 use crate::config::{CacheConfig, Config, StorageConfig};
-use crate::db::{ArtifactRecord, Database};
+use crate::db::{ArtifactRecord, Database, NegativeCacheEntry};
 use crate::error::AppError;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, UpstreamClient};
@@ -157,8 +157,11 @@ impl CacheManager {
             .map_err(internal)?;
 
         if request.policy() == CachePolicy::Mutable {
-            if let Some(record) = record.as_ref().filter(|record| record.is_not_found)
-                && is_fresh(record, self.inner.config.negative_ttl)
+            let negative = self.fresh_negative_entries(request.relative()).await?;
+            if self
+                .inner
+                .upstream
+                .all_candidates_negative(request.relative(), &negative)
             {
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
                 self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
@@ -187,9 +190,6 @@ impl CacheManager {
             .get(request.relative())
             .await
             .map_err(internal)?;
-        if record.as_ref().is_some_and(|record| record.is_not_found) {
-            return Err(CacheFailure::NotFound);
-        }
         let mut cached = self
             .positive_cache(request, record.as_ref())
             .await?
@@ -262,7 +262,7 @@ impl CacheManager {
         request: &MavenPath,
         record: Option<&ArtifactRecord>,
     ) -> Result<Option<CachedArtifact>, CacheFailure> {
-        let Some(record) = record.filter(|record| !record.is_not_found) else {
+        let Some(record) = record else {
             return Ok(None);
         };
         let file_path = request.final_path(&self.inner.storage.root);
@@ -295,22 +295,9 @@ impl CacheManager {
         {
             return Ok(());
         }
-        if request.policy() == CachePolicy::Mutable
-            && existing.as_ref().is_some_and(|record| {
-                record.is_not_found && is_fresh(record, self.inner.config.negative_ttl)
-            })
-        {
-            return Err(CacheFailure::NotFound);
-        }
-
         match self.prepare_fetch(request, None).await? {
             PreparedFetch::Bundle(files) => self.install_bundle(files).await,
-            PreparedFetch::NotFound => {
-                if request.policy() == CachePolicy::Mutable {
-                    self.store_negative(request).await?;
-                }
-                Err(CacheFailure::NotFound)
-            }
+            PreparedFetch::NotFound => Err(CacheFailure::NotFound),
             PreparedFetch::Gateway | PreparedFetch::NotModified => Err(CacheFailure::Gateway),
         }
     }
@@ -361,7 +348,12 @@ impl CacheManager {
                 .touch_refresh_attempt(request.relative(), unix_timestamp())
                 .await
                 .map_err(internal),
-            PreparedFetch::NotFound => self.store_negative(request).await,
+            PreparedFetch::NotFound => self
+                .inner
+                .database
+                .touch_refresh_attempt(request.relative(), unix_timestamp())
+                .await
+                .map_err(internal),
             PreparedFetch::Gateway => Err(CacheFailure::Gateway),
         }
     }
@@ -373,9 +365,14 @@ impl CacheManager {
     ) -> Result<PreparedFetch, CacheFailure> {
         let mut excluded = HashSet::new();
         let mut upstream_failure = false;
+        let mut negative = if request.policy() == CachePolicy::Mutable {
+            self.fresh_negative_entries(request.relative()).await?
+        } else {
+            HashSet::new()
+        };
 
         loop {
-            let fetched = if let Some(previous) = previous {
+            let outcome = if let Some(previous) = previous {
                 self.inner
                     .upstream
                     .refresh(
@@ -384,20 +381,42 @@ impl CacheManager {
                         previous.etag.as_deref(),
                         previous.last_modified.as_deref(),
                         &excluded,
+                        &negative,
                     )
                     .await
             } else {
                 self.inner
                     .upstream
-                    .fetch(request.relative(), &excluded)
+                    .fetch(request.relative(), &excluded, &negative)
                     .await
             };
 
-            match fetched {
+            if request.policy() == CachePolicy::Mutable && !outcome.not_found.is_empty() {
+                self.inner
+                    .database
+                    .upsert_negative_entries(
+                        request.relative(),
+                        outcome.not_found.clone(),
+                        unix_timestamp(),
+                    )
+                    .await
+                    .map_err(internal)?;
+                negative.extend(outcome.not_found);
+            }
+
+            match outcome.result {
                 FetchResult::Found {
                     repository,
+                    repository_id,
                     response,
                 } => {
+                    if request.policy() == CachePolicy::Mutable {
+                        self.inner
+                            .database
+                            .delete_negative_entry(request.relative(), &repository_id)
+                            .await
+                            .map_err(internal)?;
+                    }
                     let downloaded = match self.download_main(&repository, response).await {
                         Ok(downloaded) => downloaded,
                         Err(error) => {
@@ -419,7 +438,16 @@ impl CacheManager {
                         Err(BundleError::Internal(error)) => return Err(error),
                     }
                 }
-                FetchResult::NotModified => return Ok(PreparedFetch::NotModified),
+                FetchResult::NotModified { repository_id } => {
+                    if request.policy() == CachePolicy::Mutable {
+                        self.inner
+                            .database
+                            .delete_negative_entry(request.relative(), &repository_id)
+                            .await
+                            .map_err(internal)?;
+                    }
+                    return Ok(PreparedFetch::NotModified);
+                }
                 FetchResult::NotFound if upstream_failure => return Ok(PreparedFetch::Gateway),
                 FetchResult::NotFound => return Ok(PreparedFetch::NotFound),
                 FetchResult::GatewayFailure => return Ok(PreparedFetch::Gateway),
@@ -476,7 +504,6 @@ impl CacheManager {
             file_size: i64::try_from(downloaded.size).unwrap_or(i64::MAX),
             created_at: now,
             last_refresh_attempt: refresh_attempt,
-            is_not_found: false,
         };
         let mut files = vec![PreparedFile {
             relative: request.relative().into(),
@@ -495,6 +522,7 @@ impl CacheManager {
             let relative = format!("{}.{extension}", request.relative());
             if let FetchResult::Found {
                 repository: checksum_repository,
+                repository_id: _,
                 response,
             } = self.inner.upstream.fetch_from(repository, &relative).await
             {
@@ -544,7 +572,6 @@ impl CacheManager {
                     file_size: i64::try_from(content.len()).unwrap_or(i64::MAX),
                     created_at: now,
                     last_refresh_attempt: refresh_attempt,
-                    is_not_found: false,
                 },
             });
         }
@@ -622,28 +649,29 @@ impl CacheManager {
             .map_err(internal)
     }
 
-    async fn store_negative(&self, request: &MavenPath) -> Result<(), CacheFailure> {
-        let now = unix_timestamp();
+    async fn fresh_negative_entries(&self, path: &str) -> Result<HashSet<String>, CacheFailure> {
+        let entries = self
+            .inner
+            .database
+            .negative_entries(path)
+            .await
+            .map_err(internal)?;
+        let (fresh, expired): (Vec<NegativeCacheEntry>, Vec<NegativeCacheEntry>) =
+            entries.into_iter().partition(|entry| {
+                is_timestamp_fresh(entry.observed_at, self.inner.config.negative_ttl)
+            });
         self.inner
             .database
-            .upsert(ArtifactRecord {
-                path: request.relative().into(),
-                group_id: request.group_id.clone(),
-                artifact_id: request.artifact_id.clone(),
-                version: request.version.clone(),
-                file_type: request.file_type.clone(),
-                upstream: String::new(),
-                sha1: None,
-                sha256: None,
-                etag: None,
-                last_modified: None,
-                file_size: 0,
-                created_at: now,
-                last_refresh_attempt: Some(now),
-                is_not_found: true,
-            })
+            .delete_negative_entries(
+                path,
+                expired
+                    .into_iter()
+                    .map(|entry| entry.repository_id)
+                    .collect(),
+            )
             .await
-            .map_err(internal)
+            .map_err(internal)?;
+        Ok(fresh.into_iter().map(|entry| entry.repository_id).collect())
     }
 
     fn remove_completed_flight(&self, key: &str, completed: &Arc<Flight>) {
@@ -802,6 +830,10 @@ async fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
 
 fn is_fresh(record: &ArtifactRecord, ttl: Duration) -> bool {
     let timestamp = record.last_refresh_attempt.unwrap_or(record.created_at);
+    is_timestamp_fresh(timestamp, ttl)
+}
+
+fn is_timestamp_fresh(timestamp: i64, ttl: Duration) -> bool {
     let age = unix_timestamp().saturating_sub(timestamp) as u64;
     Duration::from_secs(age) < ttl
 }
