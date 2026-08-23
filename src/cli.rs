@@ -17,6 +17,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "ADDR")]
     pub bind: Option<SocketAddr>,
 
+    /// Enable debug logging for Maven Haste
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -63,6 +67,7 @@ mod tests {
         let cli = Cli::try_parse_from(["maven-haste", "--config", "config.toml"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.config, Some(PathBuf::from("config.toml")));
+        assert!(!cli.verbose);
     }
 
     #[test]
@@ -74,5 +79,12 @@ mod tests {
                 command: ConfigCommand::Init { path: Some(path) }
             }) if path == Path::new("custom.toml")
         ));
+    }
+
+    #[test]
+    fn parses_verbose_flag() {
+        let cli = Cli::try_parse_from(["maven-haste", "--verbose", "run"]).unwrap();
+        assert!(cli.verbose);
+        assert!(matches!(cli.command, Some(Command::Run)));
     }
 }

@@ -56,3 +56,5 @@ allprojects {
 - `GET /__cache/stats`：返回缓存文件数量和大小、命中率、负缓存数量及上游熔断状态。
 
 使用 `RUST_LOG` 调整日志级别，例如 `RUST_LOG=maven_haste=debug`。服务收到 Ctrl-C 后会优雅停止接受请求。
+
+也可以在启动时使用 `--verbose` 启用调试日志，例如 `maven-haste --verbose run -c ./maven-haste.toml`；若同时设置了 `RUST_LOG`，环境变量优先。

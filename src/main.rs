@@ -79,7 +79,7 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         return Ok(());
     }
 
-    init_tracing()?;
+    init_tracing(cli.verbose)?;
     tracing::info!(config = %loaded.path.display(), "loaded configuration");
     tracing::info!(
         root = %loaded.config.storage.root.display(),
@@ -145,9 +145,14 @@ fn maven_endpoint(bind: std::net::SocketAddr, base_path: &str) -> String {
     format!("http://{bind}{base_path}")
 }
 
-fn init_tracing() -> Result<(), AppError> {
+fn init_tracing(verbose: bool) -> Result<(), AppError> {
+    let default_filter = if verbose {
+        "maven_haste=debug"
+    } else {
+        "maven_haste=info"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("maven_haste=info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .try_init()
