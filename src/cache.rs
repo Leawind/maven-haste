@@ -157,16 +157,6 @@ impl CacheManager {
             .map_err(internal)?;
 
         if request.policy() == CachePolicy::Mutable {
-            let negative = self.fresh_negative_entries(request.relative()).await?;
-            if self
-                .inner
-                .upstream
-                .all_candidates_negative(request.relative(), &negative)
-            {
-                self.inner.hits.fetch_add(1, Ordering::Relaxed);
-                self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
-                return Err(CacheFailure::NotFound);
-            }
             if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
                 let stale = !is_fresh(&cached.record, self.inner.config.metadata_ttl);
                 if stale {
@@ -176,6 +166,16 @@ impl CacheManager {
                 }
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(cached);
+            }
+            let negative = self.fresh_negative_entries(request.relative()).await?;
+            if self
+                .inner
+                .upstream
+                .all_candidates_negative(request.relative(), &negative)
+            {
+                self.inner.hits.fetch_add(1, Ordering::Relaxed);
+                self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
+                return Err(CacheFailure::NotFound);
             }
         } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
             self.inner.hits.fetch_add(1, Ordering::Relaxed);

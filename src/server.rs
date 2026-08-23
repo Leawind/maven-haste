@@ -686,6 +686,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_stale_metadata_when_refresh_is_not_found() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Response::new(Body::from("metadata-v1"))
+                    } else {
+                        error_response(StatusCode::NOT_FOUND, "missing")
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let cache_config = CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        };
+        let (app, database) = test_app_with_cache(
+            &directory,
+            vec![repository("central", &url, &[])],
+            cache_config,
+            UpstreamConfig::default(),
+        )
+        .await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "metadata-v1"
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "metadata-v1"
+        );
+        wait_for(|| calls.load(Ordering::SeqCst) == 2).await;
+        wait_for(|| {
+            std::fs::read_to_string(
+                directory
+                    .path()
+                    .join("repository/com/example/demo/maven-metadata.xml"),
+            )
+            .is_ok_and(|content| content == "metadata-v1")
+        })
+        .await;
+        for _ in 0..100 {
+            if database
+                .negative_entries("com/example/demo/maven-metadata.xml")
+                .await
+                .is_ok_and(|entries| entries.len() == 1)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            database
+                .negative_entries("com/example/demo/maven-metadata.xml")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            body(request(&app, Method::GET, metadata).await).await,
+            "metadata-v1"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn conditional_refresh_accepts_not_modified() {
         let calls = Arc::new(AtomicUsize::new(0));
         let saw_condition = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -780,6 +858,158 @@ mod tests {
             1
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn newly_configured_upstream_is_tried_despite_existing_negative_entry() {
+        let missing_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&missing_calls);
+        let missing = Router::new().route(
+            "/{*path}",
+            get(move || {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    error_response(StatusCode::NOT_FOUND, "missing")
+                }
+            }),
+        );
+        let (missing_url, missing_task) = spawn_upstream(missing).await;
+        let directory = TempDir::new().unwrap();
+        let (first_app, _) =
+            test_app(&directory, vec![repository("missing", &missing_url, &[])]).await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+        assert_eq!(
+            request(&first_app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let found_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&found_calls);
+        let found = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        error_response(StatusCode::NOT_FOUND, "missing checksum")
+                    } else {
+                        Response::new(Body::from("metadata"))
+                    }
+                }
+            }),
+        );
+        let (found_url, found_task) = spawn_upstream(found).await;
+        let (second_app, database) = test_app(
+            &directory,
+            vec![
+                repository("missing", &missing_url, &[]),
+                repository("found", &found_url, &[]),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            body(request(&second_app, Method::GET, metadata).await).await,
+            "metadata"
+        );
+        assert_eq!(missing_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(found_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            database
+                .negative_entries("com/example/demo/maven-metadata.xml")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        missing_task.abort();
+        found_task.abort();
+    }
+
+    #[tokio::test]
+    async fn changing_upstream_url_invalidates_its_negative_entry() {
+        let missing = Router::new().route(
+            "/{*path}",
+            get(|| async { error_response(StatusCode::NOT_FOUND, "missing") }),
+        );
+        let (missing_url, missing_task) = spawn_upstream(missing).await;
+        let directory = TempDir::new().unwrap();
+        let (first_app, _) =
+            test_app(&directory, vec![repository("central", &missing_url, &[])]).await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+        assert_eq!(
+            request(&first_app, Method::GET, metadata).await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let found = Router::new().route(
+            "/{*path}",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                if is_checksum_uri(&uri) {
+                    error_response(StatusCode::NOT_FOUND, "missing checksum")
+                } else {
+                    Response::new(Body::from("metadata"))
+                }
+            }),
+        );
+        let (found_url, found_task) = spawn_upstream(found).await;
+        let (second_app, _) =
+            test_app(&directory, vec![repository("central", &found_url, &[])]).await;
+        assert_eq!(
+            body(request(&second_app, Method::GET, metadata).await).await,
+            "metadata"
+        );
+        missing_task.abort();
+        found_task.abort();
+    }
+
+    #[tokio::test]
+    async fn records_explicit_not_found_when_another_upstream_fails() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let missing = Router::new().route(
+            "/{*path}",
+            get(move || {
+                let calls = Arc::clone(&handler_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    error_response(StatusCode::NOT_FOUND, "missing")
+                }
+            }),
+        );
+        let (missing_url, missing_task) = spawn_upstream(missing).await;
+        let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app(
+            &directory,
+            vec![
+                repository("missing", &missing_url, &[]),
+                repository("failed", &unreachable, &[]),
+            ],
+        )
+        .await;
+        let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            request(&app, Method::GET, metadata).await.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            database
+                .negative_entries("com/example/demo/maven-metadata.xml")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        missing_task.abort();
     }
 
     #[tokio::test]

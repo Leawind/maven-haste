@@ -476,4 +476,51 @@ mod tests {
             vec![record.path]
         );
     }
+
+    #[tokio::test]
+    async fn persists_negative_entries_per_path_and_repository() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("cache.db");
+        let database = Database::open(&path).await.unwrap();
+        database
+            .upsert_negative_entries(
+                "com/example/maven-metadata.xml",
+                vec!["repo-a".into(), "repo-b".into()],
+                123,
+            )
+            .await
+            .unwrap();
+        database
+            .upsert_negative_entries("com/example/maven-metadata.xml", vec!["repo-a".into()], 456)
+            .await
+            .unwrap();
+        drop(database);
+
+        let database = Database::open(&path).await.unwrap();
+        let mut entries = database
+            .negative_entries("com/example/maven-metadata.xml")
+            .await
+            .unwrap();
+        entries.sort_by(|left, right| left.repository_id.cmp(&right.repository_id));
+        assert_eq!(
+            entries,
+            vec![
+                NegativeCacheEntry {
+                    repository_id: "repo-a".into(),
+                    observed_at: 456,
+                },
+                NegativeCacheEntry {
+                    repository_id: "repo-b".into(),
+                    observed_at: 123,
+                },
+            ]
+        );
+        assert_eq!(database.stats().await.unwrap().negative_entries, 2);
+
+        database
+            .delete_negative_entry("com/example/maven-metadata.xml", "repo-a")
+            .await
+            .unwrap();
+        assert_eq!(database.stats().await.unwrap().negative_entries, 1);
+    }
 }
