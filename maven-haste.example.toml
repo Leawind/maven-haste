@@ -50,8 +50,8 @@ recovery_timeout = '30s'
 # # Base URL of the upstream Maven repository.
 # url = 'https://repo1.maven.org/maven2/'
 # # Ordered request-path glob rules. The first matching rule decides participation.
-# # Prefix a rule with ! to exclude it; * may match across path separators.
-# rules = ['*']
+# # Prefix a rule with ! to exclude it; * matches within one path segment and ** may match across path separators.
+# rules = ['**']
 
 [[repositories]]
 name = 'central'

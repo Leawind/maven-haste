@@ -674,7 +674,7 @@ mod tests {
         let (fallback_url, fallback_task) = spawn_upstream(fallback).await;
         let directory = TempDir::new().unwrap();
         let repositories = vec![
-            repository("excluded", &excluded_url, &["org/other/*", "!*"]),
+            repository("excluded", &excluded_url, &["org/other/**", "!**"]),
             repository("fallback", &fallback_url, &[]),
         ];
         let (app, _) = test_app(&directory, repositories).await;
@@ -692,7 +692,7 @@ mod tests {
     async fn returns_not_found_when_every_repository_is_excluded() {
         let directory = TempDir::new().unwrap();
         let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
-        let repositories = vec![repository("excluded", &unreachable, &["!*"])];
+        let repositories = vec![repository("excluded", &unreachable, &["!**"])];
         let (app, _) = test_app(&directory, repositories).await;
 
         let response = request(&app, Method::GET, ARTIFACT_PATH).await;

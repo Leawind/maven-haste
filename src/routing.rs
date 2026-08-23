@@ -44,29 +44,55 @@ fn participates(repository: &RepositoryConfig, path: &str) -> bool {
 fn glob_matches(pattern: &str, value: &str) -> bool {
     let pattern = pattern.as_bytes();
     let value = value.as_bytes();
-    let (mut pattern_index, mut value_index) = (0, 0);
-    let (mut star, mut star_value) = (None, 0);
+    let width = value.len() + 1;
+    let mut memo = vec![None; (pattern.len() + 1) * width];
+    glob_matches_from(pattern, value, 0, 0, width, &mut memo)
+}
 
-    while value_index < value.len() {
-        if pattern_index < pattern.len() && pattern[pattern_index] == value[value_index] {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-            star = Some(pattern_index);
-            pattern_index += 1;
-            star_value = value_index;
-        } else if let Some(star_index) = star {
-            pattern_index = star_index + 1;
-            star_value += 1;
-            value_index = star_value;
-        } else {
-            return false;
+fn glob_matches_from(
+    pattern: &[u8],
+    value: &[u8],
+    pattern_index: usize,
+    value_index: usize,
+    width: usize,
+    memo: &mut [Option<bool>],
+) -> bool {
+    let memo_index = pattern_index * width + value_index;
+    if let Some(result) = memo[memo_index] {
+        return result;
+    }
+
+    let result = if pattern_index == pattern.len() {
+        value_index == value.len()
+    } else if pattern[pattern_index] == b'*' {
+        let mut stars_end = pattern_index;
+        while stars_end < pattern.len() && pattern[stars_end] == b'*' {
+            stars_end += 1;
         }
-    }
-    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
-        pattern_index += 1;
-    }
-    pattern_index == pattern.len()
+        let recursive = stars_end - pattern_index >= 2;
+        let after_stars = if recursive && pattern.get(stars_end) == Some(&b'/') {
+            stars_end + 1
+        } else {
+            stars_end
+        };
+        glob_matches_from(pattern, value, after_stars, value_index, width, memo)
+            || (value_index < value.len()
+                && (recursive || value[value_index] != b'/')
+                && glob_matches_from(pattern, value, pattern_index, value_index + 1, width, memo))
+    } else {
+        value_index < value.len()
+            && pattern[pattern_index] == value[value_index]
+            && glob_matches_from(
+                pattern,
+                value,
+                pattern_index + 1,
+                value_index + 1,
+                width,
+                memo,
+            )
+    };
+    memo[memo_index] = Some(result);
+    result
 }
 
 #[cfg(test)]
@@ -87,7 +113,7 @@ mod tests {
     #[test]
     fn first_matching_rule_controls_participation() {
         let engine = RouteEngine::new(vec![
-            repository("fabric", &["net/fabricmc/*", "!*"]),
+            repository("fabric", &["net/fabricmc/**", "!**"]),
             repository("fallback", &[]),
         ]);
 
@@ -111,8 +137,16 @@ mod tests {
     }
 
     #[test]
-    fn star_matches_across_path_separators() {
-        assert!(glob_matches("net/fabricmc/*", "net/fabricmc/a/b/c.jar"));
-        assert!(!glob_matches("net/fabricmc/*", "net/minecraft/a.jar"));
+    fn star_matches_within_a_single_path_segment() {
+        assert!(glob_matches("net/fabricmc/*", "net/fabricmc/loader"));
+        assert!(!glob_matches("net/fabricmc/*", "net/fabricmc/a/b/c.jar"));
+    }
+
+    #[test]
+    fn globstar_matches_zero_or_more_path_segments() {
+        assert!(glob_matches("net/fabricmc/**", "net/fabricmc/a/b/c.jar"));
+        assert!(glob_matches("net/**/loader", "net/loader"));
+        assert!(glob_matches("net/**/loader", "net/fabricmc/loader"));
+        assert!(!glob_matches("net/fabricmc/**", "net/minecraft/a.jar"));
     }
 }
