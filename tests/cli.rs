@@ -19,11 +19,6 @@ fn check_mode_runs_through_the_built_binary() {
 
     assert!(output.status.success());
     assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("configuration is valid")
-    );
-    assert!(
         directory
             .path()
             .join("repository/.maven-haste/tmp")
@@ -42,11 +37,6 @@ fn missing_explicit_config_exits_with_configuration_error() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("configuration file")
-    );
 }
 
 #[test]

@@ -397,27 +397,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn creates_artifact_schema() {
+    async fn opens_an_empty_database() {
         let directory = TempDir::new().unwrap();
         let database = Database::open(&directory.path().join("cache.db"))
             .await
             .unwrap();
-        let connection = database.pool.get().await.unwrap();
-        let table = connection
-            .interact(|connection| {
-                connection
-                    .query_row(
-                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
-                        [],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-            })
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(table.as_deref(), Some("artifacts"));
+        assert_eq!(
+            database.stats().await.unwrap(),
+            DatabaseStats {
+                files: 0,
+                total_size: 0,
+                negative_entries: 0,
+            }
+        );
     }
 
     #[tokio::test]

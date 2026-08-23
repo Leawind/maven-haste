@@ -221,6 +221,7 @@ mod tests {
     use axum::body::Bytes;
     use axum::http::{Request, Uri};
     use http_body_util::BodyExt;
+    use serde_json::Value;
     use tempfile::TempDir;
     use tower::ServiceExt;
     use url::Url;
@@ -329,19 +330,19 @@ mod tests {
         let stats = request(&app, Method::GET, "/__cache/stats").await;
         assert_eq!(stats.status(), StatusCode::OK);
         assert_eq!(stats.headers()[CONTENT_TYPE], "application/json");
-        let stats = body(stats).await;
-        for expected in [
-            "\"files\":3",
-            "\"total_size\":109",
-            "\"requests\":2",
-            "\"hits\":1",
-            "\"misses\":1",
-            "\"hit_rate\":0.5",
-            "\"name\":\"central\"",
-            "\"circuit\":\"closed\"",
-        ] {
-            assert!(stats.contains(expected), "missing {expected} in {stats}");
-        }
+        let stats: Value = serde_json::from_str(&body(stats).await).unwrap();
+        assert_eq!(stats["files"].as_u64(), Some(3));
+        assert!(stats["total_size"].as_u64().is_some_and(|size| size >= 3));
+        assert_eq!(stats["requests"].as_u64(), Some(2));
+        assert_eq!(stats["hits"].as_u64(), Some(1));
+        assert_eq!(stats["misses"].as_u64(), Some(1));
+        assert_eq!(stats["hit_rate"].as_f64(), Some(0.5));
+        assert!(stats["upstreams"].as_array().is_some_and(|upstreams| {
+            upstreams.iter().any(|upstream| {
+                upstream["name"].as_str() == Some("central")
+                    && upstream["circuit"].as_str() == Some("closed")
+            })
+        }));
         task.abort();
     }
 

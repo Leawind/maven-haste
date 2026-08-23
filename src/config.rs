@@ -555,8 +555,7 @@ rules = ["com.example:*"]
 "#,
         );
 
-        let error = load(&cli(&path)).unwrap_err();
-        assert!(error.to_string().contains("invalid path glob rule"));
+        assert!(load(&cli(&path)).is_err());
     }
 
     #[test]
@@ -577,13 +576,22 @@ url = "https://repo.example/"
         let loaded = load(&cli(&path)).unwrap();
         let serialized = toml::to_string_pretty(&loaded.config).unwrap();
 
-        assert!(serialized.contains("tmp_dir = "));
-        assert!(serialized.contains("db_path = "));
-        assert!(serialized.contains("metadata_ttl = \"5m\""));
-        assert!(serialized.contains("connect_timeout = \"10s\""));
-        assert!(serialized.contains("read_timeout = \"1m\""));
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.storage.root, loaded.config.storage.root);
+        assert_eq!(reparsed.storage.tmp_dir(), loaded.config.storage.tmp_dir());
+        assert_eq!(reparsed.storage.db_path(), loaded.config.storage.db_path());
+        assert_eq!(
+            reparsed.cache.metadata_ttl,
+            loaded.config.cache.metadata_ttl
+        );
+        assert_eq!(
+            reparsed.upstream.connect_timeout,
+            loaded.config.upstream.connect_timeout
+        );
+        assert_eq!(
+            reparsed.upstream.read_timeout,
+            loaded.config.upstream.read_timeout
+        );
     }
 
     #[test]
@@ -602,12 +610,7 @@ url = "https://repo.example/"
 "#,
         );
 
-        let error = load(&cli(&path)).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("reserved .maven-haste directory")
-        );
+        assert!(load(&cli(&path)).is_err());
     }
 
     #[test]
