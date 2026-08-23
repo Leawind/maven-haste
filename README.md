@@ -18,6 +18,8 @@ maven-haste run -c ./maven-haste.toml
 
 `[upstream]` 中的 `connect_timeout` 限制建立上游连接的时间，`read_timeout` 限制每次响应体读取允许的空闲时间；每收到一个数据块，读取计时就会重置，因此不会限制大文件的总下载时长。旧的 `cache.refresh_timeout` 已被删除，升级配置时请改用这两个字段。
 
+上游请求同时受 `max_concurrency` 全局上限和 `default_repository_max_concurrency` 单仓库默认上限约束；仓库可通过自身的 `max_concurrency` 覆盖后者。首次下载优先于后台缓存更新，但两类请求都会排队并最终执行；`foreground_priority_burst` 控制持续繁忙时每放行多少个首次下载后给缓存更新一次执行机会。
+
 ## Gradle 接入
 
 在 `~/.gradle/init.d/maven-haste.gradle`（Windows 为 `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`）中加入：

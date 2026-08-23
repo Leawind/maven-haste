@@ -14,8 +14,6 @@ root = './repository'
 metadata_ttl = '5m'
 # How long a confirmed 404 is remembered for one path in one upstream repository.
 negative_ttl = '5m'
-# Maximum number of simultaneous background metadata refreshes.
-refresh_max_concurrency = 10
 # Serve the last cached mutable file when refreshing it encounters an upstream failure.
 serve_stale_on_error = true
 
@@ -25,6 +23,12 @@ connect_timeout = '10s'
 # Maximum idle time while reading each upstream response body.
 # This is not a limit on the total download time of a large file.
 read_timeout = '60s'
+# Maximum number of simultaneous requests across all upstream repositories.
+max_concurrency = 32
+# Per-repository concurrency limit when a repository does not override it.
+default_repository_max_concurrency = 10
+# Admit one queued cache refresh after this many foreground downloads while both are waiting.
+foreground_priority_burst = 8
 
 [circuit_breaker]
 # Consecutive upstream failures required before temporarily skipping that repository.
@@ -45,3 +49,5 @@ recovery_timeout = '30s'
 [[repositories]]
 name = 'central'
 url = 'https://repo1.maven.org/maven2/'
+# Optional per-repository override of default_repository_max_concurrency.
+# max_concurrency = 16

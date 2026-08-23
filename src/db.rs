@@ -6,11 +6,12 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
 use crate::error::AppError;
 
 const CONNECTION_PRAGMAS: &str = r#"
-PRAGMA synchronous=OFF;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;
 "#;
 
 const SCHEMA: &str = r#"
-PRAGMA journal_mode=DELETE;
+PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS artifacts (
     path TEXT PRIMARY KEY COLLATE BINARY,
@@ -422,14 +423,23 @@ mod tests {
         let second = database.pool.get().await.unwrap();
 
         for connection in [first, second] {
-            let synchronous = connection
+            let (journal_mode, synchronous, busy_timeout) = connection
                 .interact(|connection| {
-                    connection.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+                    Ok::<_, deadpool_sqlite::rusqlite::Error>((
+                        connection
+                            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+                        connection
+                            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
+                        connection
+                            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?,
+                    ))
                 })
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(synchronous, 0);
+            assert_eq!(journal_mode, "wal");
+            assert_eq!(synchronous, 1);
+            assert_eq!(busy_timeout, 5_000);
         }
     }
 

@@ -137,7 +137,7 @@ fn log_request(
     upstream: Option<&str>,
     started: Instant,
 ) {
-    tracing::info!(
+    tracing::debug!(
         %method,
         path,
         status = response.status().as_u16(),
@@ -442,6 +442,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upstream_limit_is_held_until_response_body_finishes() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new().route(
+            "/{*path}",
+            get({
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                move |OriginalUri(uri): OriginalUri| {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    async move {
+                        if is_checksum_uri(&uri) {
+                            return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                        }
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        let stream = futures_util::stream::once(async move {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok::<_, Infallible>(Bytes::from_static(b"limited"))
+                        });
+                        Response::new(Body::from_stream(stream))
+                    }
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app_with_cache(
+            &directory,
+            vec![repository("limited", &url, &[])],
+            CacheConfig::default(),
+            UpstreamConfig {
+                max_concurrency: 1,
+                default_repository_max_concurrency: 1,
+                ..UpstreamConfig::default()
+            },
+        )
+        .await;
+
+        let first = {
+            let app = app.clone();
+            tokio::spawn(async move { request(&app, Method::GET, ARTIFACT_PATH).await })
+        };
+        let second = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                request(
+                    &app,
+                    Method::GET,
+                    "/maven/com/example/other/1.0/other-1.0.jar",
+                )
+                .await
+            })
+        };
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(second.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn retries_server_errors_and_respects_excluding_routes() {
         let excluded_calls = Arc::new(AtomicUsize::new(0));
         let excluded_handler_calls = Arc::clone(&excluded_calls);
@@ -511,6 +574,7 @@ mod tests {
         let upstream_config = UpstreamConfig {
             connect_timeout: Duration::from_millis(100),
             read_timeout: Duration::from_millis(100),
+            ..UpstreamConfig::default()
         };
         let (app, _) = test_app_with_cache(
             &directory,
@@ -561,6 +625,7 @@ mod tests {
             UpstreamConfig {
                 connect_timeout: Duration::from_millis(100),
                 read_timeout: Duration::from_millis(50),
+                ..UpstreamConfig::default()
             },
         )
         .await;
@@ -594,6 +659,7 @@ mod tests {
             UpstreamConfig {
                 connect_timeout: Duration::from_millis(100),
                 read_timeout: Duration::from_millis(50),
+                ..UpstreamConfig::default()
             },
         )
         .await;
@@ -1196,6 +1262,7 @@ mod tests {
         RepositoryConfig {
             name: name.into(),
             url: url.clone(),
+            max_concurrency: None,
             rules: rules.iter().map(|rule| (*rule).into()).collect(),
         }
     }

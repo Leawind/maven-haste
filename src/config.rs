@@ -98,7 +98,6 @@ pub struct CacheConfig {
     pub metadata_ttl: Duration,
     #[serde(with = "humantime_serde")]
     pub negative_ttl: Duration,
-    pub refresh_max_concurrency: usize,
     pub serve_stale_on_error: bool,
 }
 
@@ -107,7 +106,6 @@ impl Default for CacheConfig {
         Self {
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
-            refresh_max_concurrency: 10,
             serve_stale_on_error: true,
         }
     }
@@ -120,6 +118,9 @@ pub struct UpstreamConfig {
     pub connect_timeout: Duration,
     #[serde(with = "humantime_serde")]
     pub read_timeout: Duration,
+    pub max_concurrency: usize,
+    pub default_repository_max_concurrency: usize,
+    pub foreground_priority_burst: usize,
 }
 
 impl Default for UpstreamConfig {
@@ -127,6 +128,9 @@ impl Default for UpstreamConfig {
         Self {
             connect_timeout: Duration::from_secs(10),
             read_timeout: Duration::from_secs(60),
+            max_concurrency: 32,
+            default_repository_max_concurrency: 10,
+            foreground_priority_burst: 8,
         }
     }
 }
@@ -153,6 +157,8 @@ impl Default for CircuitBreakerConfig {
 pub struct RepositoryConfig {
     pub name: String,
     pub url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
     #[serde(default)]
     pub rules: Vec<String>,
 }
@@ -345,11 +351,6 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
-    if config.cache.refresh_max_concurrency == 0 {
-        return Err(ConfigError::new(
-            "cache.refresh_max_concurrency must be greater than zero",
-        ));
-    }
     if config.upstream.connect_timeout.is_zero() {
         return Err(ConfigError::new(
             "upstream.connect_timeout must be greater than zero",
@@ -359,6 +360,23 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         return Err(ConfigError::new(
             "upstream.read_timeout must be greater than zero",
         ));
+    }
+    for (name, value) in [
+        ("upstream.max_concurrency", config.upstream.max_concurrency),
+        (
+            "upstream.default_repository_max_concurrency",
+            config.upstream.default_repository_max_concurrency,
+        ),
+        (
+            "upstream.foreground_priority_burst",
+            config.upstream.foreground_priority_burst,
+        ),
+    ] {
+        if value == 0 {
+            return Err(ConfigError::new(format!(
+                "{name} must be greater than zero"
+            )));
+        }
     }
     if config.circuit_breaker.failure_threshold == 0 {
         return Err(ConfigError::new(
@@ -384,6 +402,12 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         if !names.insert(&repository.name) {
             return Err(ConfigError::new(format!(
                 "repository name {:?} is duplicated",
+                repository.name
+            )));
+        }
+        if repository.max_concurrency == Some(0) {
+            return Err(ConfigError::new(format!(
+                "repository {:?} max_concurrency must be greater than zero",
                 repository.name
             )));
         }
@@ -537,6 +561,13 @@ url = "https://repo.example/"
             Duration::from_secs(10)
         );
         assert_eq!(loaded.config.upstream.read_timeout, Duration::from_secs(60));
+        assert_eq!(loaded.config.upstream.max_concurrency, 32);
+        assert_eq!(
+            loaded.config.upstream.default_repository_max_concurrency,
+            10
+        );
+        assert_eq!(loaded.config.upstream.foreground_priority_burst, 8);
+        assert_eq!(loaded.config.repositories[0].max_concurrency, None);
     }
 
     #[test]
@@ -650,9 +681,84 @@ refresh_timeout = "10s"
 name = "central"
 url = "https://repo.example/"
 "#,
+            r#"
+[storage]
+root = "repository"
+
+[cache]
+refresh_max_concurrency = 10
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+max_concurrency = 0
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+default_repository_max_concurrency = 0
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+foreground_priority_burst = 0
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+max_concurrency = 0
+"#,
         ] {
             let path = write_config(&directory, body);
             assert!(load(&cli(&path)).is_err());
         }
+    }
+
+    #[test]
+    fn loads_repository_concurrency_override() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+max_concurrency = 17
+"#,
+        );
+
+        assert_eq!(
+            load(&cli(&path)).unwrap().config.repositories[0].max_concurrency,
+            Some(17)
+        );
     }
 }

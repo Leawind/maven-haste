@@ -14,14 +14,14 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::config::{CacheConfig, Config, StorageConfig};
 use crate::db::{ArtifactRecord, Database, NegativeCacheEntry};
 use crate::error::AppError;
 use crate::request_path::{CachePolicy, MavenPath};
-use crate::upstream::{FetchResult, UpstreamClient};
+use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
 
 const MAX_CHECKSUM_BYTES: usize = 64 * 1024;
 type Flight = OnceCell<Result<(), CacheFailure>>;
@@ -39,7 +39,6 @@ struct CacheInner {
     case_sensitive: bool,
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
-    refresh_permits: Arc<Semaphore>,
     requests: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -137,7 +136,6 @@ impl CacheManager {
                 case_sensitive,
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
-                refresh_permits: Arc::new(Semaphore::new(config.cache.refresh_max_concurrency)),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -307,9 +305,6 @@ impl CacheManager {
         let Entry::Vacant(entry) = self.inner.refreshes.entry(key.clone()) else {
             return;
         };
-        let Ok(permit) = Arc::clone(&self.inner.refresh_permits).try_acquire_owned() else {
-            return;
-        };
         entry.insert(());
 
         let cache = self.clone();
@@ -331,7 +326,6 @@ impl CacheManager {
                 }
             }
             cache.inner.refreshes.remove(&key);
-            drop(permit);
         });
     }
 
@@ -363,6 +357,11 @@ impl CacheManager {
         request: &MavenPath,
         previous: Option<&ArtifactRecord>,
     ) -> Result<PreparedFetch, CacheFailure> {
+        let priority = if previous.is_some() {
+            RequestPriority::Background
+        } else {
+            RequestPriority::Foreground
+        };
         let mut excluded = HashSet::new();
         let mut upstream_failure = false;
         let mut negative = if request.policy() == CachePolicy::Mutable {
@@ -427,7 +426,10 @@ impl CacheManager {
                             continue;
                         }
                     };
-                    match self.prepare_bundle(request, &repository, downloaded).await {
+                    match self
+                        .prepare_bundle(request, &repository, downloaded, priority)
+                        .await
+                    {
                         Ok(files) => return Ok(PreparedFetch::Bundle(files)),
                         Err(BundleError::ChecksumMismatch(error)) => {
                             upstream_failure = true;
@@ -458,7 +460,7 @@ impl CacheManager {
     async fn download_main(
         &self,
         repository: &str,
-        response: reqwest::Response,
+        response: UpstreamResponse,
     ) -> Result<DownloadedMain, CacheFailure> {
         let etag = header_string(response.headers(), ETAG);
         let last_modified = header_string(response.headers(), LAST_MODIFIED);
@@ -487,6 +489,7 @@ impl CacheManager {
         request: &MavenPath,
         repository: &str,
         downloaded: DownloadedMain,
+        priority: RequestPriority,
     ) -> Result<Vec<PreparedFile>, BundleError> {
         let now = unix_timestamp();
         let refresh_attempt = (request.policy() == CachePolicy::Mutable).then_some(now);
@@ -524,7 +527,11 @@ impl CacheManager {
                 repository: checksum_repository,
                 repository_id: _,
                 response,
-            } = self.inner.upstream.fetch_from(repository, &relative).await
+            } = self
+                .inner
+                .upstream
+                .fetch_from(repository, &relative, priority)
+                .await
             {
                 let supplied = match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
                     Ok(supplied) => supplied,
@@ -692,9 +699,10 @@ enum BundleError {
 }
 
 async fn stream_to_file(
-    response: reqwest::Response,
+    response: UpstreamResponse,
     destination: &Path,
 ) -> Result<(u64, String, String), CacheFailure> {
+    let (response, _permit) = response.into_parts();
     let mut file = create_temporary(destination).await?;
     let mut stream = response.bytes_stream();
     let mut size = 0_u64;
@@ -723,9 +731,10 @@ async fn stream_to_file(
 }
 
 async fn read_checksum_response(
-    response: reqwest::Response,
+    response: UpstreamResponse,
     limit: usize,
 ) -> Result<String, CacheFailure> {
+    let (response, _permit) = response.into_parts();
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
