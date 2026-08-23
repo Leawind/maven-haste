@@ -2,8 +2,12 @@
 name = "maven-haste"
 version = "0.1.0"
 edition = "2024"
-description = "A lightweight local Maven repository proxy cache"
+description = "A lightweight, self-hosted local Maven repository proxy cache."
 license = "MIT"
+repository = "https://github.com/Leawind/maven-haste"
+readme = "README.md"
+keywords = ["maven", "proxy", "cache", "repository"]
+categories = ["caching", "command-line-utilities"]
 
 [dependencies]
 axum = "0.8"
