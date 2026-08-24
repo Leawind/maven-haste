@@ -125,3 +125,7 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 `--verbose` also enables debug logging; if both are set, the environment variable takes precedence.
 
 File logging is disabled by default. Configure `[logging]` with `enabled = true` to enable. The default directory is `<root>/.maven-haste/logs`.
+
+`logging.filter` uses the [`tracing-subscriber` EnvFilter directive syntax][env-filter-directives].
+
+[env-filter-directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives

@@ -32,7 +32,8 @@ root = './repository'
 # directory = './repository/.maven-haste/logs'
 # # Retention period for completed daily log files.
 # retention = '30d'
-# # Rust log filter for file output.
+# # Rust EnvFilter expression for file output. Reference:
+# # https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 # filter = 'maven_haste=info,maven_haste::access=debug'
 
 # # Optional upstream settings. Omit this table to use the defaults below.
