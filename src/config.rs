@@ -126,6 +126,8 @@ impl StorageConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
+    /// Maximum cached artifact bytes. No limit is applied when omitted.
+    pub max_size: Option<u64>,
     #[serde(with = "humantime_serde")]
     pub metadata_ttl: Duration,
     #[serde(with = "humantime_serde")]
@@ -136,6 +138,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            max_size: None,
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
             serve_stale_on_error: true,
@@ -420,6 +423,11 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.upstream.connect_timeout.is_zero() {
         return Err(ConfigError::new(
             "upstream.connect_timeout must be greater than zero",
+        ));
+    }
+    if config.cache.max_size == Some(0) {
+        return Err(ConfigError::new(
+            "cache.max_size must be greater than zero when specified",
         ));
     }
     if config.upstream.read_timeout.is_zero() {
@@ -828,6 +836,17 @@ url = "https://repo.example/"
     fn rejects_zero_upstream_timeouts_and_removed_refresh_timeout() {
         let directory = TempDir::new().unwrap();
         for body in [
+            r#"
+[storage]
+root = "repository"
+
+[cache]
+max_size = 0
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
             r#"
 [storage]
 root = "repository"

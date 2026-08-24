@@ -8,19 +8,23 @@ use axum::Router;
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
-use axum::http::{HeaderValue, Method, Response, StatusCode};
+use axum::http::header::{
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED, RANGE,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use http_body::Body as _;
 use pin_project_lite::pin_project;
 use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
 use crate::cache::{CacheFailure, CacheManager, CachedArtifact};
 use crate::error::AppError;
-use crate::request_path::MavenPath;
+use crate::request_path::{CachePolicy, MavenPath};
 
 pub const HEALTH_PATH: &str = "/api/v1/health";
 const CACHE_STATS_PATH: &str = "/api/v1/cache/stats";
@@ -89,6 +93,7 @@ async fn artifact(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
     method: Method,
+    headers: HeaderMap,
 ) -> Response<Body> {
     let started = Instant::now();
     let request = match MavenPath::parse(uri.path(), &state.base_path) {
@@ -98,13 +103,23 @@ async fn artifact(
             return track_response(response, method, uri.path(), "invalid", None, started);
         }
     };
+    if tracing::enabled!(target: "maven_haste::access", tracing::Level::DEBUG) {
+        let candidates = state.cache.route_candidates(request.relative());
+        tracing::debug!(
+            target: "maven_haste::access",
+            event = "route",
+            path = request.relative(),
+            candidates = ?candidates,
+            "resolved upstream candidates"
+        );
+    }
 
     let (response, cache_status, upstream) = match state.cache.get(&request).await {
         Ok(cached) => {
             let cache_status = cached.status.as_str();
             let upstream = cached.record.upstream.clone();
             (
-                cached_response(cached, method == Method::HEAD).await,
+                cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
                 cache_status,
                 Some(upstream),
             )
@@ -268,12 +283,88 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     );
 }
 
-async fn cached_response(cached: CachedArtifact, head: bool) -> Response<Body> {
+async fn cached_response(
+    cached: CachedArtifact,
+    policy: CachePolicy,
+    head: bool,
+    request_headers: &HeaderMap,
+) -> Response<Body> {
+    let size = cached.record.file_size.max(0) as u64;
+    let etag = cached.record.etag.clone().or_else(|| {
+        cached
+            .record
+            .sha256
+            .as_ref()
+            .map(|hash| format!("\"sha256:{hash}\""))
+    });
+    let cache_control = match policy {
+        CachePolicy::Permanent => "public, max-age=31536000, immutable",
+        CachePolicy::Mutable => "no-cache",
+    };
+
+    if client_cache_is_fresh(
+        request_headers,
+        etag.as_deref(),
+        cached.record.last_modified.as_deref(),
+    ) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        insert_common_headers(
+            response.headers_mut(),
+            cache_control,
+            etag.as_deref(),
+            cached.record.last_modified.as_deref(),
+        );
+        return response;
+    }
+
+    let range = if if_range_matches(
+        request_headers,
+        etag.as_deref(),
+        cached.record.last_modified.as_deref(),
+    ) {
+        requested_range(request_headers, size)
+    } else {
+        ByteRange::Full
+    };
+    if range == ByteRange::Unsatisfiable {
+        let mut response =
+            error_response(StatusCode::RANGE_NOT_SATISFIABLE, "range not satisfiable");
+        response.headers_mut().insert(
+            CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes */{size}")).expect("valid content range"),
+        );
+        response
+            .headers_mut()
+            .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        return response;
+    }
+
+    let (start, length, status) = match range {
+        ByteRange::Full => (0, size, StatusCode::OK),
+        ByteRange::Partial { start, end } => (
+            start,
+            end.saturating_sub(start).saturating_add(1),
+            StatusCode::PARTIAL_CONTENT,
+        ),
+        ByteRange::Unsatisfiable => unreachable!("handled above"),
+    };
     let body = if head {
         Body::empty()
     } else {
         match File::open(&cached.file_path).await {
-            Ok(file) => Body::from_stream(ReaderStream::new(file)),
+            Ok(mut file) => {
+                if start > 0
+                    && let Err(error) = file.seek(std::io::SeekFrom::Start(start)).await
+                {
+                    tracing::error!(path = %cached.file_path.display(), %error, "failed to seek cached file");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "cached file is unavailable",
+                    );
+                }
+                Body::from_stream(ReaderStream::new(file.take(length)))
+            }
             Err(error) => {
                 tracing::error!(path = %cached.file_path.display(), %error, "cached file disappeared");
                 return error_response(
@@ -285,7 +376,7 @@ async fn cached_response(cached: CachedArtifact, head: bool) -> Response<Body> {
     };
 
     let mut response = Response::new(body);
-    *response.status_mut() = StatusCode::OK;
+    *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(
         CONTENT_TYPE,
@@ -296,16 +387,130 @@ async fn cached_response(cached: CachedArtifact, head: bool) -> Response<Body> {
         )
         .expect("MIME guesses are valid header values"),
     );
-    if let Ok(value) = HeaderValue::from_str(&cached.record.file_size.max(0).to_string()) {
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
         headers.insert(CONTENT_LENGTH, value);
     }
-    insert_optional_header(headers, ETAG, cached.record.etag.as_deref());
-    insert_optional_header(
+    if let ByteRange::Partial { start, end } = range {
+        headers.insert(
+            CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{size}"))
+                .expect("valid content range"),
+        );
+    }
+    insert_common_headers(
         headers,
-        LAST_MODIFIED,
+        cache_control,
+        etag.as_deref(),
         cached.record.last_modified.as_deref(),
     );
     response
+}
+
+fn insert_common_headers(
+    headers: &mut HeaderMap,
+    cache_control: &'static str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) {
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    insert_optional_header(headers, ETAG, etag);
+    insert_optional_header(headers, LAST_MODIFIED, last_modified);
+}
+
+fn client_cache_is_fresh(
+    headers: &HeaderMap,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> bool {
+    if let Some(supplied) = headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        return supplied == "*"
+            || etag.is_some_and(|etag| {
+                supplied
+                    .split(',')
+                    .map(str::trim)
+                    .any(|candidate| weak_etag(candidate) == weak_etag(etag))
+            });
+    }
+    headers
+        .get(IF_MODIFIED_SINCE)
+        .and_then(|value| value.to_str().ok())
+        .zip(last_modified)
+        .is_some_and(|(supplied, cached)| supplied == cached)
+}
+
+fn if_range_matches(headers: &HeaderMap, etag: Option<&str>, last_modified: Option<&str>) -> bool {
+    let Some(supplied) = headers.get(IF_RANGE).and_then(|value| value.to_str().ok()) else {
+        return true;
+    };
+    if supplied.starts_with('"') || supplied.starts_with("W/\"") {
+        etag.is_some_and(|etag| supplied == etag)
+    } else {
+        last_modified.is_some_and(|last_modified| supplied == last_modified)
+    }
+}
+
+fn weak_etag(etag: &str) -> &str {
+    etag.strip_prefix("W/").unwrap_or(etag)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ByteRange {
+    Full,
+    Partial { start: u64, end: u64 },
+    Unsatisfiable,
+}
+
+fn requested_range(headers: &HeaderMap, size: u64) -> ByteRange {
+    let Some(value) = headers.get(RANGE).and_then(|value| value.to_str().ok()) else {
+        return ByteRange::Full;
+    };
+    let Some(value) = value.strip_prefix("bytes=") else {
+        return ByteRange::Full;
+    };
+    if value.contains(',') {
+        return ByteRange::Full;
+    }
+    let Some((start, end)) = value.split_once('-') else {
+        return ByteRange::Full;
+    };
+    if size == 0 {
+        return ByteRange::Unsatisfiable;
+    }
+    if start.is_empty() {
+        let Ok(suffix) = end.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        if suffix == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        return ByteRange::Partial {
+            start: size.saturating_sub(suffix),
+            end: size - 1,
+        };
+    }
+    let Ok(start) = start.parse::<u64>() else {
+        return ByteRange::Full;
+    };
+    if start >= size {
+        return ByteRange::Unsatisfiable;
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        let Ok(end) = end.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        end.min(size - 1)
+    };
+    if end < start {
+        ByteRange::Unsatisfiable
+    } else {
+        ByteRange::Partial { start, end }
+    }
 }
 
 fn insert_optional_header(
@@ -425,6 +630,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_client_validators_and_single_byte_ranges_from_cache() {
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(|OriginalUri(uri): OriginalUri| async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                let mut response = Response::new(Body::from("artifact-body"));
+                response
+                    .headers_mut()
+                    .insert(ETAG, HeaderValue::from_static("\"artifact-tag\""));
+                response
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+        let initial = request(&app, Method::GET, ARTIFACT_PATH).await;
+        assert_eq!(
+            initial.headers()[CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(initial.headers()[ACCEPT_RANGES], "bytes");
+        assert_eq!(body(initial).await, "artifact-body");
+
+        let mut validators = HeaderMap::new();
+        validators.insert(
+            IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"artifact-tag\""),
+        );
+        let not_modified = request_with_headers(&app, Method::GET, ARTIFACT_PATH, validators).await;
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert!(body(not_modified).await.is_empty());
+
+        let mut partial_headers = HeaderMap::new();
+        partial_headers.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
+        let partial = request_with_headers(&app, Method::GET, ARTIFACT_PATH, partial_headers).await;
+        assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(partial.headers()[CONTENT_RANGE], "bytes 2-5/13");
+        assert_eq!(partial.headers()[CONTENT_LENGTH], "4");
+        assert_eq!(body(partial).await, "tifa");
+
+        let mut suffix_headers = HeaderMap::new();
+        suffix_headers.insert(RANGE, HeaderValue::from_static("bytes=-4"));
+        let suffix = request_with_headers(&app, Method::HEAD, ARTIFACT_PATH, suffix_headers).await;
+        assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(suffix.headers()[CONTENT_RANGE], "bytes 9-12/13");
+        assert_eq!(suffix.headers()[CONTENT_LENGTH], "4");
+        assert!(body(suffix).await.is_empty());
+
+        let mut unsatisfiable_headers = HeaderMap::new();
+        unsatisfiable_headers.insert(RANGE, HeaderValue::from_static("bytes=20-30"));
+        let unsatisfiable =
+            request_with_headers(&app, Method::GET, ARTIFACT_PATH, unsatisfiable_headers).await;
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(unsatisfiable.headers()[CONTENT_RANGE], "bytes */13");
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn reports_health_and_cache_statistics() {
         let upstream = Router::new().route(
             "/{*path}",
@@ -462,7 +727,7 @@ mod tests {
         assert_eq!(stats.status(), StatusCode::OK);
         assert_eq!(stats.headers()[CONTENT_TYPE], "application/json");
         let stats: Value = serde_json::from_str(&body(stats).await).unwrap();
-        assert_eq!(stats["files"].as_u64(), Some(3));
+        assert_eq!(stats["files"].as_u64(), Some(4));
         assert!(stats["total_size"].as_u64().is_some_and(|size| size >= 3));
         assert_eq!(stats["requests"].as_u64(), Some(2));
         assert_eq!(stats["hits"].as_u64(), Some(1));
@@ -1143,7 +1408,7 @@ mod tests {
             "metadata"
         );
         assert_eq!(missing_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(found_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(found_calls.load(Ordering::SeqCst), 4);
         assert_eq!(
             database
                 .negative_entries("com/example/demo/maven-metadata.xml")
@@ -1309,6 +1574,7 @@ mod tests {
         );
         let sha1_path = format!("{ARTIFACT_PATH}.sha1");
         let sha256_path = format!("{ARTIFACT_PATH}.sha256");
+        let sha512_path = format!("{ARTIFACT_PATH}.sha512");
         assert_eq!(
             body(request(&app, Method::GET, &sha1_path).await).await,
             "a9993e364706816aba3e25717850c26c9cd0d89d\n"
@@ -1317,7 +1583,14 @@ mod tests {
             body(request(&app, Method::GET, &sha256_path).await).await,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            body(request(&app, Method::GET, &sha512_path).await).await,
+            concat!(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2",
+                "192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f\n"
+            )
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         let record = database
             .get("com/example/demo/1.0/demo-1.0.jar")
             .await
@@ -1327,6 +1600,23 @@ mod tests {
             record.sha1.as_deref(),
             Some("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
+
+        let sha512_relative = sha512_path.strip_prefix("/maven/").unwrap();
+        database
+            .delete_paths(vec![sha512_relative.into()])
+            .await
+            .unwrap();
+        tokio::fs::remove_file(directory.path().join("repository").join(sha512_relative))
+            .await
+            .unwrap();
+        assert_eq!(
+            body(request(&app, Method::GET, &sha512_path).await).await,
+            concat!(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2",
+                "192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f\n"
+            )
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         task.abort();
     }
 
@@ -1361,7 +1651,7 @@ mod tests {
             body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
             "abc"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
         task.abort();
     }
 
@@ -1417,7 +1707,7 @@ mod tests {
             body(request(&app, Method::GET, &format!("{ARTIFACT_PATH}.sha1")).await).await,
             "a9993e364706816aba3e25717850c26c9cd0d89d\n"
         );
-        assert_eq!(bad_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(bad_calls.load(Ordering::SeqCst), 8);
         assert_eq!(good_calls.load(Ordering::SeqCst), 0);
         let stats: Value = serde_json::from_str(
             &body(request(&app, Method::GET, "/api/v1/cache/stats").await).await,
@@ -1460,7 +1750,7 @@ mod tests {
         let response = request(&app, Method::GET, metadata).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body(response).await, "<metadata/>");
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 8);
         task.abort();
     }
 
@@ -1479,6 +1769,8 @@ mod tests {
                         Response::new(Body::from(
                             "3608bca1e44ea6c4d268eb6db02260269892c0b42b86bbf1e77a6fa16c3c9282\n",
                         ))
+                    } else if uri.path().ends_with(".sha512") {
+                        error_response(StatusCode::NOT_FOUND, "missing checksum")
                     } else if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         Response::new(Body::from("abc"))
                     } else {
@@ -1584,7 +1876,7 @@ mod tests {
             "xyz"
         );
         assert_eq!(bad_main_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(good_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(good_calls.load(Ordering::SeqCst), 4);
         bad_task.abort();
         good_task.abort();
     }
@@ -1644,16 +1936,22 @@ mod tests {
     }
 
     async fn request(app: &Router, method: Method, uri: &str) -> Response<Body> {
-        app.clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(Uri::try_from(uri).unwrap())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
+        request_with_headers(app, method, uri, HeaderMap::new()).await
+    }
+
+    async fn request_with_headers(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        headers: HeaderMap,
+    ) -> Response<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(Uri::try_from(uri).unwrap())
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        app.clone().oneshot(request).await.unwrap()
     }
 
     async fn body(response: Response<Body>) -> String {
@@ -1662,7 +1960,9 @@ mod tests {
     }
 
     fn is_checksum_uri(uri: &Uri) -> bool {
-        uri.path().ends_with(".sha1") || uri.path().ends_with(".sha256")
+        uri.path().ends_with(".sha1")
+            || uri.path().ends_with(".sha256")
+            || uri.path().ends_with(".sha512")
     }
 
     fn delayed_body(chunks: Vec<(Duration, &'static [u8])>) -> Body {

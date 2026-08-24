@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     last_modified TEXT,
     file_size INTEGER,
     created_at INTEGER NOT NULL,
-    last_refresh_attempt INTEGER
+    last_refresh_attempt INTEGER,
+    last_accessed INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS negative_cache (
@@ -62,6 +63,7 @@ pub struct ArtifactRecord {
     pub file_size: i64,
     pub created_at: i64,
     pub last_refresh_attempt: Option<i64>,
+    pub last_accessed: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +106,10 @@ impl Database {
             AppError::Runtime(format!("failed to open SQLite database: {error}"))
         })?;
         connection
-            .interact(|connection| connection.execute_batch(SCHEMA))
+            .interact(|connection| {
+                connection.execute_batch(SCHEMA)?;
+                ensure_schema_columns(connection)
+            })
             .await
             .map_err(|error| AppError::Runtime(format!("SQLite worker failed: {error}")))?
             .map_err(|error| AppError::Runtime(format!("failed to initialize SQLite: {error}")))?;
@@ -119,26 +124,11 @@ impl Database {
                 connection
                     .query_row(
                         "SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, \
-                         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt \
+                         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, \
+                         last_accessed \
                          FROM artifacts WHERE path = ?1",
                         [path],
-                        |row| {
-                            Ok(ArtifactRecord {
-                                path: row.get(0)?,
-                                group_id: row.get(1)?,
-                                artifact_id: row.get(2)?,
-                                version: row.get(3)?,
-                                file_type: row.get(4)?,
-                                upstream: row.get(5)?,
-                                sha1: row.get(6)?,
-                                sha256: row.get(7)?,
-                                etag: row.get(8)?,
-                                last_modified: row.get(9)?,
-                                file_size: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
-                                created_at: row.get(11)?,
-                                last_refresh_attempt: row.get(12)?,
-                            })
-                        },
+                        artifact_from_row,
                     )
                     .optional()
             })
@@ -310,6 +300,59 @@ impl Database {
             .map_err(sqlite_error)
     }
 
+    pub async fn touch_access(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
+        let path = path.to_owned();
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                connection.execute(
+                    "UPDATE artifacts SET last_accessed = ?2 WHERE path = ?1",
+                    params![path, timestamp],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn records_by_access(&self) -> Result<Vec<ArtifactRecord>, AppError> {
+        let connection = self.connection().await?;
+        connection
+            .interact(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, \
+                     sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, \
+                     last_accessed FROM artifacts ORDER BY last_accessed, created_at, path",
+                )?;
+                let rows = statement.query_map([], artifact_from_row)?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
+    pub async fn records_with_prefix(&self, prefix: &str) -> Result<Vec<ArtifactRecord>, AppError> {
+        let prefix = prefix.trim_end_matches('/').to_owned();
+        let descendant = format!("{}/%", escape_like(&prefix));
+        let connection = self.connection().await?;
+        connection
+            .interact(move |connection| {
+                let mut statement = connection.prepare(
+                    "SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, \
+                     sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, \
+                     last_accessed FROM artifacts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' \
+                     ORDER BY path",
+                )?;
+                let rows = statement.query_map(params![prefix, descendant], artifact_from_row)?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .map_err(worker_error)?
+            .map_err(sqlite_error)
+    }
+
     pub async fn ping(&self) -> Result<(), AppError> {
         let connection = self.connection().await?;
         connection
@@ -356,14 +399,15 @@ fn upsert_record(
 ) -> Result<(), deadpool_sqlite::rusqlite::Error> {
     connection.execute(
         "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, upstream, sha1, \
-         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+         sha256, etag, last_modified, file_size, created_at, last_refresh_attempt, last_accessed) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
          ON CONFLICT(path) DO UPDATE SET group_id = excluded.group_id, \
          artifact_id = excluded.artifact_id, version = excluded.version, \
          file_type = excluded.file_type, upstream = excluded.upstream, sha1 = excluded.sha1, \
          sha256 = excluded.sha256, etag = excluded.etag, \
          last_modified = excluded.last_modified, file_size = excluded.file_size, \
-         created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt",
+         created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt, \
+         last_accessed = excluded.last_accessed",
         params![
             record.path,
             record.group_id,
@@ -378,9 +422,59 @@ fn upsert_record(
             record.file_size,
             record.created_at,
             record.last_refresh_attempt,
+            record.last_accessed,
         ],
     )?;
     Ok(())
+}
+
+fn artifact_from_row(
+    row: &deadpool_sqlite::rusqlite::Row<'_>,
+) -> Result<ArtifactRecord, deadpool_sqlite::rusqlite::Error> {
+    Ok(ArtifactRecord {
+        path: row.get(0)?,
+        group_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        version: row.get(3)?,
+        file_type: row.get(4)?,
+        upstream: row.get(5)?,
+        sha1: row.get(6)?,
+        sha256: row.get(7)?,
+        etag: row.get(8)?,
+        last_modified: row.get(9)?,
+        file_size: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
+        created_at: row.get(11)?,
+        last_refresh_attempt: row.get(12)?,
+        last_accessed: row.get(13)?,
+    })
+}
+
+fn ensure_schema_columns(
+    connection: &deadpool_sqlite::rusqlite::Connection,
+) -> Result<(), deadpool_sqlite::rusqlite::Error> {
+    let mut statement = connection.prepare("PRAGMA table_info(artifacts)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "last_accessed") {
+        connection.execute(
+            "ALTER TABLE artifacts ADD COLUMN last_accessed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE artifacts SET last_accessed = created_at WHERE last_accessed = 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn worker_error(error: deadpool_sqlite::InteractError) -> AppError {
@@ -463,6 +557,7 @@ mod tests {
             file_size: 42,
             created_at: 123,
             last_refresh_attempt: None,
+            last_accessed: 123,
         };
         database.upsert_many(vec![record.clone()]).await.unwrap();
 
@@ -524,5 +619,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(database.stats().await.unwrap().negative_entries, 1);
+    }
+
+    #[tokio::test]
+    async fn adds_last_accessed_to_existing_databases() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("cache.db");
+        {
+            let connection = deadpool_sqlite::rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE artifacts (
+                        path TEXT PRIMARY KEY,
+                        group_id TEXT NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        version TEXT NOT NULL,
+                        file_type TEXT NOT NULL,
+                        upstream TEXT NOT NULL,
+                        sha1 TEXT,
+                        sha256 TEXT,
+                        etag TEXT,
+                        last_modified TEXT,
+                        file_size INTEGER,
+                        created_at INTEGER NOT NULL,
+                        last_refresh_attempt INTEGER
+                    );",
+                )
+                .unwrap();
+        }
+
+        let database = Database::open(&path).await.unwrap();
+        let connection = database.pool.get().await.unwrap();
+        let columns = connection
+            .interact(|connection| {
+                let mut statement = connection.prepare("PRAGMA table_info(artifacts)")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "last_accessed"));
     }
 }

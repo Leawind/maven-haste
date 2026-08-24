@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
+use cli::{CacheCommand, Cli, Command, ConfigCommand};
 use error::AppError;
 
 #[tokio::main]
@@ -83,6 +83,45 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         return Ok(());
     }
 
+    if let Some(Command::Cache { command }) = &cli.command {
+        let database = db::Database::open(loaded.config.storage.db_path()).await?;
+        let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
+        match command {
+            CacheCommand::Stats => {
+                let stats = cache.stats().await.map_err(cache_error)?;
+                println!("files: {}", stats.files);
+                println!("size: {} bytes", stats.total_size);
+                println!("negative entries: {}", stats.negative_entries);
+                if let Some(max_size) = stats.max_size {
+                    println!("limit: {max_size} bytes");
+                } else {
+                    println!("limit: none");
+                }
+            }
+            CacheCommand::Remove { prefix } => {
+                let removed = cache.remove_prefix(prefix).await.map_err(cache_error)?;
+                println!(
+                    "removed {} cached files ({} bytes) under {}",
+                    removed.files, removed.bytes, prefix
+                );
+            }
+            CacheCommand::Verify => {
+                let report = cache.verify().await.map_err(cache_error)?;
+                println!("checked {} cached files", report.checked);
+                for issue in &report.issues {
+                    println!("{}: {}", issue.path, issue.reason);
+                }
+                if !report.issues.is_empty() {
+                    return Err(AppError::Runtime(format!(
+                        "cache verification found {} issues",
+                        report.issues.len()
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
     tracing::info!(config = %loaded.path.display(), "loaded configuration");
     tracing::info!(
@@ -98,6 +137,10 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         .map_err(|error| AppError::Runtime(format!("failed to inspect HTTP listener: {error}")))?;
     tracing::info!(%bind, "Maven proxy is ready");
     server::serve(listener, loaded.config.server.base_path, cache).await
+}
+
+fn cache_error(error: cache::CacheFailure) -> AppError {
+    AppError::Runtime(error.to_string())
 }
 
 fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {

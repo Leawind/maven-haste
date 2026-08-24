@@ -17,6 +17,8 @@ root = './repository'
 
 # # Optional cache settings. Omit this table to use the defaults below.
 # [cache]
+# # Optional maximum number of cached artifact bytes. Omit to retain cached files indefinitely.
+# max_size = 10737418240
 # # How long mutable metadata may be served before a background refresh starts.
 # metadata_ttl = '5m'
 # # How long a confirmed 404 is remembered for one path in one upstream repository.

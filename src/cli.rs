@@ -33,11 +33,33 @@ pub enum Command {
     /// Validate configuration and storage access, then exit
     Check,
 
+    /// Inspect or maintain cached artifacts
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+
     /// Create, print, or inspect configuration
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Print persistent cache usage
+    Stats,
+
+    /// Remove one cached path and all of its descendants
+    Remove {
+        /// Maven repository path prefix, such as com/example/library
+        #[arg(value_name = "PREFIX")]
+        prefix: String,
+    },
+
+    /// Verify tracked file sizes and checksums
+    Verify,
 }
 
 #[derive(Debug, Subcommand)]
@@ -86,5 +108,16 @@ mod tests {
         let cli = Cli::try_parse_from(["maven-haste", "--verbose", "run"]).unwrap();
         assert!(cli.verbose);
         assert!(matches!(cli.command, Some(Command::Run)));
+    }
+
+    #[test]
+    fn parses_cache_maintenance_commands() {
+        let cli = Cli::try_parse_from(["maven-haste", "cache", "remove", "com/example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Cache {
+                command: CacheCommand::Remove { prefix }
+            }) if prefix == "com/example"
+        ));
     }
 }

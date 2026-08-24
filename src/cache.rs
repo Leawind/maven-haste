@@ -11,9 +11,9 @@ use futures_util::StreamExt;
 use reqwest::header::{ETAG, LAST_MODIFIED};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -82,7 +82,26 @@ pub struct CacheStats {
     pub stale_hits: u64,
     pub negative_hits: u64,
     pub hit_rate: f64,
+    pub max_size: Option<u64>,
     pub upstreams: Vec<crate::upstream::UpstreamStatus>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RemovalStats {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IntegrityReport {
+    pub checked: u64,
+    pub issues: Vec<IntegrityIssue>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IntegrityIssue {
+    pub path: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -113,6 +132,7 @@ struct DownloadedMain {
     size: u64,
     sha1: String,
     sha256: String,
+    sha512: String,
     etag: Option<String>,
     last_modified: Option<String>,
 }
@@ -236,8 +256,91 @@ impl CacheManager {
             } else {
                 hits as f64 / requests as f64
             },
+            max_size: self.inner.config.max_size,
             upstreams: self.inner.upstream.statuses(),
         })
+    }
+
+    pub fn route_candidates(&self, path: &str) -> Vec<String> {
+        self.inner.upstream.candidate_names(path)
+    }
+
+    pub async fn remove_prefix(&self, prefix: &str) -> Result<RemovalStats, CacheFailure> {
+        let prefix = normalize_cache_prefix(prefix)?;
+        let records = self
+            .inner
+            .database
+            .records_with_prefix(&prefix)
+            .await
+            .map_err(internal)?;
+        self.remove_records(records).await
+    }
+
+    pub async fn verify(&self) -> Result<IntegrityReport, CacheFailure> {
+        let records = self
+            .inner
+            .database
+            .records_by_access()
+            .await
+            .map_err(internal)?;
+        let mut report = IntegrityReport {
+            checked: 0,
+            issues: Vec::new(),
+        };
+        for record in records {
+            report.checked += 1;
+            let file_path = relative_file_path(&self.inner.storage.root, &record.path);
+            match hash_file(&file_path).await {
+                Ok((size, sha1, sha256, _)) => {
+                    if size != record.file_size.max(0) as u64 {
+                        report.issues.push(IntegrityIssue {
+                            path: record.path.clone(),
+                            reason: format!(
+                                "size mismatch: database={}, file={size}",
+                                record.file_size.max(0)
+                            ),
+                        });
+                    } else if record
+                        .sha256
+                        .as_deref()
+                        .is_some_and(|expected| expected != sha256)
+                    {
+                        report.issues.push(IntegrityIssue {
+                            path: record.path.clone(),
+                            reason: format!(
+                                "SHA-256 mismatch: expected {}, found {sha256}",
+                                record.sha256.as_deref().expect("checked above")
+                            ),
+                        });
+                    } else if record
+                        .sha1
+                        .as_deref()
+                        .is_some_and(|expected| expected != sha1)
+                    {
+                        report.issues.push(IntegrityIssue {
+                            path: record.path,
+                            reason: format!(
+                                "SHA-1 mismatch: expected {}, found {sha1}",
+                                record.sha1.as_deref().expect("checked above")
+                            ),
+                        });
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    report.issues.push(IntegrityIssue {
+                        path: record.path,
+                        reason: "file is missing".into(),
+                    });
+                }
+                Err(error) => {
+                    report.issues.push(IntegrityIssue {
+                        path: record.path,
+                        reason: format!("failed to read file: {error}"),
+                    });
+                }
+            }
+        }
+        Ok(report)
     }
 
     async fn synchronous_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
@@ -266,11 +369,23 @@ impl CacheManager {
         };
         let file_path = request.final_path(&self.inner.storage.root);
         match fs::metadata(&file_path).await {
-            Ok(metadata) if metadata.is_file() => Ok(Some(CachedArtifact {
-                file_path,
-                record: record.clone(),
-                status: CacheStatus::Hit,
-            })),
+            Ok(metadata) if metadata.is_file() => {
+                let now = unix_timestamp();
+                let mut record = record.clone();
+                if record.last_accessed != now {
+                    self.inner
+                        .database
+                        .touch_access(request.relative(), now)
+                        .await
+                        .map_err(internal)?;
+                    record.last_accessed = now;
+                }
+                Ok(Some(CachedArtifact {
+                    file_path,
+                    record,
+                    status: CacheStatus::Hit,
+                }))
+            }
             Ok(_) => Ok(None),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(CacheFailure::Internal(format!(
@@ -296,13 +411,70 @@ impl CacheManager {
             {
                 return Ok(());
             }
-            return Err(CacheFailure::Internal(format!(
-                "downloaded {} without generating {}",
-                source.relative(),
-                request.relative()
-            )));
+            return self.regenerate_checksum(request, &source).await;
         }
         self.download_main_initial(request).await
+    }
+
+    async fn regenerate_checksum(
+        &self,
+        request: &MavenPath,
+        source: &MavenPath,
+    ) -> Result<(), CacheFailure> {
+        let source_record = self
+            .inner
+            .database
+            .get(source.relative())
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| {
+                CacheFailure::Internal(format!(
+                    "cached checksum source {} has no database record",
+                    source.relative()
+                ))
+            })?;
+        let source_path = source.final_path(&self.inner.storage.root);
+        let (_, sha1, sha256, sha512) = hash_file(&source_path).await.map_err(|error| {
+            CacheFailure::Internal(format!(
+                "failed to hash cached checksum source {}: {error}",
+                source_path.display()
+            ))
+        })?;
+        let expected = match request.file_type.as_str() {
+            "sha1" => sha1,
+            "sha256" => sha256,
+            "sha512" => sha512,
+            extension => {
+                return Err(CacheFailure::Internal(format!(
+                    "cannot generate unsupported checksum type {extension}"
+                )));
+            }
+        };
+        let content = format!("{expected}\n");
+        let temporary = temporary_path(self.inner.storage.tmp_dir());
+        write_temporary(&temporary, content.as_bytes()).await?;
+        let now = unix_timestamp();
+        self.install_bundle(vec![PreparedFile {
+            relative: request.relative().into(),
+            temporary,
+            record: ArtifactRecord {
+                path: request.relative().into(),
+                group_id: request.group_id.clone(),
+                artifact_id: request.artifact_id.clone(),
+                version: request.version.clone(),
+                file_type: request.file_type.clone(),
+                upstream: source_record.upstream,
+                sha1: None,
+                sha256: Some(format!("{:x}", Sha256::digest(content.as_bytes()))),
+                etag: None,
+                last_modified: None,
+                file_size: content.len() as i64,
+                created_at: now,
+                last_refresh_attempt: (request.policy() == CachePolicy::Mutable).then_some(now),
+                last_accessed: now,
+            },
+        }])
+        .await
     }
 
     async fn synchronous_main_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
@@ -508,13 +680,14 @@ impl CacheManager {
         let last_modified = header_string(response.headers(), LAST_MODIFIED);
         let temporary = temporary_path(self.inner.storage.tmp_dir());
         match stream_to_file(response, &temporary).await {
-            Ok((size, sha1, sha256)) => {
+            Ok((size, sha1, sha256, sha512)) => {
                 self.inner.upstream.record_body_success(repository);
                 Ok(DownloadedMain {
                     temporary,
                     size,
                     sha1,
                     sha256,
+                    sha512,
                     etag,
                     last_modified,
                 })
@@ -552,6 +725,7 @@ impl CacheManager {
             file_size: i64::try_from(downloaded.size).unwrap_or(i64::MAX),
             created_at: now,
             last_refresh_attempt: refresh_attempt,
+            last_accessed: now,
         };
         let mut files = vec![PreparedFile {
             relative: request.relative().into(),
@@ -563,9 +737,14 @@ impl CacheManager {
             return Ok(files);
         }
 
-        for (extension, expected) in [("sha1", &downloaded.sha1), ("sha256", &downloaded.sha256)] {
+        for (extension, expected) in [
+            ("sha1", &downloaded.sha1),
+            ("sha256", &downloaded.sha256),
+            ("sha512", &downloaded.sha512),
+        ] {
             let relative = format!("{}.{extension}", request.relative());
             let content = format!("{expected}\n");
+            let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
             let temporary = temporary_path(self.inner.storage.tmp_dir());
             if let Err(error) = write_temporary(&temporary, content.as_bytes()).await {
                 cleanup_prepared(&files).await;
@@ -582,12 +761,13 @@ impl CacheManager {
                     file_type: extension.into(),
                     upstream: repository.into(),
                     sha1: None,
-                    sha256: None,
+                    sha256: Some(content_sha256),
                     etag: None,
                     last_modified: None,
                     file_size: i64::try_from(content.len()).unwrap_or(i64::MAX),
                     created_at: now,
                     last_refresh_attempt: refresh_attempt,
+                    last_accessed: now,
                 },
             });
         }
@@ -688,7 +868,11 @@ impl CacheManager {
         priority: RequestPriority,
     ) -> Vec<String> {
         let mut issues = Vec::new();
-        for (extension, expected) in [("sha1", &downloaded.sha1), ("sha256", &downloaded.sha256)] {
+        for (extension, expected) in [
+            ("sha1", &downloaded.sha1),
+            ("sha256", &downloaded.sha256),
+            ("sha512", &downloaded.sha512),
+        ] {
             let relative = format!("{}.{extension}", request.relative());
             let FetchResult::Found {
                 repository: checksum_repository,
@@ -792,7 +976,82 @@ impl CacheManager {
             .database
             .upsert_many(files.iter().map(|file| file.record.clone()).collect())
             .await
-            .map_err(internal)
+            .map_err(internal)?;
+        let protected = files
+            .iter()
+            .map(|file| file.relative.as_str())
+            .collect::<HashSet<_>>();
+        if let Err(error) = self.enforce_capacity(&protected).await {
+            tracing::warn!(%error, "cache capacity enforcement did not complete");
+        }
+        Ok(())
+    }
+
+    async fn enforce_capacity(&self, protected: &HashSet<&str>) -> Result<(), CacheFailure> {
+        let Some(max_size) = self.inner.config.max_size else {
+            return Ok(());
+        };
+        let stats = self.inner.database.stats().await.map_err(internal)?;
+        if stats.total_size <= max_size {
+            return Ok(());
+        }
+        let mut remaining = stats.total_size;
+        let candidates = self
+            .inner
+            .database
+            .records_by_access()
+            .await
+            .map_err(internal)?;
+        for record in candidates {
+            if remaining <= max_size {
+                break;
+            }
+            if protected.contains(record.path.as_str()) || self.path_is_busy(&record.path) {
+                continue;
+            }
+            let removed = self.remove_records(vec![record]).await?;
+            remaining = remaining.saturating_sub(removed.bytes);
+        }
+        Ok(())
+    }
+
+    async fn remove_records(
+        &self,
+        records: Vec<ArtifactRecord>,
+    ) -> Result<RemovalStats, CacheFailure> {
+        let mut removed_paths = Vec::new();
+        let mut stats = RemovalStats { files: 0, bytes: 0 };
+        for record in records {
+            if self.path_is_busy(&record.path) {
+                continue;
+            }
+            let file_path = relative_file_path(&self.inner.storage.root, &record.path);
+            match fs::remove_file(&file_path).await {
+                Ok(()) => {
+                    stats.files += 1;
+                    stats.bytes = stats.bytes.saturating_add(record.file_size.max(0) as u64);
+                    removed_paths.push(record.path);
+                    remove_empty_parents(file_path.parent(), &self.inner.storage.root).await;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    stats.bytes = stats.bytes.saturating_add(record.file_size.max(0) as u64);
+                    removed_paths.push(record.path);
+                }
+                Err(error) => {
+                    tracing::warn!(path = %file_path.display(), %error, "failed to remove cached file");
+                }
+            }
+        }
+        self.inner
+            .database
+            .delete_paths(removed_paths)
+            .await
+            .map_err(internal)?;
+        Ok(stats)
+    }
+
+    fn path_is_busy(&self, path: &str) -> bool {
+        self.inner.flights.contains_key(path) || self.inner.refreshes.contains_key(path)
     }
 
     async fn fresh_negative_entries(&self, path: &str) -> Result<HashSet<String>, CacheFailure> {
@@ -840,7 +1099,7 @@ enum BundleError {
 async fn stream_to_file(
     response: UpstreamResponse,
     destination: &Path,
-) -> Result<(u64, String, String), CacheFailure> {
+) -> Result<(u64, String, String, String), CacheFailure> {
     let (response, _permit) = response.into_parts();
     let expected_size = response.content_length();
     let mut file = create_temporary(destination).await?;
@@ -848,6 +1107,7 @@ async fn stream_to_file(
     let mut size = 0_u64;
     let mut sha1 = Sha1::new();
     let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
             CacheFailure::Internal(format!("failed to read upstream response body: {error}"))
@@ -860,6 +1120,7 @@ async fn stream_to_file(
         })?;
         sha1.update(&chunk);
         sha256.update(&chunk);
+        sha512.update(&chunk);
         size = size.saturating_add(chunk.len() as u64);
     }
     if expected_size.is_some_and(|expected| expected != size) {
@@ -873,6 +1134,7 @@ async fn stream_to_file(
         size,
         format!("{:x}", sha1.finalize()),
         format!("{:x}", sha256.finalize()),
+        format!("{:x}", sha512.finalize()),
     ))
 }
 
@@ -961,6 +1223,80 @@ async fn cleanup_downloads(downloads: &[DownloadedMain]) {
     }
 }
 
+async fn hash_file(path: &Path) -> Result<(u64, String, String, String), std::io::Error> {
+    let mut file = fs::File::open(path).await?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    let mut sha1 = Sha1::new();
+    let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buffer[..read];
+        size = size.saturating_add(read as u64);
+        sha1.update(chunk);
+        sha256.update(chunk);
+        sha512.update(chunk);
+    }
+    Ok((
+        size,
+        format!("{:x}", sha1.finalize()),
+        format!("{:x}", sha256.finalize()),
+        format!("{:x}", sha512.finalize()),
+    ))
+}
+
+async fn remove_empty_parents(parent: Option<&Path>, root: &Path) {
+    let Some(mut current) = parent.map(Path::to_path_buf) else {
+        return;
+    };
+    while current != root && current.starts_with(root) {
+        match fs::remove_dir(&current).await {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::DirectoryNotEmpty | ErrorKind::NotFound
+                ) =>
+            {
+                break;
+            }
+            Err(error) => {
+                tracing::debug!(path = %current.display(), %error, "failed to remove empty cache directory");
+                break;
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+    }
+}
+
+fn normalize_cache_prefix(prefix: &str) -> Result<String, CacheFailure> {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty()
+        || prefix.contains('\\')
+        || prefix.split('/').any(|segment| {
+            segment.is_empty()
+                || matches!(segment, "." | "..")
+                || segment.chars().any(char::is_control)
+        })
+        || prefix
+            .split('/')
+            .next()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case(".maven-haste"))
+    {
+        return Err(CacheFailure::Internal(
+            "cache prefix must be a non-empty safe relative path".into(),
+        ));
+    }
+    Ok(prefix.to_owned())
+}
+
 fn header_string(
     headers: &reqwest::header::HeaderMap,
     name: reqwest::header::HeaderName,
@@ -1009,4 +1345,129 @@ fn unix_timestamp() -> i64 {
         .unwrap_or_default()
         .as_secs();
     i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+    use url::Url;
+
+    use super::*;
+    use crate::config::{
+        CircuitBreakerConfig, LoggingConfig, RepositoryConfig, ServerConfig, UpstreamConfig,
+    };
+
+    async fn test_cache(directory: &TempDir, max_size: Option<u64>) -> (CacheManager, Database) {
+        let storage = StorageConfig::resolved_for_test(directory.path().join("repository"));
+        fs::create_dir_all(storage.tmp_dir()).await.unwrap();
+        let config = Config {
+            server: ServerConfig::default(),
+            storage: storage.clone(),
+            cache: CacheConfig {
+                max_size,
+                ..CacheConfig::default()
+            },
+            upstream: UpstreamConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
+            logging: LoggingConfig::default(),
+            repositories: vec![RepositoryConfig {
+                name: "test".into(),
+                url: Url::parse("https://repo.example/").unwrap(),
+                max_concurrency: None,
+                rules: Vec::new(),
+            }],
+        };
+        let database = Database::open(storage.db_path()).await.unwrap();
+        (
+            CacheManager::new(&config, database.clone(), true).unwrap(),
+            database,
+        )
+    }
+
+    async fn add_record(
+        cache: &CacheManager,
+        database: &Database,
+        path: &str,
+        content: &[u8],
+        accessed: i64,
+    ) {
+        let file_path = relative_file_path(&cache.inner.storage.root, path);
+        fs::create_dir_all(file_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&file_path, content).await.unwrap();
+        database
+            .upsert_many(vec![ArtifactRecord {
+                path: path.into(),
+                group_id: "com.example".into(),
+                artifact_id: "demo".into(),
+                version: "1.0".into(),
+                file_type: "jar".into(),
+                upstream: "test".into(),
+                sha1: Some(format!("{:x}", Sha1::digest(content))),
+                sha256: Some(format!("{:x}", Sha256::digest(content))),
+                etag: None,
+                last_modified: None,
+                file_size: content.len() as i64,
+                created_at: accessed,
+                last_refresh_attempt: None,
+                last_accessed: accessed,
+            }])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn evicts_oldest_idle_files_when_capacity_is_exceeded() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, Some(8)).await;
+        add_record(&cache, &database, "com/example/old.jar", b"old!", 1).await;
+        add_record(&cache, &database, "com/example/mid.jar", b"mid!", 2).await;
+        add_record(&cache, &database, "com/example/new.jar", b"new!", 3).await;
+
+        cache.enforce_capacity(&HashSet::new()).await.unwrap();
+
+        assert!(database.get("com/example/old.jar").await.unwrap().is_none());
+        assert!(database.get("com/example/mid.jar").await.unwrap().is_some());
+        assert!(database.get("com/example/new.jar").await.unwrap().is_some());
+        assert_eq!(database.stats().await.unwrap().total_size, 8);
+    }
+
+    #[tokio::test]
+    async fn removes_prefixes_and_reports_integrity_issues() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        add_record(&cache, &database, "com/example/good.jar", b"good", 1).await;
+        add_record(&cache, &database, "com/example/bad.jar", b"before", 2).await;
+        add_record(&cache, &database, "org/example/keep.jar", b"keep", 3).await;
+        fs::write(
+            relative_file_path(&cache.inner.storage.root, "com/example/bad.jar"),
+            b"after",
+        )
+        .await
+        .unwrap();
+
+        let report = cache.verify().await.unwrap();
+        assert_eq!(report.checked, 3);
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].path, "com/example/bad.jar");
+
+        let removed = cache.remove_prefix("/com/example/").await.unwrap();
+        assert_eq!(removed.files, 2);
+        assert!(
+            database
+                .get("com/example/good.jar")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database
+                .get("org/example/keep.jar")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(cache.remove_prefix("../repository").await.is_err());
+    }
 }

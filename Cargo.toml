@@ -8,6 +8,7 @@ repository = "https://github.com/Leawind/maven-haste"
 readme = "README.md"
 keywords = ["maven", "proxy", "cache", "repository"]
 categories = ["caching", "command-line-utilities"]
+exclude = ["config-examples/**", "frontend/**", "test-projects/**"]
 
 [dependencies]
 axum = "0.8"

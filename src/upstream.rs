@@ -369,6 +369,14 @@ impl UpstreamClient {
             .collect()
     }
 
+    pub fn candidate_names(&self, relative_path: &str) -> Vec<String> {
+        self.routes
+            .candidates(relative_path)
+            .into_iter()
+            .map(|repository| repository.name.clone())
+            .collect()
+    }
+
     pub fn all_candidates_negative(&self, relative_path: &str, negative: &HashSet<String>) -> bool {
         let candidates = self.routes.candidates(relative_path);
         !candidates.is_empty()
@@ -388,7 +396,7 @@ impl UpstreamClient {
 
         for (repository, conditional) in repositories {
             if !self.circuits.allow(&repository.name) {
-                tracing::debug!(upstream = %repository.name, "skipping open circuit");
+                tracing::debug!(upstream = %repository.name, path = relative_path, "skipping open circuit");
                 gateway_failure = true;
                 continue;
             }
@@ -425,6 +433,7 @@ impl UpstreamClient {
                     };
                 }
                 RepositoryResult::NotFound => {
+                    tracing::debug!(upstream = %repository.name, path = relative_path, "upstream artifact was not found");
                     self.circuits.record_success(&repository.name);
                     not_found.push(repository_id(&repository));
                 }

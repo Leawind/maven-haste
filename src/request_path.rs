@@ -92,7 +92,8 @@ impl MavenPath {
         let filename = self.segments.last()?;
         let content_filename = filename
             .strip_suffix(".sha1")
-            .or_else(|| filename.strip_suffix(".sha256"))?;
+            .or_else(|| filename.strip_suffix(".sha256"))
+            .or_else(|| filename.strip_suffix(".sha512"))?;
         let mut segments = self.segments.clone();
         *segments.last_mut()? = content_filename.to_owned();
         let coordinates = Coordinates::parse(&segments)
@@ -208,7 +209,7 @@ fn is_mutable(filename: &str, artifact_id: &str, version: &str) -> bool {
 
 fn is_metadata_file(filename: &str) -> bool {
     filename == "maven-metadata.xml"
-        || ["sha1", "sha256", "md5"]
+        || ["sha1", "sha256", "sha512", "md5"]
             .iter()
             .any(|suffix| filename == format!("maven-metadata.xml.{suffix}"))
 }
@@ -221,13 +222,13 @@ fn is_snapshot_alias(filename: &str, artifact_id: &str, version: &str) -> bool {
 }
 
 fn has_checksum_suffix(filename: &str) -> bool {
-    [".sha1", ".sha256", ".md5"]
+    [".sha1", ".sha256", ".sha512", ".md5"]
         .iter()
         .any(|suffix| filename.ends_with(suffix))
 }
 
 fn strip_checksum_suffix(filename: &str) -> &str {
-    [".sha1", ".sha256", ".md5"]
+    [".sha1", ".sha256", ".sha512", ".md5"]
         .iter()
         .find_map(|suffix| filename.strip_suffix(suffix))
         .unwrap_or(filename)
@@ -238,6 +239,8 @@ fn regular_file_type(filename: &str) -> &'static str {
         "sha1"
     } else if filename.ends_with(".sha256") {
         "sha256"
+    } else if filename.ends_with(".sha512") {
+        "sha512"
     } else if filename.ends_with(".md5") {
         "md5"
     } else if filename.ends_with(".module") {
@@ -256,6 +259,8 @@ fn checksum_file_type(filename: &str) -> &'static str {
         "sha1"
     } else if filename.ends_with(".sha256") {
         "sha256"
+    } else if filename.ends_with(".sha512") {
+        "sha512"
     } else if filename.ends_with(".md5") {
         "md5"
     } else {
