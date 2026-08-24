@@ -10,7 +10,7 @@ permissions:
     contents: read
 
 jobs:
-    publish:
+    verify:
         runs-on: ubuntu-latest
 
         steps:
@@ -25,6 +25,111 @@ jobs:
             - run: cargo fmt --check
             - run: cargo clippy -- -D warnings
             - run: cargo test
+    build-binaries:
+        name: Build ${{ matrix.name }} binary
+        needs: verify
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - name: x86_64-unknown-linux-gnu
+                      os: ubuntu-latest
+                      archive: maven-haste-x86_64-unknown-linux-gnu.tar.gz
+                      binary: maven-haste
+                    - name: x86_64-apple-darwin
+                      os: macos-latest
+                      archive: maven-haste-x86_64-apple-darwin.tar.gz
+                      binary: maven-haste
+                    - name: x86_64-pc-windows-msvc
+                      os: windows-latest
+                      archive: maven-haste-x86_64-pc-windows-msvc.zip
+                      binary: maven-haste.exe
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
+            - run: cargo build --release
+
+            - name: Package Unix binary
+              if: runner.os != 'Windows'
+              run: tar -C target/release -czf ${{ matrix.archive }} ${{ matrix.binary }}
+
+            - name: Package Windows binary
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: Compress-Archive -Path target/release/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ matrix.name }}
+                  path: ${{ matrix.archive }}
+                  if-no-files-found: error
+
+    draft-release:
+        name: Create GitHub release draft
+        needs: build-binaries
+        if: github.ref_type == 'tag'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Extract release notes
+              env:
+                  RELEASE_TAG: ${{ github.ref_name }}
+              run: |
+                  version="${RELEASE_TAG#v}"
+                  awk -v version="$version" '
+                      index($0, "## [" version "]") == 1 { in_section = 1; next }
+                      in_section && /^## / { exit }
+                      in_section { print }
+                  ' CHANGELOG.md > RELEASE_NOTES.md
+                  test -s RELEASE_NOTES.md
+
+            - uses: actions/download-artifact@v4
+              with:
+                  path: release-assets
+                  merge-multiple: true
+
+            - uses: softprops/action-gh-release@v2
+              with:
+                  draft: true
+                  body_path: RELEASE_NOTES.md
+                  files: release-assets/*
+
+    publish-crate:
+        name: Publish crate to crates.io
+        needs: draft-release
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
             - run: cargo publish
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    publish-release:
+        name: Publish GitHub release
+        needs: publish-crate
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Publish release draft
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  RELEASE_TAG: ${{ github.ref_name }}
+              run: gh release edit "$RELEASE_TAG" --draft=false
