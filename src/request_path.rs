@@ -132,10 +132,7 @@ impl Coordinates {
         let filename = segments
             .last()
             .expect("a Maven path always has at least one segment");
-        let metadata = filename == "maven-metadata.xml"
-            || ["sha1", "sha256", "md5"]
-                .iter()
-                .any(|suffix| filename == &format!("maven-metadata.xml.{suffix}"));
+        let metadata = is_metadata_file(filename);
 
         if metadata {
             if segments.len() < 2 {
@@ -163,6 +160,7 @@ impl Coordinates {
             } else {
                 (before_file, String::new(), String::new())
             };
+            let policy = cache_policy(filename, &artifact_id, &version);
             return Ok(Self {
                 group_id: group_segments.join("."),
                 artifact_id,
@@ -172,7 +170,7 @@ impl Coordinates {
                 } else {
                     checksum_file_type(filename).into()
                 },
-                policy: CachePolicy::Mutable,
+                policy,
                 checksum: filename != "maven-metadata.xml",
             });
         }
@@ -183,26 +181,43 @@ impl Coordinates {
             ));
         }
         let artifact_index = segments.len() - 3;
-        let checksum = has_checksum_suffix(filename);
-        let content_filename = strip_checksum_suffix(filename);
+        let artifact_id = &segments[artifact_index];
         let version = &segments[artifact_index + 1];
-        let snapshot_alias = version.ends_with("-SNAPSHOT")
-            && content_filename
-                .strip_prefix(&format!("{}-{version}", segments[artifact_index]))
-                .is_some_and(|suffix| suffix.starts_with(['.', '-']));
         Ok(Self {
             group_id: segments[..artifact_index].join("."),
-            artifact_id: segments[artifact_index].clone(),
+            artifact_id: artifact_id.clone(),
             version: version.clone(),
             file_type: regular_file_type(filename).into(),
-            policy: if snapshot_alias {
-                CachePolicy::Mutable
-            } else {
-                CachePolicy::Permanent
-            },
-            checksum,
+            policy: cache_policy(filename, artifact_id, version),
+            checksum: has_checksum_suffix(filename),
         })
     }
+}
+
+fn cache_policy(filename: &str, artifact_id: &str, version: &str) -> CachePolicy {
+    if is_mutable(filename, artifact_id, version) {
+        CachePolicy::Mutable
+    } else {
+        CachePolicy::Permanent
+    }
+}
+
+fn is_mutable(filename: &str, artifact_id: &str, version: &str) -> bool {
+    is_metadata_file(filename) || is_snapshot_alias(filename, artifact_id, version)
+}
+
+fn is_metadata_file(filename: &str) -> bool {
+    filename == "maven-metadata.xml"
+        || ["sha1", "sha256", "md5"]
+            .iter()
+            .any(|suffix| filename == &format!("maven-metadata.xml.{suffix}"))
+}
+
+fn is_snapshot_alias(filename: &str, artifact_id: &str, version: &str) -> bool {
+    version.ends_with("-SNAPSHOT")
+        && strip_checksum_suffix(filename)
+            .strip_prefix(&format!("{artifact_id}-{version}"))
+            .is_some_and(|suffix| suffix.starts_with(['.', '-']))
 }
 
 fn has_checksum_suffix(filename: &str) -> bool {
@@ -350,5 +365,22 @@ mod tests {
         .unwrap();
         assert_eq!(metadata_checksum.policy(), CachePolicy::Mutable);
         assert!(metadata_checksum.is_checksum());
+    }
+
+    #[test]
+    fn identifies_mutable_maven_files() {
+        assert!(is_mutable("maven-metadata.xml", "demo", "1.0"));
+        assert!(is_mutable("maven-metadata.xml.sha256", "demo", "1.0"));
+        assert!(is_mutable(
+            "demo-1.0-SNAPSHOT-sources.jar.sha1",
+            "demo",
+            "1.0-SNAPSHOT"
+        ));
+        assert!(!is_mutable(
+            "demo-1.0-20260823.120000-1.jar",
+            "demo",
+            "1.0-SNAPSHOT"
+        ));
+        assert!(!is_mutable("demo-1.0.jar", "demo", "1.0"));
     }
 }
