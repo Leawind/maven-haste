@@ -139,10 +139,6 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
     Ok(path)
 }
 
-fn maven_endpoint(bind: std::net::SocketAddr, base_path: &str) -> String {
-    format!("http://{bind}{base_path}")
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;

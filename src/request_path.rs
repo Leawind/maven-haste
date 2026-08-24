@@ -210,7 +210,7 @@ fn is_metadata_file(filename: &str) -> bool {
     filename == "maven-metadata.xml"
         || ["sha1", "sha256", "md5"]
             .iter()
-            .any(|suffix| filename == &format!("maven-metadata.xml.{suffix}"))
+            .any(|suffix| filename == format!("maven-metadata.xml.{suffix}"))
 }
 
 fn is_snapshot_alias(filename: &str, artifact_id: &str, version: &str) -> bool {
