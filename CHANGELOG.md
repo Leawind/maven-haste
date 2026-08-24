@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file.
 - Added optional cache size limits with least-recently-used eviction.
 - Added cache statistics, prefix removal, and integrity verification commands.
 - Added manual build-tool configurations and Java and Minecraft compatibility projects.
+- Added one shared Gradle Wrapper for building compatibility projects.
 
 ## [0.1.0]
 

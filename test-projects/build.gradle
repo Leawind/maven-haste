@@ -1,0 +1,13 @@
+plugins {
+    id 'base'
+}
+
+tasks.named('build') {
+    dependsOn(
+        ':java:gradle-basic:build',
+        ':minecraft:fabric:build',
+        ':minecraft:forge:build',
+        ':minecraft:neoforge:build',
+        ':minecraft:representative-fabric:build'
+    )
+}

@@ -1,0 +1,37 @@
+{
+    "schemaVersion": 1,
+    "id": "representative_fabric",
+    "version": "${version}",
+    "name": "Representative Fabric Fixture",
+    "description": "A small compatibility fixture based on common Fabric mod build patterns.",
+    "authors": [
+        "Maven Haste contributors"
+    ],
+    "contact": {
+        "sources": "https://github.com/Leawind/maven-haste"
+    },
+    "license": "MIT",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "dev.mavenhaste.compat.RepresentativeFabric"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=${loader_version}",
+        "minecraft": "~${minecraft_version}",
+        "java": ">=21",
+        "fabric-api": "*"
+    },
+    "custom": {
+        "modmenu": {
+            "links": {
+                "representative_fabric.source": "https://github.com/Leawind/maven-haste"
+            },
+            "badges": [
+                "library"
+            ],
+            "update_checker": false
+        }
+    }
+}

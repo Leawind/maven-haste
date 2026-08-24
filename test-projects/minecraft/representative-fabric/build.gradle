@@ -1,0 +1,58 @@
+plugins {
+    id 'fabric-loom' version "${representative_fabric_loom_version}"
+    id 'maven-publish'
+}
+
+version = "${representative_fabric_mod_version}+mc${representative_fabric_minecraft_version}"
+group = representative_fabric_maven_group
+
+base {
+    archivesName = representative_fabric_archives_base_name
+}
+
+repositories {
+    maven {
+        name = 'TerraformersMC'
+        url = 'https://maven.terraformersmc.com/releases/'
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${representative_fabric_minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${representative_fabric_loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${representative_fabric_api_version}"
+
+    // Mod Menu documents this as a compile-time integration dependency.
+    modCompileOnly "com.terraformersmc:modmenu:${representative_fabric_modmenu_version}"
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') {
+        expand(
+            version: project.version,
+            loader_version: representative_fabric_loader_version,
+            minecraft_version: representative_fabric_minecraft_version,
+        )
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+publishing {
+    publications {
+        create('mavenJava', MavenPublication) {
+            from components.java
+        }
+    }
+}

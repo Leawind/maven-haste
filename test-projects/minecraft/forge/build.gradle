@@ -1,0 +1,21 @@
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version "${forgegradle_version}"
+}
+
+version = '1.0.0'
+group = 'dev.mavenhaste.compat'
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+minecraft {
+    mappings channel: 'official', version: forge_minecraft_version
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${forge_minecraft_version}-${forge_version}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

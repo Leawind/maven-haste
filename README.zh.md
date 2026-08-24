@@ -68,30 +68,29 @@ maven-haste run
 
 当某个上游没有文件、请求失败，或反复返回无法通过校验且内容不同的文件时，服务会在适用的情况下继续尝试后续上游。仓库名称用于日志、统计和熔断状态识别。
 
-## 接入 Gradle
+## 接入构建工具
 
-在 `~/.gradle/init.d/maven-haste.gradle`（Windows 为 `%USERPROFILE%\.gradle\init.d\maven-haste.gradle`）中加入：
+Maven Haste 不修改构建工具或项目文件。请复制并按自己的环境修改相应示例：
 
-```gradle
-allprojects {
-    buildscript.repositories {
-        maven {
-            url = uri("${maven_haste_url}")
-            allowInsecureProtocol = true
-        }
-    }
-    repositories {
-        maven {
-            url = uri("${maven_haste_url}")
-            allowInsecureProtocol = true
-        }
-    }
-}
+- [Gradle init script](config-examples/gradle.init.gradle)，覆盖插件管理、buildscript 依赖和项目依赖。
+- [Maven settings](config-examples/maven-settings.xml)，将外部仓库镜像到 Maven Haste。
+- [Minecraft 上游配置](config-examples/minecraft.toml)，为常用加载器仓库提供路径路由。
+
+Gradle 示例会把 Maven Haste 添加到项目声明的仓库之前，并保留原有仓库作为 fallback。项目可以实施自己的仓库策略，
+因此应先检查和调整脚本，再将其安装为全局配置。
+
+## 维护缓存
+
+通过命令行修改缓存文件前先停止正在运行的代理。
+
+```bash
+maven-haste cache stats
+maven-haste cache verify
+maven-haste cache remove com/example/library
 ```
 
-将其中的 `${maven_haste_url}` 替换为你部署的 maven-haste 的 URL，例如 `http://127.0.0.1:8080/maven`。
-
-代理仓库会被置于项目已有仓库之前。若 Maven Haste 未启动，Gradle 会连接失败并继续尝试后续仓库。
+将 `cache.max_size` 设置为字节数即可启用最近最少使用淘汰。未设置上限时会持续保留缓存构件。缓存删除命令接受
+Maven 仓库路径前缀，并删除数据库中记录的所有后代文件。
 
 ## 细节
 
@@ -101,7 +100,7 @@ allprojects {
 - `maven-metadata.xml` 和 `-SNAPSHOT` 别名属于可变内容。缓存过期后，已有内容可以立即返回，刷新在后台进行。
 - 启用 stale-on-error 时，后台刷新遇到上游故障仍可继续提供旧内容。
 - 仅可变文件的上游 404 会被短暂记忆，减少对不存在文件的重复请求。
-- 上游校验和与下载内容不一致时，服务会通过重试区分不稳定下载和错误校验和。稳定内容会在记录警告后被接受；反复变化且无法验证的内容会被丢弃并尝试其他来源。缓存的 `.sha1` 和 `.sha256` 始终根据实际保存的字节计算。
+- 上游校验和与下载内容不一致时，服务会通过重试区分不稳定下载和错误校验和。稳定内容会在记录警告后被接受；反复变化且无法验证的内容会被丢弃并尝试其他来源。缓存的 `.sha1`、`.sha256` 和 `.sha512` 始终根据实际保存的字节计算。
 
 上游请求受全局并发上限和单仓库并发上限共同约束；调度器会让首次下载的请求优先，同时定期为缓存刷新留出机会。
 
@@ -113,6 +112,9 @@ allprojects {
 - `GET /api/v1/cache/stats`：返回缓存文件数量、总大小、命中率、负缓存数量和各上游熔断状态。
 
 这两个接口适合接入容器或进程管理器的存活/就绪检查。缓存统计适合用于低频监控，不建议在每个请求中轮询。
+
+Maven endpoint 支持 `GET`、`HEAD`、单段字节范围、客户端条件验证和缓存控制响应头。固定构件允许客户端按不可变内容
+缓存；可变元数据需要向本地代理重新验证。
 
 ### 日志
 
@@ -127,5 +129,12 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 文件日志默认关闭。在 `[logging]` 中设置 `enabled = true` 开启；默认目录为 `<root>/.maven-haste/logs`。
 
 `logging.filter` 使用 [`tracing-subscriber` EnvFilter 指令语法][env-filter-directives]。
+
+## 兼容性项目
+
+[test-projects](test-projects/README.md) 中包含最小 Maven、Gradle、Fabric、Forge 和 NeoForge 项目。它们用于人工兼容性
+及性能检查，不属于离线 Rust 测试套件。普通 Gradle 项目组成一个根多项目构建，Stonecutter 项目则保持独立并管理自己的版本子项目。
+所有 Gradle 项目共享 `test-projects/` 下的一份 Wrapper。其中的代表性 Fabric 项目参考了
+[TerraformersMC/ModMenu](https://github.com/TerraformersMC/ModMenu) 的构建结构。
 
 [env-filter-directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives

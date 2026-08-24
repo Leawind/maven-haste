@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+        maven { url = 'https://maven.fabricmc.net/' }
+        maven { url = 'https://maven.minecraftforge.net/' }
+        maven { url = 'https://maven.neoforged.net/releases/' }
+        maven { url = 'https://maven.kikugie.dev/releases' }
+    }
+}
+
+rootProject.name = 'maven-haste-gradle-fixtures'
+
+include ':java:gradle-basic'
+include ':minecraft:fabric'
+include ':minecraft:forge'
+include ':minecraft:neoforge'
+include ':minecraft:representative-fabric'
+
+project(':java:gradle-basic').projectDir = file('java/gradle-basic')
+project(':minecraft:fabric').projectDir = file('minecraft/fabric')
+project(':minecraft:forge').projectDir = file('minecraft/forge')
+project(':minecraft:neoforge').projectDir = file('minecraft/neoforge')
+project(':minecraft:representative-fabric').projectDir = file('minecraft/representative-fabric')

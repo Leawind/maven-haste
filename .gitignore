@@ -37,3 +37,8 @@ docs-dev/
 # maven-haste
 /maven-haste.toml
 /run/
+
+# Manual compatibility projects
+/test-projects/**/.gradle/
+/test-projects/**/build/
+/test-projects/**/run/

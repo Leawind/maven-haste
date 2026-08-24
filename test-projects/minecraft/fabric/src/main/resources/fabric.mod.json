@@ -1,0 +1,17 @@
+{
+    "schemaVersion": 1,
+    "id": "maven_haste_fabric_compat",
+    "version": "1.0.0",
+    "name": "Maven Haste Fabric Compatibility",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "dev.mavenhaste.compat.FabricCompat"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=0.16.2",
+        "minecraft": "1.21",
+        "java": ">=21"
+    }
+}

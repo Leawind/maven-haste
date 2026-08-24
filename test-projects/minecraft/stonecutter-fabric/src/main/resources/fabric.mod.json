@@ -1,0 +1,22 @@
+{
+    "schemaVersion": 1,
+    "id": "maven_haste_stonecutter_fabric",
+    "version": "${version}",
+    "name": "Maven Haste Stonecutter Fixture",
+    "description": "A minimal multi-version Fabric compatibility fixture.",
+    "authors": [
+        "Maven Haste"
+    ],
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "dev.mavenhaste.compat.StonecutterFabric"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=${loader_version}",
+        "minecraft": "~${minecraft_version}",
+        "java": ">=17",
+        "fabric-api": "*"
+    }
+}

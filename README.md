@@ -68,30 +68,30 @@ Repositories are tried in configuration order. `rules` is an ordered list of glo
 
 When an upstream lacks a file, fails, or repeatedly returns different content that cannot be verified against its checksums, the service continues to the next upstream where applicable. Repository names are used for logging, statistics, and circuit breaker identification.
 
-## Gradle Integration
+## Build Tool Integration
 
-Add the following to `~/.gradle/init.d/maven-haste.gradle` (`%USERPROFILE%\.gradle\init.d\maven-haste.gradle` on Windows):
+Maven Haste does not modify build-tool or project files. Copy and edit the relevant example for your environment:
 
-```gradle
-allprojects {
-    buildscript.repositories {
-        maven {
-            url = uri("${maven_haste_url}")
-            allowInsecureProtocol = true
-        }
-    }
-    repositories {
-        maven {
-            url = uri("${maven_haste_url}")
-            allowInsecureProtocol = true
-        }
-    }
-}
+- [Gradle init script](config-examples/gradle.init.gradle), covering plugin management, buildscript dependencies, and
+  project dependencies.
+- [Maven settings](config-examples/maven-settings.xml), mirroring external repositories through Maven Haste.
+- [Minecraft upstream configuration](config-examples/minecraft.toml), with path routing for common loader repositories.
+
+The Gradle example adds Maven Haste before repositories declared by the build. Existing repositories remain available as
+fallbacks. A build may enforce its own repository policy, so inspect and adapt the script before installing it globally.
+
+## Cache Maintenance
+
+Stop the running proxy before changing cached files from the command line.
+
+```bash
+maven-haste cache stats
+maven-haste cache verify
+maven-haste cache remove com/example/library
 ```
 
-Replace `${maven_haste_url}` with your maven-haste URL, e.g. `http://127.0.0.1:8080/maven`.
-
-The proxy repository is placed before the project's existing repositories. If Maven Haste is down, Gradle fails to connect and falls through to the remaining repositories.
+Set `cache.max_size` to a byte count to enable least-recently-used eviction. Without a limit, cached artifacts are retained
+indefinitely. Cache removal accepts a Maven repository path prefix and removes tracked descendants.
 
 ## Details
 
@@ -101,7 +101,7 @@ The proxy repository is placed before the project's existing repositories. If Ma
 - `maven-metadata.xml` and `-SNAPSHOT` aliases are mutable content. When expired, cached content is served immediately while refresh happens in the background.
 - With stale-on-error enabled, stale content continues to be served if background refresh hits upstream failures.
 - Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
-- When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1` and `.sha256` files are always computed from the bytes actually stored.
+- When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1`, `.sha256`, and `.sha512` files are always computed from the bytes actually stored.
 
 Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes.
 
@@ -113,6 +113,9 @@ The local Maven endpoint is set by `[server].base_path`, defaulting to `/maven`.
 - `GET /api/v1/cache/stats`: returns cached file count, total size, hit rate, negative cache count, and per-upstream circuit breaker status.
 
 Both endpoints are suitable for liveness/readiness checks in containers or process managers. Cache stats are intended for low-frequency monitoring, not per-request polling.
+
+The Maven endpoint supports `GET`, `HEAD`, single byte-range requests, client validators, and cache-control headers. Permanent
+artifacts receive immutable client caching; mutable metadata requires revalidation against the local proxy.
 
 ### Logging
 
@@ -127,5 +130,13 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 File logging is disabled by default. Configure `[logging]` with `enabled = true` to enable. The default directory is `<root>/.maven-haste/logs`.
 
 `logging.filter` uses the [`tracing-subscriber` EnvFilter directive syntax][env-filter-directives].
+
+## Compatibility Projects
+
+Small Maven, Gradle, Fabric, Forge, and NeoForge projects live in [test-projects](test-projects/README.md). They are manual
+compatibility and performance checks and are not part of the offline Rust test suite. The regular Gradle fixtures form one
+multi-project build, while the Stonecutter fixture remains an independent build with its own version subprojects. All
+Gradle fixtures share one Wrapper under `test-projects/`. The representative Fabric fixture is inspired by the build layout of
+[TerraformersMC/ModMenu](https://github.com/TerraformersMC/ModMenu).
 
 [env-filter-directives]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives

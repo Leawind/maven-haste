@@ -1,0 +1,37 @@
+// Copy this file to a Gradle init-script location or pass it with --init-script.
+// Edit this value when Maven Haste listens on another address or base path.
+def mavenHasteUrl = 'http://127.0.0.1:8080/maven'
+
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven {
+            name = 'MavenHaste'
+            url = uri(mavenHasteUrl)
+            allowInsecureProtocol = true
+        }
+    }
+    settings.dependencyResolutionManagement.repositories {
+        maven {
+            name = 'MavenHaste'
+            url = uri(mavenHasteUrl)
+            allowInsecureProtocol = true
+        }
+    }
+}
+
+allprojects {
+    buildscript.repositories {
+        maven {
+            name = 'MavenHaste'
+            url = uri(mavenHasteUrl)
+            allowInsecureProtocol = true
+        }
+    }
+    repositories {
+        maven {
+            name = 'MavenHaste'
+            url = uri(mavenHasteUrl)
+            allowInsecureProtocol = true
+        }
+    }
+}
