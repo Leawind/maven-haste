@@ -124,4 +124,4 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 
 `--verbose` also enables debug logging; if both are set, the environment variable takes precedence.
 
-By default logs are not written to a file. Configure `[logging.file]` to set the log path, retention, etc.
+File logging is disabled by default. Configure `[logging]` with `enabled = true` to enable. The default directory is `<root>/.maven-haste/logs`.

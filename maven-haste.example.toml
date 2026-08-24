@@ -24,10 +24,12 @@ root = './repository'
 # # Serve the last cached mutable file when refreshing it encounters an upstream failure.
 # serve_stale_on_error = true
 
-# # Optional JSON Lines file logging. Omit this table to log only to the console.
-# [logging.file]
-# # Directory for daily JSON Lines log files.
-# directory = './logs'
+# # Optional JSON Lines file logging settings.
+# [logging]
+# # Write JSON Lines logs to daily files. Defaults to `false`
+# enabled = false
+# # Directory for daily JSON Lines log files. Defaults to <root>/.maven-haste/logs.
+# directory = './repository/.maven-haste/logs'
 # # Retention period for completed daily log files.
 # retention = '30d'
 # # Rust log filter for file output.

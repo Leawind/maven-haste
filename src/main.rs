@@ -72,8 +72,8 @@ async fn run(cli: Cli) -> Result<(), AppError> {
     let storage = storage::prepare(&loaded.config.storage).await?;
 
     if matches!(cli.command.as_ref(), Some(Command::Check)) {
-        if let Some(file) = &loaded.config.logging.file {
-            logging::validate_directory(file)?;
+        if loaded.config.logging.enabled {
+            logging::validate_directory(&loaded.config.logging)?;
         }
         println!("configuration is valid: {}", loaded.path.display());
         println!(
@@ -83,7 +83,7 @@ async fn run(cli: Cli) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let _logging_guard = logging::init(cli.verbose, loaded.config.logging.file.as_ref())?;
+    let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
     tracing::info!(config = %loaded.path.display(), "loaded configuration");
     tracing::info!(
         root = %loaded.config.storage.root.display(),

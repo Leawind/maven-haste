@@ -43,26 +43,30 @@ pub struct Config {
     pub repositories: Vec<RepositoryConfig>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct LoggingConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<FileLoggingConfig>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct FileLoggingConfig {
-    pub directory: PathBuf,
+pub struct LoggingConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<PathBuf>,
     #[serde(with = "humantime_serde")]
     pub retention: Duration,
     pub filter: String,
 }
 
-impl Default for FileLoggingConfig {
+impl LoggingConfig {
+    pub fn directory(&self) -> &Path {
+        self.directory
+            .as_deref()
+            .expect("logging paths are resolved while loading configuration")
+    }
+}
+
+impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            directory: PathBuf::from("./logs"),
+            enabled: false,
+            directory: None,
             retention: Duration::from_secs(30 * 24 * 60 * 60),
             filter: "maven_haste=info,maven_haste::access=debug".to_owned(),
         }
@@ -207,15 +211,12 @@ pub fn load(cli: &Cli) -> Result<LoadedConfig, ConfigError> {
     })?;
 
     validate_raw_storage_paths(&config.storage)?;
+    validate_raw_logging_paths(&config.logging)?;
 
     let config_dir = path
         .parent()
         .expect("an absolute configuration path always has a parent");
-    resolve_paths(
-        &mut config.storage,
-        config.logging.file.as_mut(),
-        config_dir,
-    );
+    resolve_paths(&mut config.storage, &mut config.logging, config_dir);
     normalize(&mut config);
     if let Some(bind) = cli.bind {
         config.server.bind = bind;
@@ -273,11 +274,7 @@ fn canonical_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
     })
 }
 
-fn resolve_paths(
-    storage: &mut StorageConfig,
-    file_logging: Option<&mut FileLoggingConfig>,
-    config_dir: &Path,
-) {
+fn resolve_paths(storage: &mut StorageConfig, logging: &mut LoggingConfig, config_dir: &Path) {
     storage.root = resolve_path(config_dir, &storage.root);
     let internal = storage.root.join(".maven-haste");
     storage.tmp_dir = Some(match storage.tmp_dir.take() {
@@ -288,9 +285,10 @@ fn resolve_paths(
         Some(path) => resolve_path(config_dir, &path),
         None => internal.join("cache.db"),
     });
-    if let Some(file_logging) = file_logging {
-        file_logging.directory = resolve_path(config_dir, &file_logging.directory);
-    }
+    logging.directory = Some(match logging.directory.take() {
+        Some(path) => resolve_path(config_dir, &path),
+        None => internal.join("logs"),
+    });
 }
 
 fn resolve_path(base: &Path, path: &Path) -> PathBuf {
@@ -357,19 +355,28 @@ fn validate_raw_storage_paths(storage: &StorageConfig) -> Result<(), ConfigError
     Ok(())
 }
 
-fn validate(config: &Config) -> Result<(), ConfigError> {
-    if let Some(file) = &config.logging.file {
-        if file.directory.as_os_str().is_empty() {
-            return Err(ConfigError::new("logging.file.directory must not be empty"));
-        }
-        if file.retention < Duration::from_secs(24 * 60 * 60) {
-            return Err(ConfigError::new(
-                "logging.file.retention must be at least 1 day",
-            ));
-        }
-        tracing_subscriber::EnvFilter::try_new(&file.filter)
-            .map_err(|error| ConfigError::new(format!("invalid logging.file.filter: {error}")))?;
+fn validate_raw_logging_paths(logging: &LoggingConfig) -> Result<(), ConfigError> {
+    if logging
+        .directory
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err(ConfigError::new(
+            "logging.directory must not be empty when specified",
+        ));
     }
+    Ok(())
+}
+
+fn validate(config: &Config) -> Result<(), ConfigError> {
+    if config.logging.directory().as_os_str().is_empty() {
+        return Err(ConfigError::new("logging.directory must not be empty"));
+    }
+    if config.logging.retention < Duration::from_secs(24 * 60 * 60) {
+        return Err(ConfigError::new("logging.retention must be at least 1 day"));
+    }
+    tracing_subscriber::EnvFilter::try_new(&config.logging.filter)
+        .map_err(|error| ConfigError::new(format!("invalid logging.filter: {error}")))?;
     if config.server.base_path.is_empty()
         || !config.server.base_path.starts_with('/')
         || config.server.base_path.contains('?')
@@ -627,7 +634,11 @@ url = "https://repo.example/"
         );
         assert_eq!(loaded.config.upstream.foreground_priority_burst, 8);
         assert_eq!(loaded.config.repositories[0].max_concurrency, None);
-        assert!(loaded.config.logging.file.is_none());
+        assert!(!loaded.config.logging.enabled);
+        assert_eq!(
+            loaded.config.logging.directory(),
+            directory.path().join("repository/.maven-haste/logs")
+        );
     }
 
     #[test]
@@ -674,7 +685,7 @@ url = "https://repo.example/"
     }
 
     #[test]
-    fn resolves_and_validates_file_logging_configuration() {
+    fn resolves_and_validates_logging_configuration() {
         let directory = TempDir::new().unwrap();
         let path = write_config(
             &directory,
@@ -682,7 +693,8 @@ url = "https://repo.example/"
 [storage]
 root = "repository"
 
-[logging.file]
+[logging]
+enabled = true
 directory = "audit"
 retention = "7d"
 filter = "maven_haste::access=trace"
@@ -693,23 +705,49 @@ url = "https://repo.example/"
 "#,
         );
         let loaded = load(&cli(&path)).unwrap();
-        let logging = loaded.config.logging.file.unwrap();
-        assert_eq!(logging.directory, directory.path().join("audit"));
+        let logging = loaded.config.logging;
+        assert!(logging.enabled);
+        assert_eq!(logging.directory(), directory.path().join("audit"));
         assert_eq!(logging.retention, Duration::from_secs(7 * 24 * 60 * 60));
     }
 
     #[test]
-    fn rejects_short_retention_and_invalid_file_filter() {
+    fn rejects_invalid_logging_configuration_when_disabled() {
         let directory = TempDir::new().unwrap();
-        for logging in ["retention = '23h'", "filter = 'maven_haste=[broken'"] {
+        for logging in [
+            "directory = ''",
+            "retention = '23h'",
+            "filter = 'maven_haste=[broken'",
+        ] {
             let path = write_config(
                 &directory,
                 &format!(
-                    "[storage]\nroot = 'repository'\n\n[logging.file]\n{logging}\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
+                    "[storage]\nroot = 'repository'\n\n[logging]\n{logging}\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
                 ),
             );
             assert!(load(&cli(&path)).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_unknown_nested_logging_configuration() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[logging.file]
+enabled = true
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        assert!(load(&cli(&path)).is_err());
     }
 
     #[test]

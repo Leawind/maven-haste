@@ -17,7 +17,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::FileLoggingConfig;
+use crate::config::LoggingConfig;
 use crate::error::AppError;
 
 pub struct LoggingGuard {
@@ -42,10 +42,10 @@ fn write_shutdown_notice(mut writer: impl Write, ansi: bool) -> io::Result<()> {
     writer.flush()
 }
 
-pub fn validate_directory(config: &FileLoggingConfig) -> Result<(), AppError> {
-    fs::create_dir_all(&config.directory).map_err(|error| directory_error(config, error))?;
+pub fn validate_directory(config: &LoggingConfig) -> Result<(), AppError> {
+    fs::create_dir_all(config.directory()).map_err(|error| directory_error(config, error))?;
     let probe = config
-        .directory
+        .directory()
         .join(format!(".maven-haste-write-test-{}", std::process::id()));
     let result = OpenOptions::new().write(true).create_new(true).open(&probe);
     match result {
@@ -58,7 +58,7 @@ pub fn validate_directory(config: &FileLoggingConfig) -> Result<(), AppError> {
     }
 }
 
-pub fn init(verbose: bool, file: Option<&FileLoggingConfig>) -> Result<LoggingGuard, AppError> {
+pub fn init(verbose: bool, config: &LoggingConfig) -> Result<LoggingGuard, AppError> {
     let console_filter = match std::env::var("RUST_LOG") {
         Ok(value) => EnvFilter::try_new(value)
             .map_err(|error| AppError::Runtime(format!("invalid RUST_LOG: {error}")))?,
@@ -85,20 +85,20 @@ pub fn init(verbose: bool, file: Option<&FileLoggingConfig>) -> Result<LoggingGu
             metadata.target() == "maven_haste::access"
         })));
 
-    if let Some(config) = file {
+    if config.enabled {
         validate_directory(config)?;
-        cleanup(&config.directory, config.retention)?;
+        cleanup(config.directory(), config.retention)?;
         let appender = tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .filename_prefix("maven-haste")
             .filename_suffix("jsonl")
-            .build(&config.directory)
+            .build(config.directory())
             .map_err(|error| AppError::Runtime(format!("failed to open file log: {error}")))?;
         let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
             .lossy(false)
             .finish(appender);
         let file_filter = EnvFilter::try_new(&config.filter)
-            .map_err(|error| AppError::Runtime(format!("invalid logging.file.filter: {error}")))?;
+            .map_err(|error| AppError::Runtime(format!("invalid logging.filter: {error}")))?;
         let file_layer = tracing_subscriber::fmt::layer()
             .json()
             .with_writer(writer)
@@ -189,13 +189,13 @@ impl Visit for MessageVisitor {
     }
 }
 
-fn spawn_cleanup(config: FileLoggingConfig) {
+fn spawn_cleanup(config: LoggingConfig) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
         interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(error) = cleanup(&config.directory, config.retention) {
+            if let Err(error) = cleanup(config.directory(), config.retention) {
                 tracing::warn!(%error, "failed to clean old log files");
             }
         }
@@ -242,10 +242,10 @@ fn log_date(name: &str) -> Option<time::Date> {
     time::Date::from_calendar_date(year, month, day).ok()
 }
 
-fn directory_error(config: &FileLoggingConfig, error: std::io::Error) -> AppError {
+fn directory_error(config: &LoggingConfig, error: std::io::Error) -> AppError {
     AppError::Runtime(format!(
         "file log directory {} is not writable: {error}",
-        config.directory.display()
+        config.directory().display()
     ))
 }
 
@@ -283,12 +283,12 @@ mod tests {
     #[test]
     fn directory_validation_creates_no_formal_log_file() {
         let directory = TempDir::new().unwrap();
-        let config = FileLoggingConfig {
-            directory: directory.path().join("logs"),
-            ..FileLoggingConfig::default()
+        let config = LoggingConfig {
+            directory: Some(directory.path().join("logs")),
+            ..LoggingConfig::default()
         };
         validate_directory(&config).unwrap();
-        assert!(config.directory.is_dir());
-        assert!(fs::read_dir(config.directory).unwrap().next().is_none());
+        assert!(config.directory().is_dir());
+        assert!(fs::read_dir(config.directory()).unwrap().next().is_none());
     }
 }

@@ -124,4 +124,4 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 
 也可以使用 `--verbose` 快速启用调试日志；若同时设置 `RUST_LOG`，环境变量优先。
 
-默认配置下日志不输出到文件，可在 `[logging.file]` 中配置日志保存位置、保留期限等。
+文件日志默认关闭。在 `[logging]` 中设置 `enabled = true` 开启；默认目录为 `<root>/.maven-haste/logs`。

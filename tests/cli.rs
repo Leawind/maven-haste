@@ -24,6 +24,12 @@ fn check_mode_runs_through_the_built_binary() {
             .join("repository/.maven-haste/tmp")
             .is_dir()
     );
+    assert!(
+        !directory
+            .path()
+            .join("repository/.maven-haste/logs")
+            .exists()
+    );
 }
 
 #[test]
@@ -134,7 +140,7 @@ fn file_logging_writes_daily_json_access_events() {
     let address = unused_address();
     let config = write_config(&directory, &address.to_string());
     let mut source = std::fs::read_to_string(&config).unwrap();
-    source.push_str("\n[logging.file]\ndirectory = './logs'\n");
+    source.push_str("\n[logging]\nenabled = true\n");
     std::fs::write(&config, source).unwrap();
     let child = Command::new(binary())
         .arg("run")
@@ -230,7 +236,9 @@ fn wait_for_response(address: SocketAddr, path: &str) -> String {
 
 fn wait_for_access_log(directory: &TempDir) -> std::path::PathBuf {
     for _ in 0..100 {
-        if let Ok(entries) = std::fs::read_dir(directory.path().join("logs")) {
+        if let Ok(entries) =
+            std::fs::read_dir(directory.path().join("repository/.maven-haste/logs"))
+        {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with("maven-haste.")
