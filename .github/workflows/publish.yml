@@ -131,5 +131,6 @@ jobs:
             - name: Publish release draft
               env:
                   GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
                   RELEASE_TAG: ${{ github.ref_name }}
-              run: gh release edit "$RELEASE_TAG" --draft=false
+              run: gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
