@@ -96,12 +96,7 @@ async fn run(cli: Cli) -> Result<(), AppError> {
     let bind = listener
         .local_addr()
         .map_err(|error| AppError::Runtime(format!("failed to inspect HTTP listener: {error}")))?;
-    tracing::info!(
-        %bind,
-        maven_endpoint = %maven_endpoint(bind, &loaded.config.server.base_path),
-        health_endpoint = %format!("http://{bind}{}", server::HEALTH_PATH),
-        "Maven proxy is ready"
-    );
+    tracing::info!(%bind, "Maven proxy is ready");
     server::serve(listener, loaded.config.server.base_path, cache).await
 }
 
