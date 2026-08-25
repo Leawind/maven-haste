@@ -1921,6 +1921,7 @@ mod tests {
         RepositoryConfig {
             name: name.into(),
             url: url.clone(),
+            use_proxy: None,
             max_concurrency: None,
             rules: rules.iter().map(|rule| (*rule).into()).collect(),
         }

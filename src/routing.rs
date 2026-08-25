@@ -105,6 +105,7 @@ mod tests {
         RepositoryConfig {
             name: name.into(),
             url: Url::parse("https://repo.example/").unwrap(),
+            use_proxy: None,
             max_concurrency: None,
             rules: rules.iter().map(|rule| (*rule).into()).collect(),
         }

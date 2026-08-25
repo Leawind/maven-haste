@@ -40,6 +40,8 @@ root = './repository'
 
 # # Optional upstream settings. Omit this table to use the defaults below.
 # [upstream]
+# # Optional global upstream proxy.
+# # proxy = 'http://127.0.0.1:7890'
 # # Maximum time allowed to establish a connection to an upstream repository.
 # connect_timeout = '10s'
 # # Maximum idle time while reading each upstream response body.
@@ -63,8 +65,14 @@ root = './repository'
 # [[repositories]]
 # Required human-readable name shown in logs and cache statistics.
 # name = 'Gradle Plugin'
-# # Optional per-repository override of default_repository_max_concurrency.
 # url = 'https://plugins.gradle.org/m2/'
+# # Optional per-repository proxy switch.
+# # true: use [upstream].proxy
+# # false: connect directly without using [upstream].proxy
+# # omitted: use [upstream].proxy when it is configured, otherwise connect directly
+# # use_proxy = true
+# # Optional per-repository override of default_repository_max_concurrency.
+# max_concurrency = 10
 # # Optional ordered request-path glob rules. The first matching rule decides participation.
 # # Prefix a rule with ! to exclude it; * matches within one path segment and ** may match across path separators.
 # rules = ['gradle/plugin/**', '!**']
@@ -72,3 +80,8 @@ root = './repository'
 [[repositories]]
 name = 'central'
 url = 'https://repo1.maven.org/maven2/'
+# # Optional per-repository proxy switch.
+# # true: use [upstream].proxy
+# # false: connect directly without using [upstream].proxy
+# # omitted: use [upstream].proxy when it is configured, otherwise connect directly
+# # use_proxy = true

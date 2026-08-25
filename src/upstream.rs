@@ -17,10 +17,27 @@ const MAX_ATTEMPTS: usize = 3;
 
 #[derive(Clone)]
 pub struct UpstreamClient {
-    client: Client,
+    default_client: Client,
+    proxy_client: Option<Client>,
+    direct_client: Client,
     routes: RouteEngine,
     circuits: Arc<CircuitBreaker>,
     scheduler: RequestScheduler,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyChoice {
+    Proxy,
+    Direct,
+}
+
+fn proxy_choice(use_proxy: Option<bool>, has_global_proxy: bool) -> ProxyChoice {
+    match use_proxy {
+        Some(true) => ProxyChoice::Proxy,
+        Some(false) => ProxyChoice::Direct,
+        None if has_global_proxy => ProxyChoice::Proxy,
+        None => ProxyChoice::Direct,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -253,20 +270,19 @@ impl UpstreamClient {
         config: &UpstreamConfig,
         circuit: &CircuitBreakerConfig,
     ) -> Result<Self, AppError> {
-        let client = Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .read_timeout(config.read_timeout)
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .user_agent(concat!("maven-haste/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| {
-                AppError::Runtime(format!(
-                    "failed to initialize upstream HTTP client: {error}"
-                ))
-            })?;
+        let proxy_client = match &config.proxy {
+            Some(proxy) => Some(build_http_client(config, Some(proxy))?),
+            None => None,
+        };
+        let direct_client = build_http_client(config, None)?;
+        let default_client = proxy_client
+            .clone()
+            .unwrap_or_else(|| direct_client.clone());
         let scheduler = RequestScheduler::new(&repositories, config);
         Ok(Self {
-            client,
+            default_client,
+            proxy_client,
+            direct_client,
             routes: RouteEngine::new(repositories),
             circuits: Arc::new(CircuitBreaker::new(
                 circuit.failure_threshold,
@@ -274,6 +290,19 @@ impl UpstreamClient {
             )),
             scheduler,
         })
+    }
+
+    fn client_for_repository(&self, repository: &RepositoryConfig) -> &Client {
+        if repository.use_proxy.is_none() {
+            return &self.default_client;
+        }
+        match proxy_choice(repository.use_proxy, self.proxy_client.is_some()) {
+            ProxyChoice::Proxy => self
+                .proxy_client
+                .as_ref()
+                .expect("upstream proxy is required when use_proxy is true"),
+            ProxyChoice::Direct => &self.direct_client,
+        }
     }
 
     pub async fn fetch(
@@ -465,7 +494,7 @@ impl UpstreamClient {
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
             let permit = self.scheduler.acquire(&repository.name, priority).await;
-            let mut request = self.client.get(url.clone());
+            let mut request = self.client_for_repository(repository).get(url.clone());
             if let Some(conditional) = conditional {
                 if let Some(etag) = &conditional.etag {
                     request = request.header(IF_NONE_MATCH, etag);
@@ -537,6 +566,26 @@ impl UpstreamClient {
     }
 }
 
+fn build_http_client(config: &UpstreamConfig, proxy: Option<&Url>) -> Result<Client, AppError> {
+    let mut builder = Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent(concat!("maven-haste/", env!("CARGO_PKG_VERSION")))
+        .no_proxy();
+    if let Some(proxy) = proxy {
+        let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|error| {
+            AppError::Runtime(format!("failed to initialize upstream proxy: {error}"))
+        })?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to initialize upstream HTTP client: {error}"
+        ))
+    })
+}
+
 fn repository_id(repository: &RepositoryConfig) -> String {
     format!("{:x}", Sha256::digest(repository.url.as_str().as_bytes()))
 }
@@ -577,12 +626,14 @@ mod tests {
             RepositoryConfig {
                 name: "a".into(),
                 url: Url::parse("https://a.example/").unwrap(),
+                use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
             },
             RepositoryConfig {
                 name: "b".into(),
                 url: Url::parse("https://b.example/").unwrap(),
+                use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
             },
@@ -613,6 +664,16 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn resolves_proxy_choice() {
+        assert_eq!(proxy_choice(Some(true), true), ProxyChoice::Proxy);
+        assert_eq!(proxy_choice(Some(true), false), ProxyChoice::Proxy);
+        assert_eq!(proxy_choice(Some(false), true), ProxyChoice::Direct);
+        assert_eq!(proxy_choice(Some(false), false), ProxyChoice::Direct);
+        assert_eq!(proxy_choice(None, true), ProxyChoice::Proxy);
+        assert_eq!(proxy_choice(None, false), ProxyChoice::Direct);
     }
 
     #[test]

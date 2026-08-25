@@ -156,6 +156,8 @@ pub struct UpstreamConfig {
     pub max_concurrency: usize,
     pub default_repository_max_concurrency: usize,
     pub foreground_priority_burst: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<Url>,
 }
 
 impl Default for UpstreamConfig {
@@ -166,6 +168,7 @@ impl Default for UpstreamConfig {
             max_concurrency: 32,
             default_repository_max_concurrency: 10,
             foreground_priority_burst: 8,
+            proxy: None,
         }
     }
 }
@@ -192,6 +195,8 @@ impl Default for CircuitBreakerConfig {
 pub struct RepositoryConfig {
     pub name: String,
     pub url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_proxy: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     #[serde(default)]
@@ -435,6 +440,14 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "upstream.read_timeout must be greater than zero",
         ));
     }
+    if let Some(proxy) = &config.upstream.proxy {
+        if !matches!(proxy.scheme(), "http" | "https") {
+            return Err(ConfigError::new("upstream.proxy must use http or https"));
+        }
+        if proxy.host_str().is_none() {
+            return Err(ConfigError::new("upstream.proxy must include a host"));
+        }
+    }
     for (name, value) in [
         ("upstream.max_concurrency", config.upstream.max_concurrency),
         (
@@ -476,6 +489,12 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         if !names.insert(&repository.name) {
             return Err(ConfigError::new(format!(
                 "repository name {:?} is duplicated",
+                repository.name
+            )));
+        }
+        if repository.use_proxy == Some(true) && config.upstream.proxy.is_none() {
+            return Err(ConfigError::new(format!(
+                "repository {:?} has use_proxy = true but [upstream].proxy is not configured",
                 repository.name
             )));
         }
@@ -775,6 +794,156 @@ rules = ["com.example:*"]
         );
 
         assert!(load(&cli(&path)).is_err());
+    }
+
+    #[test]
+    fn parses_without_proxy_or_use_proxy() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let loaded = load(&cli(&path)).unwrap();
+        assert!(loaded.config.upstream.proxy.is_none());
+        assert_eq!(loaded.config.repositories[0].use_proxy, None);
+    }
+
+    #[test]
+    fn parses_global_proxy_without_repository_use_proxy() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = "http://127.0.0.1:7890"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let loaded = load(&cli(&path)).unwrap();
+        assert_eq!(
+            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
+            Some("http://127.0.0.1:7890/")
+        );
+        assert_eq!(loaded.config.repositories[0].use_proxy, None);
+    }
+
+    #[test]
+    fn parses_global_proxy_with_repository_use_proxy_true() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = "http://user:password@127.0.0.1:7890"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+use_proxy = true
+"#,
+        );
+
+        let loaded = load(&cli(&path)).unwrap();
+        assert_eq!(
+            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
+            Some("http://user:password@127.0.0.1:7890/")
+        );
+        assert_eq!(loaded.config.repositories[0].use_proxy, Some(true));
+    }
+
+    #[test]
+    fn parses_global_proxy_with_repository_use_proxy_false() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = "http://127.0.0.1:7890"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+use_proxy = false
+"#,
+        );
+
+        let loaded = load(&cli(&path)).unwrap();
+        assert_eq!(
+            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
+            Some("http://127.0.0.1:7890/")
+        );
+        assert_eq!(loaded.config.repositories[0].use_proxy, Some(false));
+    }
+
+    #[test]
+    fn rejects_use_proxy_true_without_global_proxy() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+use_proxy = true
+"#,
+        );
+
+        let error = load(&cli(&path)).unwrap_err();
+        assert!(
+            error.to_string().contains("use_proxy = true"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_proxy_scheme() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = "socks5://127.0.0.1:1080"
+
+[[repositories]]
+name = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let error = load(&cli(&path)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("upstream.proxy must use http or https"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
