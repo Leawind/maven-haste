@@ -43,9 +43,11 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 
 ## 发布流程
 
-- 发布前由开发者手动更新 `CHANGELOG.md`，并添加与标签 `vX.Y.Z` 对应的 `## [X.Y.Z]` 小节。
-- 推送 `v*` 标签会验证代码，并构建 Linux、macOS 与 Windows 的压缩二进制包。
-- 构建成功后创建含压缩包和 CHANGELOG 发布说明的 GitHub Release 草稿，再发布到 crates.io，最后发布该草稿。
+1. 编辑相关文件
+   - 更新 `CHANGELOG.md`，并添加与标签 `vX.Y.Z` 对应的 `## [X.Y.Z]` 小节。
+   - 编辑 Cargo.toml 中的版本号
+2. 在本地执行构建 `cargo build`
+3. 提交并添加 `v*` 标签
 
 ## 配置与安全
 
