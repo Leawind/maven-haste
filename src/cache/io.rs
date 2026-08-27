@@ -142,7 +142,9 @@ pub(crate) async fn cleanup_downloads(downloads: &[DownloadedMain]) {
     }
 }
 
-pub(crate) async fn hash_file(path: &Path) -> Result<(u64, String, String, String), std::io::Error> {
+pub(crate) async fn hash_file(
+    path: &Path,
+) -> Result<(u64, String, String, String), std::io::Error> {
     let mut file = fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut size = 0_u64;

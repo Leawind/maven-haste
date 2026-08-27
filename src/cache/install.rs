@@ -12,7 +12,10 @@ use crate::cache::{CacheFailure, RemovalStats};
 use crate::db::{ArtifactRecord, NegativeCacheEntry};
 
 impl crate::cache::CacheManager {
-    pub(crate) async fn install_bundle(&self, files: Vec<PreparedFile>) -> Result<(), CacheFailure> {
+    pub(crate) async fn install_bundle(
+        &self,
+        files: Vec<PreparedFile>,
+    ) -> Result<(), CacheFailure> {
         let result = self.install_bundle_inner(&files).await;
         if result.is_err() {
             cleanup_prepared(&files).await;
@@ -161,7 +164,10 @@ impl crate::cache::CacheManager {
         self.inner.flights.contains_key(path) || self.inner.refreshes.contains_key(path)
     }
 
-    pub(crate) async fn fresh_negative_entries(&self, path: &str) -> Result<HashSet<String>, CacheFailure> {
+    pub(crate) async fn fresh_negative_entries(
+        &self,
+        path: &str,
+    ) -> Result<HashSet<String>, CacheFailure> {
         let entries = self
             .inner
             .database

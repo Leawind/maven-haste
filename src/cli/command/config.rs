@@ -36,7 +36,7 @@ impl ConfigCommand {
                 Ok(())
             }
             ConfigCommand::Show => {
-                let loaded = Config::load(&cli)?;
+                let loaded = Config::load(cli)?;
 
                 print!("{}", toml::to_string_pretty(&loaded.config)?);
                 Ok(())

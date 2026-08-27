@@ -407,9 +407,7 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqlite
     })
 }
 
-fn ensure_schema_columns(
-    connection: &rusqlite::Connection,
-) -> Result<(), rusqlite::Error> {
+fn ensure_schema_columns(connection: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     let mut statement = connection.prepare("PRAGMA table_info(artifacts)")?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?

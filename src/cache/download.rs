@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use reqwest::header::{ETAG, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 
+use crate::cache::CacheFailure;
 use crate::cache::io::{
     cleanup_downloads, cleanup_prepared, hash_file, header_string, internal,
     read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, unix_timestamp,
     write_temporary,
 };
 use crate::cache::types::{DownloadedMain, PreparedFetch, PreparedFile};
-use crate::cache::CacheFailure;
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
@@ -39,7 +39,10 @@ impl crate::cache::CacheManager {
         self.download_main_initial(request).await
     }
 
-    pub(crate) async fn download_main_initial(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+    pub(crate) async fn download_main_initial(
+        &self,
+        request: &MavenPath,
+    ) -> Result<(), CacheFailure> {
         let existing = self
             .inner
             .database

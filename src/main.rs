@@ -1,18 +1,5 @@
-mod cache;
-mod circuit;
-mod cli;
-mod config;
-mod db;
-mod error;
-mod logging;
-mod request_path;
-mod routing;
-mod server;
-mod storage;
-mod upstream;
-
 use clap::Parser;
-use cli::Cli;
+use maven_haste::cli::Cli;
 use std::process::ExitCode;
 
 #[tokio::main]
