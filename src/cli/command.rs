@@ -1,4 +1,5 @@
 use crate::cli::Cli;
+use crate::config::Config;
 use crate::error::AppError;
 use crate::{cache, db, logging, server, storage};
 use clap::Subcommand;
@@ -25,7 +26,7 @@ impl Command {
     pub async fn execute(&self, cli: &Cli) -> Result<(), AppError> {
         match self {
             Command::Run => {
-                let loaded = crate::config::load(&cli)?;
+                let loaded = Config::load(&cli)?;
                 let storage = storage::prepare(&loaded.config.storage).await?;
 
                 let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
@@ -46,7 +47,7 @@ impl Command {
                 server::serve(listener, loaded.config.server.base_path, cache).await
             }
             Command::Check => {
-                let loaded = crate::config::load(&cli)?;
+                let loaded = Config::load(&cli)?;
                 if loaded.config.logging.enabled {
                     logging::validate_directory(&loaded.config.logging)?;
                 }

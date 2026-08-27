@@ -1,4 +1,5 @@
 use crate::cli::Cli;
+use crate::config::Config;
 use crate::error::AppError;
 use clap::Subcommand;
 use std::io::Write;
@@ -35,7 +36,7 @@ impl ConfigCommand {
                 Ok(())
             }
             ConfigCommand::Show => {
-                let loaded = crate::config::load(&cli)?;
+                let loaded = Config::load(&cli)?;
 
                 print!("{}", toml::to_string_pretty(&loaded.config)?);
                 Ok(())

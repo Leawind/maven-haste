@@ -203,125 +203,131 @@ pub struct RepositoryConfig {
     pub rules: Vec<String>,
 }
 
-pub fn load(cli: &Cli) -> Result<LoadedConfig, ConfigError> {
-    let path = locate(cli.config.as_deref())?;
-    let source = std::fs::read_to_string(&path).map_err(|error| {
-        ConfigError::new(format!(
-            "failed to read configuration {}: {error}",
-            path.display()
-        ))
-    })?;
-    let mut config: Config = toml::from_str(&source).map_err(|error| {
-        ConfigError::new(format!(
-            "failed to parse configuration {}: {error}",
-            path.display()
-        ))
-    })?;
+impl Config {
+    pub fn load(cli: &Cli) -> Result<LoadedConfig, ConfigError> {
+        fn resolve_paths(
+            storage: &mut StorageConfig,
+            logging: &mut LoggingConfig,
+            config_dir: &Path,
+        ) {
+            storage.root = resolve_path(config_dir, &storage.root);
+            let internal = storage.root.join(".maven-haste");
+            storage.tmp_dir = Some(match storage.tmp_dir.take() {
+                Some(path) => resolve_path(config_dir, &path),
+                None => internal.join("tmp"),
+            });
+            storage.db_path = Some(match storage.db_path.take() {
+                Some(path) => resolve_path(config_dir, &path),
+                None => internal.join("cache.db"),
+            });
+            logging.directory = Some(match logging.directory.take() {
+                Some(path) => resolve_path(config_dir, &path),
+                None => internal.join("logs"),
+            });
 
-    validate_raw_storage_paths(&config.storage)?;
-    validate_raw_logging_paths(&config.logging)?;
+            fn normalize_path(path: &Path) -> PathBuf {
+                use std::path::Component;
 
-    let config_dir = path
-        .parent()
-        .expect("an absolute configuration path always has a parent");
-    resolve_paths(&mut config.storage, &mut config.logging, config_dir);
-    normalize(&mut config);
-    if let Some(bind) = cli.bind {
-        config.server.bind = bind;
-    }
-    validate(&config)?;
-
-    Ok(LoadedConfig { path, config })
-}
-
-fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
-    let current_dir = env::current_dir()
-        .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
-
-    if let Some(path) = explicit {
-        let path = if path.is_absolute() {
-            path.to_owned()
-        } else {
-            current_dir.join(path)
-        };
-        return canonical_config_path(&path);
-    }
-
-    let mut attempted = vec![current_dir.join(CONFIG_FILE_NAME)];
-    if let Some(base_dirs) = BaseDirs::new() {
-        attempted.push(
-            base_dirs
-                .config_dir()
-                .join("maven-haste")
-                .join(CONFIG_FILE_NAME),
-        );
-    }
-
-    for path in &attempted {
-        if path.is_file() {
-            return canonical_config_path(path);
-        }
-    }
-
-    let paths = attempted
-        .iter()
-        .map(|path| format!("  - {}", path.display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(ConfigError::new(format!(
-        "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
-    )))
-}
-
-fn canonical_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
-    dunce::canonicalize(path).map_err(|error| {
-        ConfigError::new(format!(
-            "configuration file {} is unavailable: {error}",
-            path.display()
-        ))
-    })
-}
-
-fn resolve_paths(storage: &mut StorageConfig, logging: &mut LoggingConfig, config_dir: &Path) {
-    storage.root = resolve_path(config_dir, &storage.root);
-    let internal = storage.root.join(".maven-haste");
-    storage.tmp_dir = Some(match storage.tmp_dir.take() {
-        Some(path) => resolve_path(config_dir, &path),
-        None => internal.join("tmp"),
-    });
-    storage.db_path = Some(match storage.db_path.take() {
-        Some(path) => resolve_path(config_dir, &path),
-        None => internal.join("cache.db"),
-    });
-    logging.directory = Some(match logging.directory.take() {
-        Some(path) => resolve_path(config_dir, &path),
-        None => internal.join("logs"),
-    });
-}
-
-fn resolve_path(base: &Path, path: &Path) -> PathBuf {
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        base.join(path)
-    };
-    normalize_path(&joined)
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
+                let mut normalized = PathBuf::new();
+                for component in path.components() {
+                    match component {
+                        Component::CurDir => {}
+                        Component::ParentDir => {
+                            normalized.pop();
+                        }
+                        component => normalized.push(component.as_os_str()),
+                    }
+                }
+                normalized
             }
-            component => normalized.push(component.as_os_str()),
+            fn resolve_path(base: &Path, path: &Path) -> PathBuf {
+                let joined = if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    base.join(path)
+                };
+                normalize_path(&joined)
+            }
         }
+
+        fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
+            fn canonical_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
+                dunce::canonicalize(path).map_err(|error| {
+                    ConfigError::new(format!(
+                        "configuration file {} is unavailable: {error}",
+                        path.display()
+                    ))
+                })
+            }
+
+            let current_dir = env::current_dir().map_err(|error| {
+                ConfigError::new(format!("failed to read current directory: {error}"))
+            })?;
+
+            if let Some(path) = explicit {
+                let path = if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    current_dir.join(path)
+                };
+                return canonical_config_path(&path);
+            }
+
+            let mut attempted = vec![current_dir.join(CONFIG_FILE_NAME)];
+            if let Some(base_dirs) = BaseDirs::new() {
+                attempted.push(
+                    base_dirs
+                        .config_dir()
+                        .join("maven-haste")
+                        .join(CONFIG_FILE_NAME),
+                );
+            }
+
+            for path in &attempted {
+                if path.is_file() {
+                    return canonical_config_path(path);
+                }
+            }
+
+            let paths = attempted
+                .iter()
+                .map(|path| format!("  - {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(ConfigError::new(format!(
+                "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
+            )))
+        }
+
+        let path = locate(cli.config.as_deref())?;
+        let source = std::fs::read_to_string(&path).map_err(|error| {
+            ConfigError::new(format!(
+                "failed to read configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+        let mut config: Config = toml::from_str(&source).map_err(|error| {
+            ConfigError::new(format!(
+                "failed to parse configuration {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        validate_raw_storage_paths(&config.storage)?;
+        validate_raw_logging_paths(&config.logging)?;
+
+        let config_dir = path
+            .parent()
+            .expect("an absolute configuration path always has a parent");
+        resolve_paths(&mut config.storage, &mut config.logging, config_dir);
+        normalize(&mut config);
+        if let Some(bind) = cli.bind {
+            config.server.bind = bind;
+        }
+        validate(&config)?;
+
+        Ok(LoadedConfig { path, config })
     }
-    normalized
 }
 
 fn normalize(config: &mut Config) {
@@ -603,7 +609,8 @@ url = "https://repo.example/maven2"
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         assert_eq!(
             loaded.config.storage.root,
             directory.path().join("repository")
@@ -646,7 +653,7 @@ url = "https://repo.example/"
         ])
         .unwrap();
 
-        let loaded = load(&cli).unwrap();
+        let loaded = Config::load(&cli).unwrap();
         assert_eq!(loaded.config.server.bind, "0.0.0.0:9000".parse().unwrap());
         assert_eq!(loaded.config.server.base_path, "/maven");
         assert_eq!(loaded.config.cache.metadata_ttl, Duration::from_secs(300));
@@ -680,7 +687,8 @@ url = "https://repo.example/"
                 ),
             );
 
-            let error = load(&cli(&path)).unwrap_err();
+            let cli1 = &cli(&path);
+            let error = Config::load(cli1).unwrap_err();
             assert!(
                 error.to_string().contains("reserved '/api' path"),
                 "unexpected error for {base_path}: {error}"
@@ -706,8 +714,9 @@ url = "https://repo.example/"
 "#,
         );
 
+        let cli1 = &cli(&path);
         assert_eq!(
-            load(&cli(&path)).unwrap().config.server.base_path,
+            Config::load(cli1).unwrap().config.server.base_path,
             "/apiary"
         );
     }
@@ -732,7 +741,8 @@ name = "central"
 url = "https://repo.example/"
 "#,
         );
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         let logging = loaded.config.logging;
         assert!(logging.enabled);
         assert_eq!(logging.directory(), directory.path().join("audit"));
@@ -753,7 +763,8 @@ url = "https://repo.example/"
                     "[storage]\nroot = 'repository'\n\n[logging]\n{logging}\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
                 ),
             );
-            assert!(load(&cli(&path)).is_err());
+            let cli1 = &cli(&path);
+            assert!(Config::load(cli1).is_err());
         }
     }
 
@@ -775,7 +786,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        assert!(load(&cli(&path)).is_err());
+        let cli1 = &cli(&path);
+        assert!(Config::load(cli1).is_err());
     }
 
     #[test]
@@ -794,7 +806,8 @@ rules = ["com.example:*"]
 "#,
         );
 
-        assert!(load(&cli(&path)).is_err());
+        let cli1 = &cli(&path);
+        assert!(Config::load(cli1).is_err());
     }
 
     #[test]
@@ -812,7 +825,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         assert!(loaded.config.upstream.proxy.is_none());
         assert_eq!(loaded.config.repositories[0].use_proxy, None);
     }
@@ -835,7 +849,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         assert_eq!(
             loaded.config.upstream.proxy.as_ref().map(Url::as_str),
             Some("http://127.0.0.1:7890/")
@@ -862,7 +877,8 @@ use_proxy = true
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         assert_eq!(
             loaded.config.upstream.proxy.as_ref().map(Url::as_str),
             Some("http://user:password@127.0.0.1:7890/")
@@ -889,7 +905,8 @@ use_proxy = false
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         assert_eq!(
             loaded.config.upstream.proxy.as_ref().map(Url::as_str),
             Some("http://127.0.0.1:7890/")
@@ -913,7 +930,8 @@ use_proxy = true
 "#,
         );
 
-        let error = load(&cli(&path)).unwrap_err();
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
         assert!(
             error.to_string().contains("use_proxy = true"),
             "unexpected error: {error}"
@@ -938,7 +956,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        let error = load(&cli(&path)).unwrap_err();
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -962,7 +981,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        let loaded = load(&cli(&path)).unwrap();
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
         let serialized = toml::to_string_pretty(&loaded.config).unwrap();
 
         let reparsed: Config = toml::from_str(&serialized).unwrap();
@@ -999,7 +1019,8 @@ url = "https://repo.example/"
 "#,
         );
 
-        assert!(load(&cli(&path)).is_err());
+        let cli1 = &cli(&path);
+        assert!(Config::load(cli1).is_err());
     }
 
     #[test]
@@ -1105,7 +1126,8 @@ max_concurrency = 0
 "#,
         ] {
             let path = write_config(&directory, body);
-            assert!(load(&cli(&path)).is_err());
+            let cli1 = &cli(&path);
+            assert!(Config::load(cli1).is_err());
         }
     }
 
@@ -1125,8 +1147,9 @@ max_concurrency = 17
 "#,
         );
 
+        let cli1 = &cli(&path);
         assert_eq!(
-            load(&cli(&path)).unwrap().config.repositories[0].max_concurrency,
+            Config::load(cli1).unwrap().config.repositories[0].max_concurrency,
             Some(17)
         );
     }
