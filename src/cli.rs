@@ -3,11 +3,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+/// A local Maven repository proxy cache
 #[derive(Debug, Parser)]
-#[command(author, version, about = "A local Maven repository proxy cache")]
-#[command(
-    after_help = "Quick start:\n  maven-haste config init\n  maven-haste check\n  maven-haste run\n\nThe default Maven endpoint is http://127.0.0.1:8080/maven.\nUse `maven-haste config --help` to create or inspect configuration."
-)]
+#[command(author, version)]
 pub struct Cli {
     /// Path to the configuration file
     #[arg(short, long, global = true, value_name = "PATH")]
@@ -17,7 +15,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "ADDR")]
     pub bind: Option<SocketAddr>,
 
-    /// Enable debug logging for Maven Haste
+    /// Enable debug logging
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
@@ -27,13 +25,14 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Start the Maven proxy cache
+    /// Start the server
     Run,
 
     /// Validate configuration and storage access, then exit
     Check,
 
     /// Inspect or maintain cached artifacts
+    #[deprecated]
     Cache {
         #[command(subcommand)]
         command: CacheCommand,
@@ -46,6 +45,7 @@ pub enum Command {
     },
 }
 
+#[deprecated]
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     /// Print persistent cache usage
