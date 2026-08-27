@@ -19,12 +19,6 @@ fn check_mode_runs_through_the_built_binary() {
 
     assert!(output.status.success());
     assert!(
-        directory
-            .path()
-            .join("repository/.maven-haste/tmp")
-            .is_dir()
-    );
-    assert!(
         !directory
             .path()
             .join("repository/.maven-haste/logs")

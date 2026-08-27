@@ -585,7 +585,7 @@ mod tests {
     }
 
     fn cli(path: &Path) -> Cli {
-        Cli::try_parse_from(["maven-haste", "--config", path.to_str().unwrap()]).unwrap()
+        Cli::try_parse_from(["maven-haste", "run", "--config", path.to_str().unwrap()]).unwrap()
     }
 
     #[test]
@@ -638,6 +638,7 @@ url = "https://repo.example/"
         );
         let cli = Cli::try_parse_from([
             "maven-haste",
+            "run",
             "--config",
             path.to_str().unwrap(),
             "--bind",
