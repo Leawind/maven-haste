@@ -12,7 +12,7 @@ use axum::http::header::{
     ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
     IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED, RANGE,
 };
-use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use http_body::Body as _;
@@ -513,11 +513,7 @@ fn requested_range(headers: &HeaderMap, size: u64) -> ByteRange {
     }
 }
 
-fn insert_optional_header(
-    headers: &mut axum::http::HeaderMap,
-    name: axum::http::HeaderName,
-    value: Option<&str>,
-) {
+fn insert_optional_header(headers: &mut HeaderMap, name: HeaderName, value: Option<&str>) {
     if let Some(value) = value.and_then(|value| HeaderValue::from_str(value).ok()) {
         headers.insert(name, value);
     }
@@ -1264,27 +1260,25 @@ mod tests {
         let handler_condition = Arc::clone(&saw_condition);
         let upstream = Router::new().route(
             "/{*path}",
-            get(
-                move |OriginalUri(uri): OriginalUri, headers: axum::http::HeaderMap| {
-                    let calls = Arc::clone(&handler_calls);
-                    let saw_condition = Arc::clone(&handler_condition);
-                    async move {
-                        if is_checksum_uri(&uri) {
-                            return error_response(StatusCode::NOT_FOUND, "missing checksum");
-                        }
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        if headers.get(reqwest::header::IF_NONE_MATCH).is_some() {
-                            saw_condition.store(true, Ordering::SeqCst);
-                            return error_response(StatusCode::NOT_MODIFIED, "");
-                        }
-                        let mut response = Response::new(Body::from("unchanged"));
-                        response
-                            .headers_mut()
-                            .insert(ETAG, HeaderValue::from_static("\"metadata-tag\""));
-                        response
+            get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+                let calls = Arc::clone(&handler_calls);
+                let saw_condition = Arc::clone(&handler_condition);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
                     }
-                },
-            ),
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if headers.get(IF_NONE_MATCH).is_some() {
+                        saw_condition.store(true, Ordering::SeqCst);
+                        return error_response(StatusCode::NOT_MODIFIED, "");
+                    }
+                    let mut response = Response::new(Body::from("unchanged"));
+                    response
+                        .headers_mut()
+                        .insert(ETAG, HeaderValue::from_static("\"metadata-tag\""));
+                    response
+                }
+            }),
         );
         let (url, task) = spawn_upstream(upstream).await;
         let directory = TempDir::new().unwrap();

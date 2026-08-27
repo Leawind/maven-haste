@@ -242,7 +242,7 @@ fn log_date(name: &str) -> Option<time::Date> {
     time::Date::from_calendar_date(year, month, day).ok()
 }
 
-fn directory_error(config: &LoggingConfig, error: std::io::Error) -> AppError {
+fn directory_error(config: &LoggingConfig, error: io::Error) -> AppError {
     AppError::Runtime(format!(
         "file log directory {} is not writable: {error}",
         config.directory().display()
