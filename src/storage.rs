@@ -169,7 +169,7 @@ mod tests {
     async fn prepares_directories_and_removes_partial_files() {
         let directory = TempDir::new().unwrap();
         let root = directory.path().join("repository");
-        let config = StorageConfig::resolved_for_test(root.clone());
+        let config = StorageConfig::resolved(root.clone());
         fs::create_dir_all(config.tmp_dir()).await.unwrap();
         fs::write(config.tmp_dir().join("abandoned.part"), b"partial")
             .await

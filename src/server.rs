@@ -757,7 +757,7 @@ mod tests {
         );
         let (url, task) = spawn_upstream(upstream).await;
         let directory = TempDir::new().unwrap();
-        let storage = StorageConfig::resolved_for_test(directory.path().join("repository"));
+        let storage = StorageConfig::resolved(directory.path().join("repository"));
         let config = Config {
             server: ServerConfig::default(),
             storage,
@@ -1894,7 +1894,7 @@ mod tests {
         cache_config: CacheConfig,
         upstream_config: UpstreamConfig,
     ) -> (Router, Database) {
-        let storage = StorageConfig::resolved_for_test(directory.path().join("repository"));
+        let storage = StorageConfig::resolved(directory.path().join("repository"));
         let config = Config {
             server: ServerConfig::default(),
             storage,

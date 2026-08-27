@@ -112,8 +112,8 @@ impl StorageConfig {
             .expect("storage paths are resolved while loading configuration")
     }
 
-    #[cfg(test)]
-    pub fn resolved_for_test(root: PathBuf) -> Self {
+    /// Resolves the internal storage layout for a repository root.
+    pub fn resolved(root: PathBuf) -> Self {
         let internal = root.join(".maven-haste");
         Self {
             root,
