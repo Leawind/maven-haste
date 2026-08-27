@@ -80,19 +80,6 @@ Maven Haste does not modify build-tool or project files. Copy and edit the relev
 The Gradle example adds Maven Haste before repositories declared by the build. Existing repositories remain available as
 fallbacks. A build may enforce its own repository policy, so inspect and adapt the script before installing it globally.
 
-## Cache Maintenance
-
-Stop the running proxy before changing cached files from the command line.
-
-```bash
-maven-haste cache stats
-maven-haste cache verify
-maven-haste cache remove com/example/library
-```
-
-Set `cache.max_size` to a byte count to enable least-recently-used eviction. Without a limit, cached artifacts are retained
-indefinitely. Cache removal accepts a Maven repository path prefix and removes tracked descendants.
-
 ## Details
 
 ### Cache Semantics

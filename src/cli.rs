@@ -20,7 +20,7 @@ pub struct Cli {
     pub verbose: bool,
 
     #[command(subcommand)]
-    pub command: Option<Command>,
+    pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
@@ -31,35 +31,11 @@ pub enum Command {
     /// Validate configuration and storage access, then exit
     Check,
 
-    /// Inspect or maintain cached artifacts
-    #[deprecated]
-    Cache {
-        #[command(subcommand)]
-        command: CacheCommand,
-    },
-
     /// Create, print, or inspect configuration
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-}
-
-#[deprecated]
-#[derive(Debug, Subcommand)]
-pub enum CacheCommand {
-    /// Print persistent cache usage
-    Stats,
-
-    /// Remove one cached path and all of its descendants
-    Remove {
-        /// Maven repository path prefix, such as com/example/library
-        #[arg(value_name = "PREFIX")]
-        prefix: String,
-    },
-
-    /// Verify tracked file sizes and checksums
-    Verify,
 }
 
 #[derive(Debug, Subcommand)]
@@ -87,7 +63,6 @@ mod tests {
     #[test]
     fn defaults_to_run_without_a_subcommand() {
         let cli = Cli::try_parse_from(["maven-haste", "--config", "config.toml"]).unwrap();
-        assert!(cli.command.is_none());
         assert_eq!(cli.config, Some(PathBuf::from("config.toml")));
         assert!(!cli.verbose);
     }
@@ -97,9 +72,9 @@ mod tests {
         let cli = Cli::try_parse_from(["maven-haste", "config", "init", "custom.toml"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Config {
+            Command::Config {
                 command: ConfigCommand::Init { path: Some(path) }
-            }) if path == Path::new("custom.toml")
+            } if path == Path::new("custom.toml")
         ));
     }
 
@@ -107,17 +82,6 @@ mod tests {
     fn parses_verbose_flag() {
         let cli = Cli::try_parse_from(["maven-haste", "--verbose", "run"]).unwrap();
         assert!(cli.verbose);
-        assert!(matches!(cli.command, Some(Command::Run)));
-    }
-
-    #[test]
-    fn parses_cache_maintenance_commands() {
-        let cli = Cli::try_parse_from(["maven-haste", "cache", "remove", "com/example"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Cache {
-                command: CacheCommand::Remove { prefix }
-            }) if prefix == "com/example"
-        ));
+        assert!(matches!(cli.command, Command::Run));
     }
 }

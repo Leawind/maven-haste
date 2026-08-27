@@ -79,19 +79,6 @@ Maven Haste 不修改构建工具或项目文件。请复制并按自己的环�
 Gradle 示例会把 Maven Haste 添加到项目声明的仓库之前，并保留原有仓库作为 fallback。项目可以实施自己的仓库策略，
 因此应先检查和调整脚本，再将其安装为全局配置。
 
-## 维护缓存
-
-通过命令行修改缓存文件前先停止正在运行的代理。
-
-```bash
-maven-haste cache stats
-maven-haste cache verify
-maven-haste cache remove com/example/library
-```
-
-将 `cache.max_size` 设置为字节数即可启用最近最少使用淘汰。未设置上限时会持续保留缓存构件。缓存删除命令接受
-Maven 仓库路径前缀，并删除数据库中记录的所有后代文件。
-
 ## 细节
 
 ### 缓存语义

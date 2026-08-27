@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use cli::{CacheCommand, Cli, Command, ConfigCommand};
+use cli::{Cli, Command, ConfigCommand};
 use error::AppError;
 
 #[tokio::main]
@@ -33,114 +33,63 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), AppError> {
-    if let Some(Command::Config {
-        command: ConfigCommand::Init { path },
-    }) = &cli.command
-    {
-        let path = path.as_deref().or(cli.config.as_deref());
-        let path = initialize_config(path)?;
-        println!(
-            "created commented example configuration: {}",
-            path.display()
-        );
-        println!("next: maven-haste check --config {}", path.display());
-        println!("then: maven-haste run --config {}", path.display());
-        return Ok(());
-    }
-    if matches!(
-        cli.command.as_ref(),
-        Some(Command::Config {
-            command: ConfigCommand::Example
-        })
-    ) {
-        print!("{}", config::EXAMPLE_CONFIG);
-        return Ok(());
-    }
+    match &cli.command {
+        Command::Run => {
+            let loaded = config::load(&cli)?;
+            let storage = storage::prepare(&loaded.config.storage).await?;
 
-    let loaded = config::load(&cli)?;
-
-    if matches!(
-        cli.command.as_ref(),
-        Some(Command::Config {
-            command: ConfigCommand::Show
-        })
-    ) {
-        print!("{}", toml::to_string_pretty(&loaded.config)?);
-        return Ok(());
-    }
-
-    let storage = storage::prepare(&loaded.config.storage).await?;
-
-    if matches!(cli.command.as_ref(), Some(Command::Check)) {
-        if loaded.config.logging.enabled {
-            logging::validate_directory(&loaded.config.logging)?;
+            let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
+            tracing::info!(config = %loaded.path.display(), "loaded configuration");
+            tracing::info!(
+                root = %loaded.config.storage.root.display(),
+                case_sensitive = storage.case_sensitive,
+                "storage initialized"
+            );
+            let database = db::Database::open(loaded.config.storage.db_path()).await?;
+            let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
+            let listener = server::bind(loaded.config.server.bind).await?;
+            let bind = listener.local_addr().map_err(|error| {
+                AppError::Runtime(format!("failed to inspect HTTP listener: {error}"))
+            })?;
+            tracing::info!(%bind, "Maven proxy is ready");
+            server::serve(listener, loaded.config.server.base_path, cache).await
         }
-        println!("configuration is valid: {}", loaded.path.display());
-        println!(
-            "start the proxy: maven-haste run --config {}",
-            loaded.path.display()
-        );
-        return Ok(());
-    }
-
-    if let Some(Command::Cache { command }) = &cli.command {
-        let database = db::Database::open(loaded.config.storage.db_path()).await?;
-        let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
-        match command {
-            CacheCommand::Stats => {
-                let stats = cache.stats().await.map_err(cache_error)?;
-                println!("files: {}", stats.files);
-                println!("size: {} bytes", stats.total_size);
-                println!("negative entries: {}", stats.negative_entries);
-                if let Some(max_size) = stats.max_size {
-                    println!("limit: {max_size} bytes");
-                } else {
-                    println!("limit: none");
-                }
+        Command::Check => {
+            let loaded = config::load(&cli)?;
+            if loaded.config.logging.enabled {
+                logging::validate_directory(&loaded.config.logging)?;
             }
-            CacheCommand::Remove { prefix } => {
-                let removed = cache.remove_prefix(prefix).await.map_err(cache_error)?;
+            println!("configuration is valid: {}", loaded.path.display());
+            println!(
+                "start the proxy: maven-haste run --config {}",
+                loaded.path.display()
+            );
+            Ok(())
+        }
+        Command::Config { command } => match command {
+            ConfigCommand::Init { path } => {
+                let path = path.as_deref().or(cli.config.as_deref());
+                let path = initialize_config(path)?;
                 println!(
-                    "removed {} cached files ({} bytes) under {}",
-                    removed.files, removed.bytes, prefix
+                    "created commented example configuration: {}",
+                    path.display()
                 );
+                println!("next: maven-haste check --config {}", path.display());
+                println!("then: maven-haste run --config {}", path.display());
+                Ok(())
             }
-            CacheCommand::Verify => {
-                let report = cache.verify().await.map_err(cache_error)?;
-                println!("checked {} cached files", report.checked);
-                for issue in &report.issues {
-                    println!("{}: {}", issue.path, issue.reason);
-                }
-                if !report.issues.is_empty() {
-                    return Err(AppError::Runtime(format!(
-                        "cache verification found {} issues",
-                        report.issues.len()
-                    )));
-                }
+            ConfigCommand::Show => {
+                let loaded = config::load(&cli)?;
+
+                print!("{}", toml::to_string_pretty(&loaded.config)?);
+                Ok(())
             }
-        }
-        return Ok(());
+            ConfigCommand::Example => {
+                print!("{}", config::EXAMPLE_CONFIG);
+                Ok(())
+            }
+        },
     }
-
-    let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
-    tracing::info!(config = %loaded.path.display(), "loaded configuration");
-    tracing::info!(
-        root = %loaded.config.storage.root.display(),
-        case_sensitive = storage.case_sensitive,
-        "storage initialized"
-    );
-    let database = db::Database::open(loaded.config.storage.db_path()).await?;
-    let cache = cache::CacheManager::new(&loaded.config, database, storage.case_sensitive)?;
-    let listener = server::bind(loaded.config.server.bind).await?;
-    let bind = listener
-        .local_addr()
-        .map_err(|error| AppError::Runtime(format!("failed to inspect HTTP listener: {error}")))?;
-    tracing::info!(%bind, "Maven proxy is ready");
-    server::serve(listener, loaded.config.server.base_path, cache).await
-}
-
-fn cache_error(error: cache::CacheFailure) -> AppError {
-    AppError::Runtime(error.to_string())
 }
 
 fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
