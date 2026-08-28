@@ -12,7 +12,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::filter::{FilterExt, filter_fn};
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
-use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
+use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -73,12 +73,13 @@ pub fn init(verbose: bool, config: &LoggingConfig) -> Result<LoggingGuard, AppEr
             )));
         }
     };
-    let console =
-        tracing_subscriber::fmt::layer()
-            .compact()
-            .with_filter(console_filter.clone().and(filter_fn(|metadata| {
-                metadata.target() != "maven_haste::access"
-            })));
+    let console = tracing_subscriber::fmt::layer()
+        .compact()
+        .with_target(false)
+        .with_timer(ConsoleTime)
+        .with_filter(console_filter.clone().and(filter_fn(|metadata| {
+            metadata.target() != "maven_haste::access"
+        })));
     let access_console = tracing_subscriber::fmt::layer()
         .event_format(AccessConsoleFormat)
         .with_filter(console_filter.and(filter_fn(|metadata| {
@@ -121,6 +122,23 @@ pub fn init(verbose: bool, config: &LoggingConfig) -> Result<LoggingGuard, AppEr
     }
 }
 
+struct ConsoleTime;
+
+impl FormatTime for ConsoleTime {
+    fn format_time(&self, writer: &mut Writer<'_>) -> fmt::Result {
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        write!(
+            writer,
+            "{:02}:{:02}:{:02}.{:03}",
+            now.hour(),
+            now.minute(),
+            now.second(),
+            now.millisecond()
+        )
+    }
+}
+
 struct AccessConsoleFormat;
 
 impl<S, N> FormatEvent<S, N> for AccessConsoleFormat
@@ -136,7 +154,7 @@ where
     ) -> fmt::Result {
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        SystemTime.format_time(&mut writer)?;
+        ConsoleTime.format_time(&mut writer)?;
         write_colored_level(&mut writer, event.metadata().level())?;
         write_colored_access_message(&mut writer, &visitor.message)
     }
@@ -158,21 +176,32 @@ fn write_colored_level(writer: &mut Writer<'_>, level: &Level) -> fmt::Result {
 }
 
 fn write_colored_access_message(writer: &mut Writer<'_>, message: &str) -> fmt::Result {
+    if !writer.has_ansi_escapes() {
+        return writeln!(writer, "{message}");
+    }
+    let status = message
+        .split_whitespace()
+        .nth(3)
+        .and_then(|token| token.parse::<u16>().ok());
     let Some(prefix_end) = message.find(']').map(|index| index + 1) else {
         return writeln!(writer, "{message}");
     };
-    let (prefix, remainder) = message.split_at(prefix_end);
-    let color = match prefix {
-        "[HIT]" => "32",
-        "[MISS]" => "33",
-        "[STALE]" => "36",
-        "[ERROR]" => "31",
-        _ => "37",
-    };
-    if writer.has_ansi_escapes() {
-        writeln!(writer, "\x1b[{color}m{prefix}\x1b[0m{remainder}")
-    } else {
-        writeln!(writer, "{message}")
+    let (prefix, _) = message.split_at(prefix_end);
+    let color = access_color(status, prefix);
+    writeln!(writer, "\x1b[{color}m{message}\x1b[0m")
+}
+
+fn access_color(status: Option<u16>, prefix: &str) -> &'static str {
+    match status {
+        Some(400..=499) => "33",
+        Some(500..=599) => "31",
+        _ => match prefix {
+            "[HIT]" => "32",
+            "[MISS]" => "33",
+            "[STALE]" => "36",
+            "[ERROR]" => "31",
+            _ => "37",
+        },
     }
 }
 
@@ -278,6 +307,17 @@ mod tests {
         assert!(!directory.path().join(expired_name).exists());
         assert!(directory.path().join(current_name).exists());
         assert!(directory.path().join("unrelated.jsonl").exists());
+    }
+
+    #[test]
+    fn access_colors_highlight_error_statuses() {
+        assert_eq!(access_color(Some(200), "[HIT]"), "32");
+        assert_eq!(access_color(Some(304), "[HIT]"), "32");
+        assert_eq!(access_color(Some(404), "[NONE]"), "33");
+        assert_eq!(access_color(Some(502), "[NONE]"), "31");
+        assert_eq!(access_color(Some(500), "[ERROR]"), "31");
+        assert_eq!(access_color(None, "[MISS]"), "33");
+        assert_eq!(access_color(None, "unexpected"), "37");
     }
 
     #[test]

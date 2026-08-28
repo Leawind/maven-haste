@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -29,6 +30,9 @@ use crate::request_path::{CachePolicy, MavenPath};
 pub const HEALTH_PATH: &str = "/api/v1/health";
 const CACHE_STATS_PATH: &str = "/api/v1/cache/stats";
 
+static BYTES_SERVED: AtomicU64 = AtomicU64::new(0);
+static INTERRUPTED_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone)]
 struct AppState {
     cache: CacheManager,
@@ -40,11 +44,39 @@ pub async fn serve(
     base_path: String,
     cache: CacheManager,
 ) -> Result<(), AppError> {
-    let app = router(base_path, cache);
-    axum::serve(listener, app)
+    let started = Instant::now();
+    let app = router(base_path, cache.clone());
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|error| AppError::Runtime(format!("HTTP server failed: {error}")))
+        .map_err(|error| AppError::Runtime(format!("HTTP server failed: {error}")));
+    log_shutdown_summary(&cache, started).await;
+    result
+}
+
+async fn log_shutdown_summary(cache: &CacheManager, started: Instant) {
+    let uptime_ms = started.elapsed().as_millis() as u64;
+    let bytes = BYTES_SERVED.load(Ordering::Relaxed);
+    let interrupted = INTERRUPTED_REQUESTS.load(Ordering::Relaxed);
+    match cache.stats().await {
+        Ok(stats) => {
+            tracing::info!(
+                requests = stats.requests,
+                hits = stats.hits,
+                stale_hits = stats.stale_hits,
+                negative_hits = stats.negative_hits,
+                misses = stats.misses,
+                files = stats.files,
+                bytes,
+                interrupted,
+                uptime_ms,
+                "proxy stopped"
+            );
+        }
+        Err(error) => {
+            tracing::info!(bytes, interrupted, uptime_ms, %error, "proxy stopped");
+        }
+    }
 }
 
 pub async fn bind(bind: std::net::SocketAddr) -> Result<TcpListener, AppError> {
@@ -255,6 +287,10 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
         return;
     }
     state.completion = Some(completion);
+    BYTES_SERVED.fetch_add(state.bytes_sent, Ordering::Relaxed);
+    if completion != "complete" {
+        INTERRUPTED_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    }
     let elapsed_ms = state.started.elapsed().as_millis() as u64;
     let prefix = state.cache.to_ascii_uppercase();
     let mut message = format!(
