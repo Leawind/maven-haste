@@ -88,6 +88,7 @@ fallbacks. A build may enforce its own repository policy, so inspect and adapt t
 
 - Release versions, timestamped snapshots, and their checksums are cached persistently after successful download.
 - `maven-metadata.xml` and `-SNAPSHOT` aliases are mutable content. When expired, cached content is served immediately while refresh happens in the background.
+- Set `cache_writes = false` on a repository to stop writing new artifacts, checksums, and negative entries from it. Content cached earlier is still served and nothing is deleted; previously confirmed 404s keep short-circuiting until their negative TTL expires.
 - With stale-on-error enabled, stale content continues to be served if background refresh hits upstream failures.
 - Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
 - When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1`, `.sha256`, and `.sha512` files are always computed from the bytes actually stored.

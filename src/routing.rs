@@ -108,6 +108,7 @@ mod tests {
             use_proxy: None,
             max_concurrency: None,
             rules: rules.iter().map(|rule| (*rule).into()).collect(),
+            cache_writes: true,
         }
     }
 

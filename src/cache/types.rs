@@ -11,10 +11,18 @@ pub(crate) enum PreparedFetch {
 }
 
 /// A fully downloaded artifact that is ready to be atomically installed.
+#[derive(Clone)]
 pub(crate) struct PreparedFile {
     pub(crate) relative: String,
     pub(crate) temporary: PathBuf,
     pub(crate) record: ArtifactRecord,
+}
+
+/// Whether a download was written into the cache or must be served directly.
+#[derive(Clone)]
+pub(crate) enum DownloadOutcome {
+    Installed,
+    Passthrough(Box<PreparedFile>),
 }
 
 /// A downloaded main artifact plus its computed hashes and validators.

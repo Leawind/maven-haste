@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -132,27 +133,31 @@ async fn artifact(
         Ok(request) => request,
         Err(error) => {
             let response = error_response(StatusCode::BAD_REQUEST, error.to_string());
-            return track_response(response, method, uri.path(), "invalid", None, started);
+            return track_response(response, method, uri.path(), "invalid", None, started, None);
         }
     };
-    let (response, cache_status, upstream) = match state.cache.get(&request).await {
+    let (response, cache_status, upstream, temporary) = match state.cache.get(&request).await {
         Ok(cached) => {
             let cache_status = cached.status.as_str();
             let upstream = cached.record.upstream.clone();
+            let temporary = cached.temporary.clone();
             (
                 cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
                 cache_status,
                 Some(upstream),
+                temporary,
             )
         }
         Err(CacheFailure::NotFound) => (
             error_response(StatusCode::NOT_FOUND, "artifact not found"),
             "none",
             None,
+            None,
         ),
         Err(CacheFailure::Gateway) => (
             error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed"),
             "none",
+            None,
             None,
         ),
         Err(CacheFailure::Internal(error)) => {
@@ -160,6 +165,7 @@ async fn artifact(
             (
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error"),
                 "error",
+                None,
                 None,
             )
         }
@@ -171,6 +177,7 @@ async fn artifact(
         cache_status,
         upstream.as_deref(),
         started,
+        temporary,
     )
 }
 
@@ -181,6 +188,7 @@ fn track_response(
     cache: &str,
     upstream: Option<&str>,
     started: Instant,
+    temporary: Option<PathBuf>,
 ) -> Response<Body> {
     let status = response.status().as_u16();
     let (parts, body) = response.into_parts();
@@ -199,6 +207,7 @@ fn track_response(
         started,
         bytes_sent: 0,
         completion: None,
+        temporary,
     }));
     if body.is_end_stream() {
         finish_access(&state, "complete");
@@ -279,6 +288,7 @@ struct AccessState {
     started: Instant,
     bytes_sent: u64,
     completion: Option<&'static str>,
+    temporary: Option<PathBuf>,
 }
 
 fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
@@ -318,6 +328,11 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
         completion,
         "{message}"
     );
+    if let Some(path) = state.temporary.take() {
+        tokio::spawn(async move {
+            let _ = tokio::fs::remove_file(path).await;
+        });
+    }
 }
 
 async fn cached_response(
@@ -593,6 +608,7 @@ mod tests {
             started: Instant::now(),
             bytes_sent: 0,
             completion: None,
+            temporary: None,
         }))
     }
 

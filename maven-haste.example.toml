@@ -74,6 +74,10 @@ root = './repository'
 # # use_proxy = true
 # # Optional per-repository override of default_repository_max_concurrency.
 # max_concurrency = 10
+# # Optional per-repository cache switch; defaults to true.
+# # false stops writing new artifacts, checksums, and negative entries from this repository:
+# # previously cached content is still served and nothing is deleted.
+# cache_writes = true
 # # Optional ordered request-path glob rules. The first matching rule decides participation.
 # # Prefix a rule with ! to exclude it; * matches within one path segment and ** may match across path separators.
 # rules = ['gradle/plugin/**', '!**']
@@ -81,6 +85,10 @@ root = './repository'
 [[repositories]]
 id = 'central'
 url = 'https://repo1.maven.org/maven2/'
+# # Optional per-repository cache switch; defaults to true.
+# # false stops writing new artifacts, checksums, and negative entries from this repository:
+# # previously cached content is still served and nothing is deleted.
+# cache_writes = true
 # # Optional per-repository proxy switch.
 # # true: use [upstream].proxy
 # # false: connect directly without using [upstream].proxy

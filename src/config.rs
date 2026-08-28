@@ -201,6 +201,12 @@ pub struct RepositoryConfig {
     pub max_concurrency: Option<usize>,
     #[serde(default)]
     pub rules: Vec<String>,
+    #[serde(default = "default_true")]
+    pub cache_writes: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -1223,5 +1229,44 @@ max_concurrency = 17
                 "unexpected error for repository id {id:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn parses_cache_writes_default_true() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        assert!(Config::load(cli1).unwrap().config.repositories[0].cache_writes);
+    }
+
+    #[test]
+    fn parses_cache_writes_false() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+cache_writes = false
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        assert!(!Config::load(cli1).unwrap().config.repositories[0].cache_writes);
     }
 }

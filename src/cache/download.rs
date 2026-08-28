@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use reqwest::header::{ETAG, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
@@ -9,7 +10,7 @@ use crate::cache::io::{
     read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, unix_timestamp,
     write_temporary,
 };
-use crate::cache::types::{DownloadedMain, PreparedFetch, PreparedFile};
+use crate::cache::types::{DownloadOutcome, DownloadedMain, PreparedFetch, PreparedFile};
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
@@ -18,9 +19,12 @@ const MAX_CHECKSUM_BYTES: usize = 64 * 1024;
 const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
 
 impl crate::cache::CacheManager {
-    pub(crate) async fn download_initial(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+    pub(crate) async fn download_initial(
+        &self,
+        request: &MavenPath,
+    ) -> Result<DownloadOutcome, CacheFailure> {
         if let Some(source) = request.generated_checksum_source() {
-            self.synchronous_main_download(&source).await?;
+            let source_outcome = self.synchronous_main_download(&source).await?;
             let record = self
                 .inner
                 .database
@@ -32,9 +36,22 @@ impl crate::cache::CacheManager {
                 .await?
                 .is_some()
             {
-                return Ok(());
+                return Ok(DownloadOutcome::Installed);
             }
-            return self.regenerate_checksum(request, &source).await;
+            return match source_outcome {
+                DownloadOutcome::Installed => self
+                    .regenerate_checksum(request, &source)
+                    .await
+                    .map(|()| DownloadOutcome::Installed),
+                DownloadOutcome::Passthrough(prepared) => {
+                    let source_temporary = prepared.temporary.clone();
+                    let checksum = self
+                        .build_checksum(request, &prepared.record.upstream, &prepared.temporary)
+                        .await?;
+                    let _ = remove_file_if_exists(&source_temporary).await;
+                    Ok(DownloadOutcome::Passthrough(Box::new(checksum)))
+                }
+            };
         }
         self.download_main_initial(request).await
     }
@@ -42,7 +59,7 @@ impl crate::cache::CacheManager {
     pub(crate) async fn download_main_initial(
         &self,
         request: &MavenPath,
-    ) -> Result<(), CacheFailure> {
+    ) -> Result<DownloadOutcome, CacheFailure> {
         let existing = self
             .inner
             .database
@@ -54,10 +71,20 @@ impl crate::cache::CacheManager {
             .await?
             .is_some()
         {
-            return Ok(());
+            return Ok(DownloadOutcome::Installed);
         }
         match self.prepare_fetch(request, None).await? {
-            PreparedFetch::Bundle(files) => self.install_bundle(files).await,
+            PreparedFetch::Bundle(files) => {
+                if self.caching_enabled(&files[0].record.upstream) {
+                    self.install_bundle(files).await?;
+                    return Ok(DownloadOutcome::Installed);
+                }
+                let (main, generated) = files
+                    .split_first()
+                    .expect("a prepared bundle always contains the main file");
+                cleanup_prepared(generated).await;
+                Ok(DownloadOutcome::Passthrough(Box::new(main.clone())))
+            }
             PreparedFetch::NotFound => {
                 self.log_not_found(request);
                 Err(CacheFailure::NotFound)
@@ -72,7 +99,23 @@ impl crate::cache::CacheManager {
         previous: &ArtifactRecord,
     ) -> Result<(), CacheFailure> {
         match self.prepare_fetch(request, Some(previous)).await? {
-            PreparedFetch::Bundle(files) => self.install_bundle(files).await,
+            PreparedFetch::Bundle(files) => {
+                if self.caching_enabled(&files[0].record.upstream) {
+                    return self.install_bundle(files).await;
+                }
+                tracing::debug!(
+                    upstream = %files[0].record.upstream,
+                    path = request.relative(),
+                    "refreshed content is not cached because cache writes are disabled for this repository"
+                );
+                cleanup_prepared(&files).await;
+                return self
+                    .inner
+                    .database
+                    .touch_refresh_attempt(request.relative(), unix_timestamp())
+                    .await
+                    .map_err(internal);
+            }
             PreparedFetch::NotModified => self
                 .inner
                 .database
@@ -433,6 +476,54 @@ impl crate::cache::CacheManager {
         issues
     }
 
+    async fn build_checksum(
+        &self,
+        request: &MavenPath,
+        upstream: &str,
+        source_path: &Path,
+    ) -> Result<PreparedFile, CacheFailure> {
+        let (_, sha1, sha256, sha512) = hash_file(source_path).await.map_err(|error| {
+            CacheFailure::Internal(format!(
+                "failed to hash checksum source {}: {error}",
+                source_path.display()
+            ))
+        })?;
+        let expected = match request.file_type.as_str() {
+            "sha1" => sha1,
+            "sha256" => sha256,
+            "sha512" => sha512,
+            extension => {
+                return Err(CacheFailure::Internal(format!(
+                    "cannot generate unsupported checksum type {extension}"
+                )));
+            }
+        };
+        let content = format!("{expected}\n");
+        let temporary = temporary_path(self.inner.storage.tmp_dir());
+        write_temporary(&temporary, content.as_bytes()).await?;
+        let now = unix_timestamp();
+        Ok(PreparedFile {
+            relative: request.relative().into(),
+            temporary,
+            record: ArtifactRecord {
+                path: request.relative().into(),
+                group_id: request.group_id.clone(),
+                artifact_id: request.artifact_id.clone(),
+                version: request.version.clone(),
+                file_type: request.file_type.clone(),
+                upstream: upstream.into(),
+                sha1: None,
+                sha256: Some(format!("{:x}", Sha256::digest(content.as_bytes()))),
+                etag: None,
+                last_modified: None,
+                file_size: content.len() as i64,
+                created_at: now,
+                last_refresh_attempt: (request.policy() == CachePolicy::Mutable).then_some(now),
+                last_accessed: now,
+            },
+        })
+    }
+
     async fn regenerate_checksum(
         &self,
         request: &MavenPath,
@@ -451,47 +542,10 @@ impl crate::cache::CacheManager {
                 ))
             })?;
         let source_path = source.final_path(&self.inner.storage.root);
-        let (_, sha1, sha256, sha512) = hash_file(&source_path).await.map_err(|error| {
-            CacheFailure::Internal(format!(
-                "failed to hash cached checksum source {}: {error}",
-                source_path.display()
-            ))
-        })?;
-        let expected = match request.file_type.as_str() {
-            "sha1" => sha1,
-            "sha256" => sha256,
-            "sha512" => sha512,
-            extension => {
-                return Err(CacheFailure::Internal(format!(
-                    "cannot generate unsupported checksum type {extension}"
-                )));
-            }
-        };
-        let content = format!("{expected}\n");
-        let temporary = temporary_path(self.inner.storage.tmp_dir());
-        write_temporary(&temporary, content.as_bytes()).await?;
-        let now = unix_timestamp();
-        self.install_bundle(vec![PreparedFile {
-            relative: request.relative().into(),
-            temporary,
-            record: ArtifactRecord {
-                path: request.relative().into(),
-                group_id: request.group_id.clone(),
-                artifact_id: request.artifact_id.clone(),
-                version: request.version.clone(),
-                file_type: request.file_type.clone(),
-                upstream: source_record.upstream,
-                sha1: None,
-                sha256: Some(format!("{:x}", Sha256::digest(content.as_bytes()))),
-                etag: None,
-                last_modified: None,
-                file_size: content.len() as i64,
-                created_at: now,
-                last_refresh_attempt: (request.policy() == CachePolicy::Mutable).then_some(now),
-                last_accessed: now,
-            },
-        }])
-        .await
+        let checksum = self
+            .build_checksum(request, &source_record.upstream, &source_path)
+            .await?;
+        self.install_bundle(vec![checksum]).await
     }
 }
 

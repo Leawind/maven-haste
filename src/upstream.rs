@@ -464,7 +464,9 @@ impl UpstreamClient {
                 RepositoryResult::NotFound => {
                     tracing::trace!(upstream = %repository.id, path = relative_path, "upstream artifact was not found");
                     self.circuits.record_success(&repository.id);
-                    not_found.push(repository_id(&repository));
+                    if repository.cache_writes {
+                        not_found.push(repository_id(&repository));
+                    }
                 }
                 RepositoryResult::GatewayFailure { breaker_failure } => {
                     gateway_failure = true;
@@ -629,6 +631,7 @@ mod tests {
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
+                cache_writes: true,
             },
             RepositoryConfig {
                 id: "b".into(),
@@ -636,6 +639,7 @@ mod tests {
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
+                cache_writes: true,
             },
         ];
         RequestScheduler::new(

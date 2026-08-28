@@ -3,6 +3,7 @@ mod install;
 mod io;
 mod types;
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +24,9 @@ use crate::upstream::UpstreamClient;
 use io::{
     hash_file, internal, is_fresh, normalize_cache_prefix, relative_file_path, unix_timestamp,
 };
+use types::DownloadOutcome;
 
-type Flight = OnceCell<Result<(), CacheFailure>>;
+type Flight = OnceCell<Result<DownloadOutcome, CacheFailure>>;
 
 #[derive(Clone)]
 pub struct CacheManager {
@@ -37,6 +39,7 @@ struct CacheInner {
     database: Database,
     upstream: UpstreamClient,
     case_sensitive: bool,
+    caching_disabled: HashSet<String>,
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
     requests: AtomicU64,
@@ -51,6 +54,8 @@ pub struct CachedArtifact {
     pub file_path: PathBuf,
     pub record: ArtifactRecord,
     pub status: CacheStatus,
+    /// Temporary file to remove after the response body is fully consumed.
+    pub temporary: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +129,12 @@ impl CacheManager {
             &config.upstream,
             &config.circuit_breaker,
         )?;
+        let caching_disabled = config
+            .repositories
+            .iter()
+            .filter(|repository| !repository.cache_writes)
+            .map(|repository| repository.id.clone())
+            .collect();
         Ok(Self {
             inner: Arc::new(CacheInner {
                 storage: config.storage.clone(),
@@ -131,6 +142,7 @@ impl CacheManager {
                 database,
                 upstream,
                 case_sensitive,
+                caching_disabled,
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
                 requests: AtomicU64::new(0),
@@ -140,6 +152,11 @@ impl CacheManager {
                 negative_hits: AtomicU64::new(0),
             }),
         })
+    }
+
+    /// Whether new cache entries may be written for artifacts fetched from `id`.
+    fn caching_enabled(&self, id: &str) -> bool {
+        !self.inner.caching_disabled.contains(id)
     }
 
     pub async fn get(&self, request: &MavenPath) -> Result<CachedArtifact, CacheFailure> {
@@ -179,21 +196,34 @@ impl CacheManager {
         }
 
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
-        self.synchronous_download(request).await?;
-        let record = self
-            .inner
-            .database
-            .get(request.relative())
-            .await
-            .map_err(internal)?;
-        let mut cached = self
-            .positive_cache(request, record.as_ref())
-            .await?
-            .ok_or_else(|| {
-                CacheFailure::Internal("download completed without a cache record".into())
-            })?;
-        cached.status = CacheStatus::Miss;
-        Ok(cached)
+        match self.synchronous_download(request).await? {
+            DownloadOutcome::Installed => {
+                let record = self
+                    .inner
+                    .database
+                    .get(request.relative())
+                    .await
+                    .map_err(internal)?;
+                let mut cached = self
+                    .positive_cache(request, record.as_ref())
+                    .await?
+                    .ok_or_else(|| {
+                        CacheFailure::Internal("download completed without a cache record".into())
+                    })?;
+                cached.status = CacheStatus::Miss;
+                Ok(cached)
+            }
+            DownloadOutcome::Passthrough(prepared) => {
+                let temporary = prepared.temporary;
+                let record = prepared.record;
+                Ok(CachedArtifact {
+                    file_path: temporary.clone(),
+                    record,
+                    status: CacheStatus::Miss,
+                    temporary: Some(temporary),
+                })
+            }
+        }
     }
 
     fn log_not_found(&self, request: &MavenPath) {
@@ -354,6 +384,7 @@ impl CacheManager {
                     file_path,
                     record,
                     status: CacheStatus::Hit,
+                    temporary: None,
                 }))
             }
             Ok(_) => Ok(None),
@@ -365,7 +396,10 @@ impl CacheManager {
         }
     }
 
-    async fn synchronous_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+    async fn synchronous_download(
+        &self,
+        request: &MavenPath,
+    ) -> Result<DownloadOutcome, CacheFailure> {
         let key = request.relative().to_owned();
         let flight = self
             .inner
@@ -381,7 +415,10 @@ impl CacheManager {
         result
     }
 
-    async fn synchronous_main_download(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+    async fn synchronous_main_download(
+        &self,
+        request: &MavenPath,
+    ) -> Result<DownloadOutcome, CacheFailure> {
         let key = request.relative().to_owned();
         let flight = self
             .inner
@@ -452,8 +489,18 @@ mod tests {
     use crate::config::{
         CircuitBreakerConfig, LoggingConfig, RepositoryConfig, ServerConfig, UpstreamConfig,
     };
+    use crate::request_path::MavenPath;
 
     async fn test_cache(directory: &TempDir, max_size: Option<u64>) -> (CacheManager, Database) {
+        test_cache_with_repository(directory, max_size, "test", true).await
+    }
+
+    async fn test_cache_with_repository(
+        directory: &TempDir,
+        max_size: Option<u64>,
+        id: &str,
+        cache_writes: bool,
+    ) -> (CacheManager, Database) {
         let storage = StorageConfig::resolved(directory.path().join("repository"));
         fs::create_dir_all(storage.tmp_dir()).await.unwrap();
         let config = Config {
@@ -467,11 +514,12 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             logging: LoggingConfig::default(),
             repositories: vec![RepositoryConfig {
-                id: "test".into(),
+                id: id.into(),
                 url: Url::parse("https://repo.example/").unwrap(),
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
+                cache_writes,
             }],
         };
         let database = Database::open(storage.db_path()).await.unwrap();
@@ -487,6 +535,7 @@ mod tests {
         path: &str,
         content: &[u8],
         accessed: i64,
+        upstream: &str,
     ) {
         let file_path = relative_file_path(&cache.inner.storage.root, path);
         fs::create_dir_all(file_path.parent().unwrap())
@@ -500,7 +549,7 @@ mod tests {
                 artifact_id: "demo".into(),
                 version: "1.0".into(),
                 file_type: "jar".into(),
-                upstream: "test".into(),
+                upstream: upstream.into(),
                 sha1: Some(format!("{:x}", Sha1::digest(content))),
                 sha256: Some(format!("{:x}", Sha256::digest(content))),
                 etag: None,
@@ -518,9 +567,9 @@ mod tests {
     async fn evicts_oldest_idle_files_when_capacity_is_exceeded() {
         let directory = TempDir::new().unwrap();
         let (cache, database) = test_cache(&directory, Some(8)).await;
-        add_record(&cache, &database, "com/example/old.jar", b"old!", 1).await;
-        add_record(&cache, &database, "com/example/mid.jar", b"mid!", 2).await;
-        add_record(&cache, &database, "com/example/new.jar", b"new!", 3).await;
+        add_record(&cache, &database, "com/example/old.jar", b"old!", 1, "test").await;
+        add_record(&cache, &database, "com/example/mid.jar", b"mid!", 2, "test").await;
+        add_record(&cache, &database, "com/example/new.jar", b"new!", 3, "test").await;
 
         cache.enforce_capacity(&HashSet::new()).await.unwrap();
 
@@ -534,9 +583,33 @@ mod tests {
     async fn removes_prefixes_and_reports_integrity_issues() {
         let directory = TempDir::new().unwrap();
         let (cache, database) = test_cache(&directory, None).await;
-        add_record(&cache, &database, "com/example/good.jar", b"good", 1).await;
-        add_record(&cache, &database, "com/example/bad.jar", b"before", 2).await;
-        add_record(&cache, &database, "org/example/keep.jar", b"keep", 3).await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/good.jar",
+            b"good",
+            1,
+            "test",
+        )
+        .await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/bad.jar",
+            b"before",
+            2,
+            "test",
+        )
+        .await;
+        add_record(
+            &cache,
+            &database,
+            "org/example/keep.jar",
+            b"keep",
+            3,
+            "test",
+        )
+        .await;
         fs::write(
             relative_file_path(&cache.inner.storage.root, "com/example/bad.jar"),
             b"after",
@@ -566,5 +639,36 @@ mod tests {
                 .is_some()
         );
         assert!(cache.remove_prefix("../repository").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn serves_cached_entries_when_repository_writes_are_disabled() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) =
+            test_cache_with_repository(&directory, None, "nocache", false).await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/demo/1.0/demo-1.0.jar",
+            b"cached",
+            1,
+            "nocache",
+        )
+        .await;
+
+        let request =
+            MavenPath::parse("/maven/com/example/demo/1.0/demo-1.0.jar", "/maven").unwrap();
+        let artifact = cache.get(&request).await.unwrap();
+
+        assert_eq!(artifact.status, CacheStatus::Hit);
+        assert_eq!(artifact.record.upstream, "nocache");
+        assert!(artifact.temporary.is_none());
+        assert!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

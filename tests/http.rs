@@ -1342,6 +1342,81 @@ async fn unstable_checksum_mismatch_falls_back_to_next_repository() {
     good_task.abort();
 }
 
+#[tokio::test]
+async fn does_not_cache_artifacts_when_repository_writes_are_disabled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                let mut response = Response::new(Body::from("artifact-body"));
+                response
+                    .headers_mut()
+                    .insert(ETAG, HeaderValue::from_static("\"upstream-tag\""));
+                response
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository_with_cache("nocache", &url, &[], false)],
+        CacheConfig::default(),
+        UpstreamConfig::default(),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "artifact-body");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let checksum_path = "/maven/com/example/demo/1.0/demo-1.0.jar.sha256";
+    for _ in 0..2 {
+        let response = request(&app, Method::GET, checksum_path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+    assert!(
+        !directory
+            .path()
+            .join("repository/com/example/demo/1.0/demo-1.0.jar")
+            .exists()
+    );
+    assert!(
+        database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        database
+            .get("com/example/demo/1.0/demo-1.0.jar.sha256")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    wait_for(|| {
+        std::fs::read_dir(directory.path().join("repository/.maven-haste/tmp"))
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(false)
+    })
+    .await;
+
+    task.abort();
+}
+
 async fn test_app(directory: &TempDir, repositories: Vec<RepositoryConfig>) -> (Router, Database) {
     test_app_with_cache(
         directory,
@@ -1375,12 +1450,22 @@ async fn test_app_with_cache(
 }
 
 fn repository(id: &str, url: &Url, rules: &[&str]) -> RepositoryConfig {
+    repository_with_cache(id, url, rules, true)
+}
+
+fn repository_with_cache(
+    id: &str,
+    url: &Url,
+    rules: &[&str],
+    cache_writes: bool,
+) -> RepositoryConfig {
     RepositoryConfig {
         id: id.into(),
         url: url.clone(),
         use_proxy: None,
         max_concurrency: None,
         rules: rules.iter().map(|rule| (*rule).into()).collect(),
+        cache_writes,
     }
 }
 
