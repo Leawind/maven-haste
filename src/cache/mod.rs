@@ -170,6 +170,7 @@ impl CacheManager {
             {
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
                 self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
+                self.log_not_found(request);
                 return Err(CacheFailure::NotFound);
             }
         } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
@@ -193,6 +194,15 @@ impl CacheManager {
             })?;
         cached.status = CacheStatus::Miss;
         Ok(cached)
+    }
+
+    fn log_not_found(&self, request: &MavenPath) {
+        if !request.is_checksum() {
+            tracing::info!(
+                path = request.relative(),
+                "artifact was not found in any upstream repository"
+            );
+        }
     }
 
     pub async fn health(&self) -> Result<(), CacheFailure> {

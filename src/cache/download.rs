@@ -58,7 +58,10 @@ impl crate::cache::CacheManager {
         }
         match self.prepare_fetch(request, None).await? {
             PreparedFetch::Bundle(files) => self.install_bundle(files).await,
-            PreparedFetch::NotFound => Err(CacheFailure::NotFound),
+            PreparedFetch::NotFound => {
+                self.log_not_found(request);
+                Err(CacheFailure::NotFound)
+            }
             PreparedFetch::Gateway | PreparedFetch::NotModified => Err(CacheFailure::Gateway),
         }
     }
@@ -76,12 +79,14 @@ impl crate::cache::CacheManager {
                 .touch_refresh_attempt(request.relative(), unix_timestamp())
                 .await
                 .map_err(internal),
-            PreparedFetch::NotFound => self
-                .inner
-                .database
-                .touch_refresh_attempt(request.relative(), unix_timestamp())
-                .await
-                .map_err(internal),
+            PreparedFetch::NotFound => {
+                self.log_not_found(request);
+                self.inner
+                    .database
+                    .touch_refresh_attempt(request.relative(), unix_timestamp())
+                    .await
+                    .map_err(internal)
+            }
             PreparedFetch::Gateway => Err(CacheFailure::Gateway),
         }
     }
