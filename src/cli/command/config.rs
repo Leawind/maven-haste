@@ -14,6 +14,9 @@ pub enum ConfigCommand {
         path: Option<PathBuf>,
     },
 
+    /// Validate the configuration and storage access, then exit
+    Check,
+
     /// Print the fully resolved effective configuration
     Show,
 
@@ -31,8 +34,20 @@ impl ConfigCommand {
                     "created commented example configuration: {}",
                     path.display()
                 );
-                println!("next: maven-haste check --config {}", path.display());
+                println!("next: maven-haste config check --config {}", path.display());
                 println!("then: maven-haste run --config {}", path.display());
+                Ok(())
+            }
+            ConfigCommand::Check => {
+                let loaded = Config::load(cli)?;
+                if loaded.config.logging.enabled {
+                    crate::logging::validate_directory(&loaded.config.logging)?;
+                }
+                println!("configuration is valid: {}", loaded.path.display());
+                println!(
+                    "start the proxy: maven-haste run --config {}",
+                    loaded.path.display()
+                );
                 Ok(())
             }
             ConfigCommand::Show => {

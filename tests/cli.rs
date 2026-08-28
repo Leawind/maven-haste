@@ -12,7 +12,7 @@ fn check_mode_runs_through_the_built_binary() {
     let config = write_config(&directory, "127.0.0.1:0");
 
     let output = Command::new(binary())
-        .args(["check", "--config"])
+        .args(["config", "check", "--config"])
         .arg(&config)
         .output()
         .unwrap();
@@ -74,7 +74,7 @@ fn config_init_creates_a_commented_example_without_overwriting() {
     assert_eq!(std::fs::read_to_string(&config_path).unwrap(), expected);
     assert!(
         Command::new(binary())
-            .args(["check", "--config"])
+            .args(["config", "check", "--config"])
             .arg(&config_path)
             .status()
             .unwrap()

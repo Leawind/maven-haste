@@ -12,10 +12,7 @@ pub enum Command {
     /// Start the server
     Run,
 
-    /// Validate configuration and storage access, then exit
-    Check,
-
-    /// Create, print, or inspect configuration
+    /// Create, print, validate, or inspect configuration
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -45,18 +42,6 @@ impl Command {
                 })?;
                 tracing::info!(%bind, "Maven proxy is ready");
                 server::serve(listener, loaded.config.server.base_path, cache).await
-            }
-            Command::Check => {
-                let loaded = Config::load(cli)?;
-                if loaded.config.logging.enabled {
-                    logging::validate_directory(&loaded.config.logging)?;
-                }
-                println!("configuration is valid: {}", loaded.path.display());
-                println!(
-                    "start the proxy: maven-haste run --config {}",
-                    loaded.path.display()
-                );
-                Ok(())
             }
             Command::Config { command } => command.execute(cli).await,
         }

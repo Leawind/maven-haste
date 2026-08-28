@@ -58,7 +58,7 @@ Recommended steps:
 2. Adjust the listen address and local endpoint prefix in `[server]` as needed.
 3. Set the storage root in `[storage]`. Relative paths are resolved against the config file's directory.
 4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
-5. Run `maven-haste check -c <config>` to validate the config and storage directory before starting.
+5. Run `maven-haste config check -c <config>` to validate the config and storage directory before starting.
 
 Without `-c/--config`, maven-haste looks for `maven-haste.toml` in the current directory and the system user config directory. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the TOML file.
 

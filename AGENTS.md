@@ -13,7 +13,7 @@
 cargo fmt --check   # 验证 Rust 格式
 cargo test          # 运行单元测试和集成测试
 cargo clippy -- -D warnings  # 拒绝 lint 警告
-cargo run -- --check -c .\maven-haste.toml  # 验证本地配置
+maven-haste config check -c .\maven-haste.toml  # 验证本地配置
 deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 ```
 

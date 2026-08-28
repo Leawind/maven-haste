@@ -58,7 +58,7 @@ maven-haste run
 2. 根据需要调整 `[server]` 的监听地址和本地 endpoint 前缀。
 3. 设置 `[storage]` 的存储根目录。相对路径视为相对于配置文件所在目录。
 4. 按网络环境调整缓存 TTL、上游超时、并发和熔断参数。
-5. 用 `maven-haste check -c <配置文件>` 验证配置和存储目录，再启动服务。
+5. 用 `maven-haste config check -c <配置文件>` 验证配置和存储目录，再启动服务。
 
 程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.toml`。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入 TOML 文件。
 
