@@ -17,10 +17,10 @@ impl RouteEngine {
             .collect()
     }
 
-    pub fn repository(&self, name: &str) -> Option<&RepositoryConfig> {
+    pub fn repository(&self, id: &str) -> Option<&RepositoryConfig> {
         self.repositories
             .iter()
-            .find(|repository| repository.name == name)
+            .find(|repository| repository.id == id)
     }
 
     pub fn repositories(&self) -> &[RepositoryConfig] {
@@ -101,9 +101,9 @@ mod tests {
 
     use super::*;
 
-    fn repository(name: &str, rules: &[&str]) -> RepositoryConfig {
+    fn repository(id: &str, rules: &[&str]) -> RepositoryConfig {
         RepositoryConfig {
-            name: name.into(),
+            id: id.into(),
             url: Url::parse("https://repo.example/").unwrap(),
             use_proxy: None,
             max_concurrency: None,
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(
             fabric
                 .iter()
-                .map(|repo| repo.name.as_str())
+                .map(|repo| repo.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["fabric", "fallback"]
         );
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(
             other
                 .iter()
-                .map(|repo| repo.name.as_str())
+                .map(|repo| repo.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["fallback"]
         );

@@ -81,7 +81,7 @@ pub struct FetchOutcome {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct UpstreamStatus {
-    pub name: String,
+    pub id: String,
     pub circuit: String,
     pub failures: u32,
 }
@@ -130,7 +130,7 @@ impl RequestScheduler {
             .iter()
             .map(|repository| {
                 (
-                    repository.name.clone(),
+                    repository.id.clone(),
                     repository
                         .max_concurrency
                         .unwrap_or(config.default_repository_max_concurrency),
@@ -315,7 +315,7 @@ impl UpstreamClient {
             .routes
             .candidates(relative_path)
             .into_iter()
-            .filter(|repository| !excluded.contains(&repository.name))
+            .filter(|repository| !excluded.contains(&repository.id))
             .filter(|repository| !negative.contains(&repository_id(repository)))
             .cloned()
             .map(|repository| (repository, None))
@@ -351,7 +351,7 @@ impl UpstreamClient {
                 .candidates(relative_path)
                 .into_iter()
                 .filter(|repository| {
-                    repository.name != preferred && !excluded.contains(&repository.name)
+                    repository.id != preferred && !excluded.contains(&repository.id)
                 })
                 .filter(|repository| !negative.contains(&repository_id(repository)))
                 .cloned()
@@ -388,9 +388,9 @@ impl UpstreamClient {
             .repositories()
             .iter()
             .map(|repository| {
-                let status = self.circuits.status(&repository.name);
+                let status = self.circuits.status(&repository.id);
                 UpstreamStatus {
-                    name: repository.name.clone(),
+                    id: repository.id.clone(),
                     circuit: status.state.into(),
                     failures: status.failures,
                 }
@@ -402,7 +402,7 @@ impl UpstreamClient {
         self.routes
             .candidates(relative_path)
             .into_iter()
-            .map(|repository| repository.name.clone())
+            .map(|repository| repository.id.clone())
             .collect()
     }
 
@@ -424,15 +424,15 @@ impl UpstreamClient {
         let mut not_found = Vec::new();
 
         for (repository, conditional) in repositories {
-            if !self.circuits.allow(&repository.name) {
-                tracing::debug!(upstream = %repository.name, path = relative_path, "skipping open circuit");
+            if !self.circuits.allow(&repository.id) {
+                tracing::debug!(upstream = %repository.id, path = relative_path, "skipping open circuit");
                 gateway_failure = true;
                 continue;
             }
             let url = match build_url(&repository.url, relative_path) {
                 Ok(url) => url,
                 Err(error) => {
-                    tracing::error!(upstream = %repository.name, %error, "failed to build upstream URL");
+                    tracing::error!(upstream = %repository.id, %error, "failed to build upstream URL");
                     gateway_failure = true;
                     continue;
                 }
@@ -446,14 +446,14 @@ impl UpstreamClient {
                     return FetchOutcome {
                         result: FetchResult::Found {
                             repository_id: repository_id(&repository),
-                            repository: repository.name,
+                            repository: repository.id,
                             response,
                         },
                         not_found,
                     };
                 }
                 RepositoryResult::NotModified => {
-                    self.circuits.record_success(&repository.name);
+                    self.circuits.record_success(&repository.id);
                     return FetchOutcome {
                         result: FetchResult::NotModified {
                             repository_id: repository_id(&repository),
@@ -462,16 +462,16 @@ impl UpstreamClient {
                     };
                 }
                 RepositoryResult::NotFound => {
-                    tracing::debug!(upstream = %repository.name, path = relative_path, "upstream artifact was not found");
-                    self.circuits.record_success(&repository.name);
+                    tracing::trace!(upstream = %repository.id, path = relative_path, "upstream artifact was not found");
+                    self.circuits.record_success(&repository.id);
                     not_found.push(repository_id(&repository));
                 }
                 RepositoryResult::GatewayFailure { breaker_failure } => {
                     gateway_failure = true;
                     if breaker_failure {
-                        self.circuits.record_failure(&repository.name);
+                        self.circuits.record_failure(&repository.id);
                     } else {
-                        self.circuits.record_success(&repository.name);
+                        self.circuits.record_success(&repository.id);
                     }
                 }
             }
@@ -493,7 +493,7 @@ impl UpstreamClient {
         priority: RequestPriority,
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
-            let permit = self.scheduler.acquire(&repository.name, priority).await;
+            let permit = self.scheduler.acquire(&repository.id, priority).await;
             let mut request = self.client_for_repository(repository).get(url.clone());
             if let Some(conditional) = conditional {
                 if let Some(etag) = &conditional.etag {
@@ -521,7 +521,7 @@ impl UpstreamClient {
                     ) =>
                 {
                     tracing::warn!(
-                        upstream = %repository.name,
+                        upstream = %repository.id,
                         status = %response.status(),
                         "upstream rejected request"
                     );
@@ -531,14 +531,14 @@ impl UpstreamClient {
                 }
                 Ok(response) if response.status().is_server_error() => {
                     if attempt + 1 < MAX_ATTEMPTS {
-                        tracing::debug!(upstream = %repository.name, status = %response.status(), attempt = attempt + 1, "retryable upstream server error");
+                        tracing::debug!(upstream = %repository.id, status = %response.status(), attempt = attempt + 1, "retryable upstream server error");
                     } else {
-                        tracing::warn!(upstream = %repository.name, status = %response.status(), attempt = attempt + 1, "upstream server error after retries");
+                        tracing::warn!(upstream = %repository.id, status = %response.status(), attempt = attempt + 1, "upstream server error after retries");
                     }
                 }
                 Ok(response) => {
                     tracing::warn!(
-                        upstream = %repository.name,
+                        upstream = %repository.id,
                         status = %response.status(),
                         "unexpected upstream response"
                     );
@@ -548,9 +548,9 @@ impl UpstreamClient {
                 }
                 Err(error) => {
                     if attempt + 1 < MAX_ATTEMPTS {
-                        tracing::debug!(upstream = %repository.name, attempt = attempt + 1, %error, "retryable upstream request failure");
+                        tracing::debug!(upstream = %repository.id, attempt = attempt + 1, %error, "retryable upstream request failure");
                     } else {
-                        tracing::warn!(upstream = %repository.name, attempt = attempt + 1, %error, "upstream request failed after retries");
+                        tracing::warn!(upstream = %repository.id, attempt = attempt + 1, %error, "upstream request failed after retries");
                     }
                 }
             }
@@ -624,14 +624,14 @@ mod tests {
     fn scheduler(global: usize, repository: usize, burst: usize) -> RequestScheduler {
         let repositories = vec![
             RepositoryConfig {
-                name: "a".into(),
+                id: "a".into(),
                 url: Url::parse("https://a.example/").unwrap(),
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
             },
             RepositoryConfig {
-                name: "b".into(),
+                id: "b".into(),
                 url: Url::parse("https://b.example/").unwrap(),
                 use_proxy: None,
                 max_concurrency: None,

@@ -181,7 +181,7 @@ fn write_config(directory: &TempDir, bind: &str) -> std::path::PathBuf {
         &path,
         format!(
             "[server]\nbind = '{bind}'\n\n[storage]\nroot = './repository'\n\n\
-             [[repositories]]\nname = 'excluded'\nurl = 'http://127.0.0.1:9/'\nrules = ['!**']\n"
+             [[repositories]]\nid = 'excluded'\nurl = 'http://127.0.0.1:9/'\nrules = ['!**']\n"
         ),
     )
     .unwrap();

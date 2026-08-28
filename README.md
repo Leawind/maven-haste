@@ -66,7 +66,7 @@ Without `-c/--config`, maven-haste looks for `maven-haste.toml` in the current d
 
 Repositories are tried in configuration order. `rules` is an ordered list of glob patterns matched against the Maven relative request path: the first matching rule determines whether the repository participates, `!` means exclude, `*` matches within one path segment, and `**` matches across `/`. Repositories without `rules` act as a global fallback.
 
-When an upstream lacks a file, fails, or repeatedly returns different content that cannot be verified against its checksums, the service continues to the next upstream where applicable. Repository names are used for logging, statistics, and circuit breaker identification.
+When an upstream lacks a file, fails, or repeatedly returns different content that cannot be verified against its checksums, the service continues to the next upstream where applicable. Repository ids are used for logging, statistics, and circuit breaker identification.
 
 ## Build Tool Integration
 

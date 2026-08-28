@@ -193,7 +193,7 @@ impl Default for CircuitBreakerConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
-    pub name: String,
+    pub id: String,
     pub url: Url,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_proxy: Option<bool>,
@@ -487,33 +487,33 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         ));
     }
 
-    let mut names = HashSet::new();
+    let mut ids = HashSet::new();
     for repository in &config.repositories {
-        if repository.name.trim().is_empty() {
-            return Err(ConfigError::new("repository name must not be empty"));
+        if repository.id.trim().is_empty() {
+            return Err(ConfigError::new("repository id must not be empty"));
         }
-        if !names.insert(&repository.name) {
+        if !ids.insert(&repository.id) {
             return Err(ConfigError::new(format!(
-                "repository name {:?} is duplicated",
-                repository.name
+                "repository id {:?} is duplicated",
+                repository.id
             )));
         }
         if repository.use_proxy == Some(true) && config.upstream.proxy.is_none() {
             return Err(ConfigError::new(format!(
                 "repository {:?} has use_proxy = true but [upstream].proxy is not configured",
-                repository.name
+                repository.id
             )));
         }
         if repository.max_concurrency == Some(0) {
             return Err(ConfigError::new(format!(
                 "repository {:?} max_concurrency must be greater than zero",
-                repository.name
+                repository.id
             )));
         }
         if !matches!(repository.url.scheme(), "http" | "https") {
             return Err(ConfigError::new(format!(
                 "repository {:?} URL must use http or https",
-                repository.name
+                repository.id
             )));
         }
         if repository.url.cannot_be_a_base()
@@ -525,11 +525,11 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         {
             return Err(ConfigError::new(format!(
                 "repository {:?} URL must be a base URL without query or fragment",
-                repository.name
+                repository.id
             )));
         }
         for rule in &repository.rules {
-            validate_rule(&repository.name, rule)?;
+            validate_rule(&repository.id, rule)?;
         }
     }
 
@@ -604,7 +604,7 @@ mod tests {
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/maven2"
 "#,
         );
@@ -639,7 +639,7 @@ url = "https://repo.example/maven2"
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -683,7 +683,7 @@ url = "https://repo.example/"
             let path = write_config(
                 &directory,
                 &format!(
-                    "[server]\nbase_path = '{base_path}'\n\n[storage]\nroot = 'repository'\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
+                    "[server]\nbase_path = '{base_path}'\n\n[storage]\nroot = 'repository'\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/'\n"
                 ),
             );
 
@@ -709,7 +709,7 @@ base_path = "/apiary"
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -737,7 +737,7 @@ retention = "7d"
 filter = "maven_haste::access=trace"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -760,7 +760,7 @@ url = "https://repo.example/"
             let path = write_config(
                 &directory,
                 &format!(
-                    "[storage]\nroot = 'repository'\n\n[logging]\n{logging}\n\n[[repositories]]\nname = 'central'\nurl = 'https://repo.example/'\n"
+                    "[storage]\nroot = 'repository'\n\n[logging]\n{logging}\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/'\n"
                 ),
             );
             let cli1 = &cli(&path);
@@ -781,7 +781,7 @@ root = "repository"
 enabled = true
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -800,7 +800,7 @@ url = "https://repo.example/"
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 rules = ["com.example:*"]
 "#,
@@ -820,7 +820,7 @@ rules = ["com.example:*"]
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -844,7 +844,7 @@ root = "repository"
 proxy = "http://127.0.0.1:7890"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -871,7 +871,7 @@ root = "repository"
 proxy = "http://user:password@127.0.0.1:7890"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 use_proxy = true
 "#,
@@ -899,7 +899,7 @@ root = "repository"
 proxy = "http://127.0.0.1:7890"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 use_proxy = false
 "#,
@@ -924,7 +924,7 @@ use_proxy = false
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 use_proxy = true
 "#,
@@ -951,7 +951,7 @@ root = "repository"
 proxy = "socks5://127.0.0.1:1080"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -976,7 +976,7 @@ url = "https://repo.example/"
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -1014,7 +1014,7 @@ root = "repository"
 db_path = "repository/com/example/cache.db"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
         );
@@ -1035,7 +1035,7 @@ root = "repository"
 max_size = 0
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1046,7 +1046,7 @@ root = "repository"
 connect_timeout = "0s"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1057,7 +1057,7 @@ root = "repository"
 read_timeout = "0s"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1068,7 +1068,7 @@ root = "repository"
 refresh_timeout = "10s"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1079,7 +1079,7 @@ root = "repository"
 refresh_max_concurrency = 10
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1090,7 +1090,7 @@ root = "repository"
 max_concurrency = 0
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1101,7 +1101,7 @@ root = "repository"
 default_repository_max_concurrency = 0
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1112,7 +1112,7 @@ root = "repository"
 foreground_priority_burst = 0
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 "#,
             r#"
@@ -1120,7 +1120,7 @@ url = "https://repo.example/"
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 max_concurrency = 0
 "#,
@@ -1141,7 +1141,7 @@ max_concurrency = 0
 root = "repository"
 
 [[repositories]]
-name = "central"
+id = "central"
 url = "https://repo.example/"
 max_concurrency = 17
 "#,

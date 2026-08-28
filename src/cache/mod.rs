@@ -457,7 +457,7 @@ mod tests {
             circuit_breaker: CircuitBreakerConfig::default(),
             logging: LoggingConfig::default(),
             repositories: vec![RepositoryConfig {
-                name: "test".into(),
+                id: "test".into(),
                 url: Url::parse("https://repo.example/").unwrap(),
                 use_proxy: None,
                 max_concurrency: None,

@@ -204,7 +204,7 @@ async fn reports_health_and_cache_statistics() {
     assert_eq!(stats["hit_rate"].as_f64(), Some(0.5));
     assert!(stats["upstreams"].as_array().is_some_and(|upstreams| {
         upstreams.iter().any(|upstream| {
-            upstream["name"].as_str() == Some("central")
+            upstream["id"].as_str() == Some("central")
                 && upstream["circuit"].as_str() == Some("closed")
         })
     }));
@@ -1180,7 +1180,7 @@ async fn stable_checksum_mismatch_keeps_first_repository() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|upstream| upstream["name"] == "bad")
+        .find(|upstream| upstream["id"] == "bad")
         .unwrap();
     assert_eq!(bad_status["failures"], 0);
     bad_task.abort();
@@ -1374,9 +1374,9 @@ async fn test_app_with_cache(
     (router("/maven".into(), cache), database)
 }
 
-fn repository(name: &str, url: &Url, rules: &[&str]) -> RepositoryConfig {
+fn repository(id: &str, url: &Url, rules: &[&str]) -> RepositoryConfig {
     RepositoryConfig {
-        name: name.into(),
+        id: id.into(),
         url: url.clone(),
         use_proxy: None,
         max_concurrency: None,

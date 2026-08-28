@@ -63,8 +63,8 @@ root = './repository'
 
 # # At least one upstream repository is required.
 # [[repositories]]
-# Required human-readable name shown in logs and cache statistics.
-# name = 'Gradle Plugin'
+# Required unique repository id used for routing, circuit breaking, logging, and statistics.
+# id = 'Gradle Plugin'
 # url = 'https://plugins.gradle.org/m2/'
 # # Optional per-repository proxy switch.
 # # true: use [upstream].proxy
@@ -78,7 +78,7 @@ root = './repository'
 # rules = ['gradle/plugin/**', '!**']
 
 [[repositories]]
-name = 'central'
+id = 'central'
 url = 'https://repo1.maven.org/maven2/'
 # # Optional per-repository proxy switch.
 # # true: use [upstream].proxy
