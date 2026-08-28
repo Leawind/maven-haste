@@ -4,7 +4,7 @@
 --
 -- param: path: &str
 SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag,
-       last_modified, file_size, created_at, last_refresh_attempt, last_accessed
+       last_modified, file_size, created_at, last_refresh_attempt, last_accessed, request_count
   FROM artifacts
  WHERE path = :path
 /
@@ -123,12 +123,21 @@ UPDATE artifacts SET last_refresh_attempt = :timestamp WHERE path = :path
 UPDATE artifacts SET last_accessed = :timestamp WHERE path = :path
 /
 
+-- name: bump_request_count!
+--
+-- Increments the per-artifact request counter for a path.
+-- Paths without a cached record are not counted.
+--
+-- param: path: &str
+UPDATE artifacts SET request_count = request_count + 1 WHERE path = :path
+/
+
 -- name: records_by_access?
 --
 -- Returns all artifact records ordered by least recently accessed.
 --
 SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag,
-       last_modified, file_size, created_at, last_refresh_attempt, last_accessed
+       last_modified, file_size, created_at, last_refresh_attempt, last_accessed, request_count
   FROM artifacts
  ORDER BY last_accessed, created_at, path
 /
@@ -140,7 +149,7 @@ SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, 
 -- param: path: &str
 -- param: pattern: &str
 SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag,
-       last_modified, file_size, created_at, last_refresh_attempt, last_accessed
+       last_modified, file_size, created_at, last_refresh_attempt, last_accessed, request_count
   FROM artifacts
  WHERE path = :path OR path LIKE :pattern ESCAPE '\'
  ORDER BY path

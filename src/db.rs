@@ -24,7 +24,10 @@ PRAGMA busy_timeout=5000;
 /// own transaction and `PRAGMA user_version` records how many have been
 /// applied, so pending migrations run exactly once. To change the schema,
 /// append a new `.sql` file under `migrations/` and add it to this list.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_request_count.sql"),
+];
 
 #[derive(Clone)]
 pub struct Database {
@@ -47,6 +50,7 @@ pub struct ArtifactRecord {
     pub created_at: i64,
     pub last_refresh_attempt: Option<i64>,
     pub last_accessed: i64,
+    pub request_count: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -250,6 +254,16 @@ impl Database {
         .await
     }
 
+    /// Increments the per-artifact request counter for a path.
+    pub async fn bump_request_count(&self, path: &str) -> Result<(), AppError> {
+        let path = path.to_owned();
+        self.with_connection(move |connection| {
+            connection.bump_request_count(&path)?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn records_by_access(&self) -> Result<Vec<ArtifactRecord>, AppError> {
         self.with_connection(|connection| {
             let mut records = Vec::new();
@@ -343,6 +357,7 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqlite
         created_at: row.get(11)?,
         last_refresh_attempt: row.get(12)?,
         last_accessed: row.get(13)?,
+        request_count: row.get(14)?,
     })
 }
 
@@ -448,6 +463,7 @@ mod tests {
             created_at: 123,
             last_refresh_attempt: None,
             last_accessed: 123,
+            request_count: 0,
         };
         database.upsert_many(vec![record.clone()]).await.unwrap();
 
@@ -462,6 +478,60 @@ mod tests {
                 .unwrap(),
             vec![record.path]
         );
+    }
+
+    #[tokio::test]
+    async fn counts_requests_per_path_and_preserves_them_across_upserts() {
+        let directory = TempDir::new().unwrap();
+        let database = Database::open(&directory.path().join("cache.db"))
+            .await
+            .unwrap();
+        let record = ArtifactRecord {
+            path: "Com/Example/demo.jar".into(),
+            group_id: "Com.Example".into(),
+            artifact_id: "demo".into(),
+            version: "1.0".into(),
+            file_type: "jar".into(),
+            upstream: "central".into(),
+            sha1: None,
+            sha256: None,
+            etag: None,
+            last_modified: None,
+            file_size: 42,
+            created_at: 123,
+            last_refresh_attempt: None,
+            last_accessed: 123,
+            request_count: 0,
+        };
+        database.upsert_many(vec![record.clone()]).await.unwrap();
+        assert_eq!(
+            database
+                .get(&record.path)
+                .await
+                .unwrap()
+                .unwrap()
+                .request_count,
+            0
+        );
+
+        database.bump_request_count(&record.path).await.unwrap();
+        database.bump_request_count(&record.path).await.unwrap();
+        database.upsert_many(vec![record.clone()]).await.unwrap();
+        assert_eq!(
+            database
+                .get(&record.path)
+                .await
+                .unwrap()
+                .unwrap()
+                .request_count,
+            2
+        );
+
+        database
+            .bump_request_count("missing/path.jar")
+            .await
+            .unwrap();
+        assert!(database.get("missing/path.jar").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -589,6 +659,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(columns.iter().any(|column| column == "last_accessed"));
+        assert!(columns.iter().any(|column| column == "request_count"));
     }
 
     #[tokio::test]
@@ -613,15 +684,9 @@ mod tests {
 
         let database = Database::open(&path).await.unwrap();
         assert_eq!(database.stats().await.unwrap().files, 1);
-        assert_eq!(
-            database
-                .get("Com/Example/demo.jar")
-                .await
-                .unwrap()
-                .unwrap()
-                .file_size,
-            42
-        );
+        let adopted = database.get("Com/Example/demo.jar").await.unwrap().unwrap();
+        assert_eq!(adopted.file_size, 42);
+        assert_eq!(adopted.request_count, 0);
 
         let connection = database.pool.get().await.unwrap();
         let version = connection

@@ -294,6 +294,7 @@ impl crate::cache::CacheManager {
             created_at: now,
             last_refresh_attempt: refresh_attempt,
             last_accessed: now,
+            request_count: 0,
         };
         let mut files = vec![PreparedFile {
             relative: request.relative().into(),
@@ -336,6 +337,7 @@ impl crate::cache::CacheManager {
                     created_at: now,
                     last_refresh_attempt: refresh_attempt,
                     last_accessed: now,
+                    request_count: 0,
                 },
             });
         }
@@ -520,6 +522,7 @@ impl crate::cache::CacheManager {
                 created_at: now,
                 last_refresh_attempt: (request.policy() == CachePolicy::Mutable).then_some(now),
                 last_accessed: now,
+                request_count: 0,
             },
         })
     }

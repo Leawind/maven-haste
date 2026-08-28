@@ -167,6 +167,9 @@ impl CacheManager {
             .get(request.relative())
             .await
             .map_err(internal)?;
+        if record.is_some() {
+            self.bump_request_count(request).await;
+        }
 
         if request.policy() == CachePolicy::Mutable {
             if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
@@ -198,6 +201,9 @@ impl CacheManager {
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
         match self.synchronous_download(request).await? {
             DownloadOutcome::Installed => {
+                if record.is_none() {
+                    self.bump_request_count(request).await;
+                }
                 let record = self
                     .inner
                     .database
@@ -223,6 +229,21 @@ impl CacheManager {
                     temporary: Some(temporary),
                 })
             }
+        }
+    }
+
+    async fn bump_request_count(&self, request: &MavenPath) {
+        if let Err(error) = self
+            .inner
+            .database
+            .bump_request_count(request.relative())
+            .await
+        {
+            tracing::warn!(
+                %error,
+                path = request.relative(),
+                "failed to record the request counter"
+            );
         }
     }
 
@@ -558,6 +579,7 @@ mod tests {
                 created_at: accessed,
                 last_refresh_attempt: None,
                 last_accessed: accessed,
+                request_count: 0,
             }])
             .await
             .unwrap();
@@ -670,5 +692,32 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn counts_requests_for_cached_entries() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/demo/1.0/demo-1.0.jar",
+            b"cached",
+            1,
+            "test",
+        )
+        .await;
+
+        let request =
+            MavenPath::parse("/maven/com/example/demo/1.0/demo-1.0.jar", "/maven").unwrap();
+        cache.get(&request).await.unwrap();
+        cache.get(&request).await.unwrap();
+
+        let record = database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.request_count, 2);
     }
 }

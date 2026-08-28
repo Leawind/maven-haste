@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file.
 
 - Enforced a repository id naming rule (lowercase ASCII letters, digits, underscores, and hyphens).
 - Added per-repository `cache_writes` to stop writing new artifacts, checksums, and negative entries from a repository while previously cached content keeps being served.
+- Added a per-artifact request counter to the cache database; every client request increments it for the requested path, and it is recorded but not used yet.
 
 ## [0.1.1]
 

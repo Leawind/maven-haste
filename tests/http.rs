@@ -95,6 +95,7 @@ async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     assert_eq!(record.group_id, "com.example");
     assert_eq!(record.artifact_id, "demo");
     assert_eq!(record.upstream, "central");
+    assert_eq!(record.request_count, 4);
     task.abort();
 }
 
