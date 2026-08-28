@@ -103,17 +103,6 @@ async fn artifact(
             return track_response(response, method, uri.path(), "invalid", None, started);
         }
     };
-    if tracing::enabled!(target: "maven_haste::access", tracing::Level::DEBUG) {
-        let candidates = state.cache.route_candidates(request.relative());
-        tracing::debug!(
-            target: "maven_haste::access",
-            event = "route",
-            path = request.relative(),
-            candidates = ?candidates,
-            "resolved upstream candidates"
-        );
-    }
-
     let (response, cache_status, upstream) = match state.cache.get(&request).await {
         Ok(cached) => {
             let cache_status = cached.status.as_str();
@@ -268,6 +257,19 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     state.completion = Some(completion);
     let elapsed_ms = state.started.elapsed().as_millis() as u64;
     let prefix = state.cache.to_ascii_uppercase();
+    let mut message = format!(
+        "[{}] {} {} {} {}ms {}B upstream={}",
+        prefix,
+        state.method,
+        state.path,
+        state.status,
+        elapsed_ms,
+        state.bytes_sent,
+        state.upstream
+    );
+    if completion != "complete" {
+        message.push_str(&format!(" completion={completion}"));
+    }
     tracing::debug!(
         target: "maven_haste::access",
         cache = state.cache,
@@ -278,8 +280,7 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
         elapsed_ms,
         bytes_sent = state.bytes_sent,
         completion,
-        "[{}] {} {} {} {}ms {}B upstream={}",
-        prefix, state.method, state.path, state.status, elapsed_ms, state.bytes_sent, state.upstream
+        "{message}"
     );
 }
 
