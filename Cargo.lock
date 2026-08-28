@@ -803,6 +803,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "include-sql"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e29f9bcd0a32ce5313113ad23e910338b253df91c739c4d9e51bd7c1e94ec70"
+dependencies = [
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "include-sqlite-sql"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "929198efca155a981ed54f79bcb295f708d8446f87298f4ca58d33959412fb03"
+dependencies = [
+ "include-sql",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -935,10 +957,12 @@ dependencies = [
  "http-body",
  "http-body-util",
  "humantime-serde",
+ "include-sqlite-sql",
  "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",
@@ -1213,6 +1237,18 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]

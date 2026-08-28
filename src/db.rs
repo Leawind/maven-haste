@@ -1,9 +1,15 @@
+// `upsert_artifact` generated from `sql/cache.sql` legitimately takes one
+// parameter per record column, so the argument-count lint is disabled here.
+#![allow(clippy::too_many_arguments)]
 use std::path::Path;
 
-use deadpool_sqlite::rusqlite::{self, OptionalExtension, params};
 use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
+use include_sqlite_sql::{impl_sql, include_sql};
+use rusqlite;
 
 use crate::error::AppError;
+
+include_sql!("/sql/cache.sql");
 
 /// Connection settings applied to every pooled connection. `journal_mode=WAL`
 /// is a persistent database-file property; setting it on each connection keeps
@@ -19,23 +25,6 @@ PRAGMA busy_timeout=5000;
 /// applied, so pending migrations run exactly once. To change the schema,
 /// append a new `.sql` file under `migrations/` and add it to this list.
 const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
-
-const ARTIFACT_COLUMNS: &str = concat!(
-    "path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag, ",
-    "last_modified, file_size, created_at, last_refresh_attempt, last_accessed"
-);
-
-const ARTIFACT_VALUES: &str = "(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
-
-const ON_CONFLICT_UPDATE: &str = concat!(
-    "ON CONFLICT(path) DO UPDATE SET ",
-    "group_id = excluded.group_id, artifact_id = excluded.artifact_id, ",
-    "version = excluded.version, file_type = excluded.file_type, upstream = excluded.upstream, ",
-    "sha1 = excluded.sha1, sha256 = excluded.sha256, etag = excluded.etag, ",
-    "last_modified = excluded.last_modified, file_size = excluded.file_size, ",
-    "created_at = excluded.created_at, last_refresh_attempt = excluded.last_refresh_attempt, ",
-    "last_accessed = excluded.last_accessed"
-);
 
 #[derive(Clone)]
 pub struct Database {
@@ -110,13 +99,12 @@ impl Database {
     pub async fn get(&self, path: &str) -> Result<Option<ArtifactRecord>, AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            connection
-                .query_row(
-                    &format!("SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE path = ?1"),
-                    [path],
-                    artifact_from_row,
-                )
-                .optional()
+            let mut record = None;
+            connection.get_artifact(&path, |row| {
+                record = Some(artifact_from_row(row)?);
+                Ok(())
+            })?;
+            Ok(record)
         })
         .await
     }
@@ -124,11 +112,12 @@ impl Database {
     pub async fn case_conflicts(&self, path: &str) -> Result<Vec<String>, AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            let mut statement = connection.prepare(
-                "SELECT path FROM artifacts WHERE path = ?1 COLLATE NOCASE AND path != ?1",
-            )?;
-            let rows = statement.query_map([path], |row| row.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let mut conflicts = Vec::new();
+            connection.case_conflicts(&path, |row| {
+                conflicts.push(row.get(0)?);
+                Ok(())
+            })?;
+            Ok(conflicts)
         })
         .await
     }
@@ -139,9 +128,9 @@ impl Database {
         }
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
-            for path in paths {
-                transaction.execute("DELETE FROM artifacts WHERE path = ?1", [&path])?;
-                transaction.execute("DELETE FROM negative_cache WHERE path = ?1", [&path])?;
+            for path in &paths {
+                transaction.delete_artifact(path)?;
+                transaction.delete_negative_path(path)?;
             }
             transaction.commit()
         })
@@ -152,7 +141,22 @@ impl Database {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
             for record in records {
-                upsert_record(&transaction, record)?;
+                transaction.upsert_artifact(
+                    &record.path,
+                    &record.group_id,
+                    &record.artifact_id,
+                    &record.version,
+                    &record.file_type,
+                    &record.upstream,
+                    record.sha1.as_deref(),
+                    record.sha256.as_deref(),
+                    record.etag.as_deref(),
+                    record.last_modified.as_deref(),
+                    record.file_size,
+                    record.created_at,
+                    record.last_refresh_attempt,
+                    record.last_accessed,
+                )?;
             }
             transaction.commit()
         })
@@ -162,15 +166,15 @@ impl Database {
     pub async fn negative_entries(&self, path: &str) -> Result<Vec<NegativeCacheEntry>, AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            let mut statement = connection
-                .prepare("SELECT repository_id, observed_at FROM negative_cache WHERE path = ?1")?;
-            let rows = statement.query_map([path], |row| {
-                Ok(NegativeCacheEntry {
+            let mut entries = Vec::new();
+            connection.negative_entries(&path, |row| {
+                entries.push(NegativeCacheEntry {
                     repository_id: row.get(0)?,
                     observed_at: row.get(1)?,
-                })
+                });
+                Ok(())
             })?;
-            rows.collect::<Result<Vec<_>, _>>()
+            Ok(entries)
         })
         .await
     }
@@ -188,12 +192,7 @@ impl Database {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
             for repository_id in repository_ids {
-                transaction.execute(
-                    "INSERT INTO negative_cache (path, repository_id, observed_at) \
-                     VALUES (?1, ?2, ?3) ON CONFLICT(path, repository_id) DO UPDATE SET \
-                     observed_at = excluded.observed_at",
-                    params![path, repository_id, observed_at],
-                )?;
+                transaction.upsert_negative_entry(&path, &repository_id, observed_at)?;
             }
             transaction.commit()
         })
@@ -208,10 +207,7 @@ impl Database {
         let path = path.to_owned();
         let repository_id = repository_id.to_owned();
         self.with_connection(move |connection| {
-            connection.execute(
-                "DELETE FROM negative_cache WHERE path = ?1 AND repository_id = ?2",
-                params![path, repository_id],
-            )?;
+            connection.delete_negative_entry(&path, &repository_id)?;
             Ok(())
         })
         .await
@@ -229,10 +225,7 @@ impl Database {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
             for repository_id in repository_ids {
-                transaction.execute(
-                    "DELETE FROM negative_cache WHERE path = ?1 AND repository_id = ?2",
-                    params![path, repository_id],
-                )?;
+                transaction.delete_negative_entry(&path, &repository_id)?;
             }
             transaction.commit()
         })
@@ -242,10 +235,7 @@ impl Database {
     pub async fn touch_refresh_attempt(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            connection.execute(
-                "UPDATE artifacts SET last_refresh_attempt = ?2 WHERE path = ?1",
-                params![path, timestamp],
-            )?;
+            connection.touch_refresh_attempt(&path, timestamp)?;
             Ok(())
         })
         .await
@@ -254,10 +244,7 @@ impl Database {
     pub async fn touch_access(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            connection.execute(
-                "UPDATE artifacts SET last_accessed = ?2 WHERE path = ?1",
-                params![path, timestamp],
-            )?;
+            connection.touch_access(&path, timestamp)?;
             Ok(())
         })
         .await
@@ -265,11 +252,12 @@ impl Database {
 
     pub async fn records_by_access(&self) -> Result<Vec<ArtifactRecord>, AppError> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {ARTIFACT_COLUMNS} FROM artifacts ORDER BY last_accessed, created_at, path"
-            ))?;
-            let rows = statement.query_map([], artifact_from_row)?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let mut records = Vec::new();
+            connection.records_by_access(|row| {
+                records.push(artifact_from_row(row)?);
+                Ok(())
+            })?;
+            Ok(records)
         })
         .await
     }
@@ -278,35 +266,40 @@ impl Database {
         let prefix = prefix.trim_matches('/').to_owned();
         let descendant = format!("{}/%", escape_like(&prefix));
         self.with_connection(move |connection| {
-            let mut statement = connection.prepare(&format!(
-                "SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' ORDER BY path"
-            ))?;
-            let rows = statement.query_map(params![prefix, descendant], artifact_from_row)?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let mut records = Vec::new();
+            connection.records_with_prefix(&prefix, &descendant, |row| {
+                records.push(artifact_from_row(row)?);
+                Ok(())
+            })?;
+            Ok(records)
         })
         .await
     }
 
     pub async fn ping(&self) -> Result<(), AppError> {
-        self.with_connection(|connection| connection.query_row("SELECT 1", [], |_| Ok(())))
-            .await
+        self.with_connection(|connection| {
+            connection.ping(|_| Ok(()))?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn stats(&self) -> Result<DatabaseStats, AppError> {
         self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT (SELECT COUNT(*) FROM artifacts), \
-                 (SELECT COALESCE(SUM(file_size), 0) FROM artifacts), \
-                 (SELECT COUNT(*) FROM negative_cache)",
-                [],
-                |row| {
-                    Ok(DatabaseStats {
-                        files: row.get::<_, u64>(0)?,
-                        total_size: row.get::<_, u64>(1)?,
-                        negative_entries: row.get::<_, u64>(2)?,
-                    })
-                },
-            )
+            let mut stats = DatabaseStats {
+                files: 0,
+                total_size: 0,
+                negative_entries: 0,
+            };
+            connection.stats(|row| {
+                stats = DatabaseStats {
+                    files: row.get::<_, u64>(0)?,
+                    total_size: row.get::<_, u64>(1)?,
+                    negative_entries: row.get::<_, u64>(2)?,
+                };
+                Ok(())
+            })?;
+            Ok(stats)
         })
         .await
     }
@@ -332,34 +325,6 @@ impl Database {
             .map_err(worker_error)?
             .map_err(sqlite_error)
     }
-}
-
-fn upsert_record(
-    connection: &rusqlite::Connection,
-    record: ArtifactRecord,
-) -> Result<(), rusqlite::Error> {
-    connection.execute(
-        &format!(
-            "INSERT INTO artifacts ({ARTIFACT_COLUMNS}) VALUES {ARTIFACT_VALUES} {ON_CONFLICT_UPDATE}"
-        ),
-        params![
-            record.path,
-            record.group_id,
-            record.artifact_id,
-            record.version,
-            record.file_type,
-            record.upstream,
-            record.sha1,
-            record.sha256,
-            record.etag,
-            record.last_modified,
-            record.file_size,
-            record.created_at,
-            record.last_refresh_attempt,
-            record.last_accessed,
-        ],
-    )?;
-    Ok(())
 }
 
 fn artifact_from_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqlite::Error> {
