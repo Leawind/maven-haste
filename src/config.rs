@@ -498,6 +498,7 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
                 repository.id
             )));
         }
+        validate_repository_id(&repository.id)?;
         if repository.use_proxy == Some(true) && config.upstream.proxy.is_none() {
             return Err(ConfigError::new(format!(
                 "repository {:?} has use_proxy = true but [upstream].proxy is not configured",
@@ -533,6 +534,25 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_repository_id(id: &str) -> Result<(), ConfigError> {
+    const MAX_ID_LENGTH: usize = 64;
+    if id.len() > MAX_ID_LENGTH {
+        return Err(ConfigError::new(format!(
+            "repository id {id:?} must be at most {MAX_ID_LENGTH} characters"
+        )));
+    }
+    if !id.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '_' | '-')
+    }) {
+        return Err(ConfigError::new(format!(
+            "repository id {id:?} must contain only lowercase letters, digits, underscore, and hyphen"
+        )));
+    }
     Ok(())
 }
 
@@ -1152,5 +1172,56 @@ max_concurrency = 17
             Config::load(cli1).unwrap().config.repositories[0].max_concurrency,
             Some(17)
         );
+    }
+
+    #[test]
+    fn accepts_repository_ids_with_simple_naming() {
+        let directory = TempDir::new().unwrap();
+        for id in [
+            "central",
+            "kikugie_releases",
+            "kikugie-snapshots",
+            "a1-b2_c",
+        ] {
+            let path = write_config(
+                &directory,
+                &format!(
+                    "[storage]\nroot = 'repository'\n\n[[repositories]]\nid = '{id}'\nurl = 'https://repo.example/'\n"
+                ),
+            );
+            let cli1 = &cli(&path);
+            assert!(
+                Config::load(cli1).is_ok(),
+                "expected repository id {id:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_repository_ids_outside_simple_naming() {
+        let directory = TempDir::new().unwrap();
+        for id in [
+            "Fabric",
+            "Maven Central",
+            "Gradle-Plugin!",
+            "with.dot",
+            "with slash/inside",
+            "带中文",
+            "Gradle:Plugin",
+            "super_long_repository_id_that_exceeds_the_sixty_four_character_limit",
+        ] {
+            let path = write_config(
+                &directory,
+                &format!(
+                    "[storage]\nroot = 'repository'\n\n[[repositories]]\nid = '{id}'\nurl = 'https://repo.example/'\n"
+                ),
+            );
+            let cli1 = &cli(&path);
+            let error = Config::load(cli1).unwrap_err();
+            assert!(
+                error.to_string().contains("repository id"),
+                "unexpected error for repository id {id:?}: {error}"
+            );
+        }
     }
 }

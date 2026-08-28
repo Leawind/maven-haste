@@ -3,40 +3,40 @@ root = './repository'
 
 # Repository order is significant. Loader-specific repositories are only consulted for their own namespaces.
 [[repositories]]
-id = 'Fabric'
+id = 'fabric'
 url = 'https://maven.fabricmc.net/'
 rules = ['net/fabricmc/**', 'fabric-loom/**', '!**']
 
 [[repositories]]
-id = 'Minecraft Forge'
+id = 'minecraft-forge'
 url = 'https://maven.minecraftforge.net/'
 rules = ['net/minecraftforge/**', 'net/minecraft/**', 'de/oceanlabs/mcp/**', '!**']
 
 [[repositories]]
-id = 'NeoForge'
+id = 'neoforge'
 url = 'https://maven.neoforged.net/releases/'
 rules = ['net/neoforged/**', '!**']
 
 [[repositories]]
-id = 'Parchment'
+id = 'parchment'
 url = 'https://maven.parchmentmc.org/'
 rules = ['org/parchmentmc/**', '!**']
 
 [[repositories]]
-id = 'TerraformersMC'
+id = 'terraformersmc'
 url = 'https://maven.terraformersmc.com/releases/'
 rules = ['com/terraformersmc/**', '!**']
 
 [[repositories]]
-id = 'Sponge'
+id = 'sponge'
 url = 'https://repo.spongepowered.org/repository/maven-public/'
 rules = ['org/spongepowered/**', '!**']
 
 [[repositories]]
-id = 'Maven Central'
+id = 'maven-central'
 url = 'https://repo1.maven.org/maven2/'
 
 # Plugin marker coordinates do not share one namespace, so this repository remains a final fallback.
 [[repositories]]
-id = 'Gradle Plugin Portal'
+id = 'gradle-plugin-portal'
 url = 'https://plugins.gradle.org/m2/'

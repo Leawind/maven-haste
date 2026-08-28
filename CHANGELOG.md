@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Enforced a repository id naming rule (lowercase ASCII letters, digits, underscores, and hyphens).
+
 ## [0.1.1]
 
 ### Added
