@@ -5,43 +5,20 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
 
 use crate::error::AppError;
 
+/// Connection settings applied to every pooled connection. `journal_mode=WAL`
+/// is a persistent database-file property; setting it on each connection keeps
+/// fresh databases in WAL mode without mixing pragmas into schema migrations.
 const CONNECTION_PRAGMAS: &str = r#"
+PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
 "#;
 
-const SCHEMA: &str = r#"
-PRAGMA journal_mode=WAL;
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    path TEXT PRIMARY KEY COLLATE BINARY,
-    group_id TEXT NOT NULL,
-    artifact_id TEXT NOT NULL,
-    version TEXT NOT NULL,
-    file_type TEXT NOT NULL,
-    upstream TEXT NOT NULL,
-    sha1 TEXT,
-    sha256 TEXT,
-    etag TEXT,
-    last_modified TEXT,
-    file_size INTEGER,
-    created_at INTEGER NOT NULL,
-    last_refresh_attempt INTEGER,
-    last_accessed INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS negative_cache (
-    path TEXT NOT NULL COLLATE BINARY,
-    repository_id TEXT NOT NULL,
-    observed_at INTEGER NOT NULL,
-    PRIMARY KEY (path, repository_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_group ON artifacts(group_id);
-CREATE INDEX IF NOT EXISTS idx_group_artifact ON artifacts(group_id, artifact_id);
-CREATE INDEX IF NOT EXISTS idx_artifact_version ON artifacts(artifact_id, version);
-CREATE INDEX IF NOT EXISTS idx_path_nocase ON artifacts(path COLLATE NOCASE);
-"#;
+/// Schema migrations applied in order at startup. Each migration runs in its
+/// own transaction and `PRAGMA user_version` records how many have been
+/// applied, so pending migrations run exactly once. To change the schema,
+/// append a new `.sql` file under `migrations/` and add it to this list.
+const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
 
 const ARTIFACT_COLUMNS: &str = concat!(
     "path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag, ",
@@ -123,13 +100,10 @@ impl Database {
             AppError::Runtime(format!("failed to open SQLite database: {error}"))
         })?;
         connection
-            .interact(|connection| {
-                connection.execute_batch(SCHEMA)?;
-                ensure_schema_columns(connection)
-            })
+            .interact(|connection| run_migrations(connection, MIGRATIONS))
             .await
             .map_err(|error| AppError::Runtime(format!("SQLite worker failed: {error}")))?
-            .map_err(|error| AppError::Runtime(format!("failed to initialize SQLite: {error}")))?;
+            .map_err(|error| AppError::Runtime(format!("failed to migrate SQLite: {error}")))?;
         Ok(())
     }
 
@@ -407,21 +381,16 @@ fn artifact_from_row(row: &rusqlite::Row<'_>) -> Result<ArtifactRecord, rusqlite
     })
 }
 
-fn ensure_schema_columns(connection: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
-    let mut statement = connection.prepare("PRAGMA table_info(artifacts)")?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    if !columns.iter().any(|column| column == "last_accessed") {
-        connection.execute(
-            "ALTER TABLE artifacts ADD COLUMN last_accessed INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-        connection.execute(
-            "UPDATE artifacts SET last_accessed = created_at WHERE last_accessed = 0",
-            [],
-        )?;
+fn run_migrations(
+    connection: &mut rusqlite::Connection,
+    migrations: &[&str],
+) -> Result<(), rusqlite::Error> {
+    let applied: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    for (index, source) in migrations.iter().enumerate().skip(applied.max(0) as usize) {
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(source)?;
+        transaction.pragma_update(None, "user_version", (index + 1) as i64)?;
+        transaction.commit()?;
     }
     Ok(())
 }
@@ -475,7 +444,7 @@ mod tests {
         for connection in [first, second] {
             let (journal_mode, synchronous, busy_timeout) = connection
                 .interact(|connection| {
-                    Ok::<_, deadpool_sqlite::rusqlite::Error>((
+                    Ok::<_, rusqlite::Error>((
                         connection
                             .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
                         connection
@@ -577,35 +546,73 @@ mod tests {
         assert_eq!(database.stats().await.unwrap().negative_entries, 1);
     }
 
+    #[test]
+    fn applies_pending_migrations_in_order_and_skips_applied() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let migrations = [
+            "CREATE TABLE first (id INTEGER PRIMARY KEY);",
+            "ALTER TABLE first ADD COLUMN extra TEXT;",
+        ];
+        run_migrations(&mut connection, &migrations).unwrap();
+        assert_eq!(user_version_for(&connection), 2);
+        connection
+            .execute("INSERT INTO first (id, extra) VALUES (1, 'x')", [])
+            .unwrap();
+
+        run_migrations(&mut connection, &migrations).unwrap();
+        assert_eq!(user_version_for(&connection), 2);
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM first", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn failed_migration_keeps_previous_version_and_rolls_back() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let first = ["CREATE TABLE first (id INTEGER PRIMARY KEY);"];
+        run_migrations(&mut connection, &first).unwrap();
+        assert_eq!(user_version_for(&connection), 1);
+
+        let broken = [
+            "ALTER TABLE first ADD COLUMN extra TEXT;",
+            "THIS IS NOT VALID SQL;",
+        ];
+        assert!(run_migrations(&mut connection, &broken).is_err());
+        assert_eq!(user_version_for(&connection), 1);
+
+        let columns: Vec<String> = {
+            let mut statement = connection.prepare("PRAGMA table_info(first)").unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(columns, vec!["id"]);
+    }
+
+    fn user_version_for(connection: &rusqlite::Connection) -> i64 {
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn adds_last_accessed_to_existing_databases() {
+    async fn fresh_database_ends_at_the_latest_schema_version() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("cache.db");
-        {
-            let connection = deadpool_sqlite::rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE artifacts (
-                        path TEXT PRIMARY KEY,
-                        group_id TEXT NOT NULL,
-                        artifact_id TEXT NOT NULL,
-                        version TEXT NOT NULL,
-                        file_type TEXT NOT NULL,
-                        upstream TEXT NOT NULL,
-                        sha1 TEXT,
-                        sha256 TEXT,
-                        etag TEXT,
-                        last_modified TEXT,
-                        file_size INTEGER,
-                        created_at INTEGER NOT NULL,
-                        last_refresh_attempt INTEGER
-                    );",
-                )
-                .unwrap();
-        }
-
         let database = Database::open(&path).await.unwrap();
         let connection = database.pool.get().await.unwrap();
+        let version = connection
+            .interact(|connection| {
+                connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+
         let columns = connection
             .interact(|connection| {
                 let mut statement = connection.prepare("PRAGMA table_info(artifacts)")?;
@@ -617,5 +624,48 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(columns.iter().any(|column| column == "last_accessed"));
+    }
+
+    #[tokio::test]
+    async fn adopts_an_existing_database_without_changing_data() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("cache.db");
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(include_str!("../migrations/0001_init.sql"))
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, \
+                     upstream, file_size, created_at, last_accessed) \
+                     VALUES ('Com/Example/demo.jar', 'Com.Example', 'demo', '1.0', 'jar', \
+                     'central', 42, 123, 123)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let database = Database::open(&path).await.unwrap();
+        assert_eq!(database.stats().await.unwrap().files, 1);
+        assert_eq!(
+            database
+                .get("Com/Example/demo.jar")
+                .await
+                .unwrap()
+                .unwrap()
+                .file_size,
+            42
+        );
+
+        let connection = database.pool.get().await.unwrap();
+        let version = connection
+            .interact(|connection| {
+                connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
     }
 }
