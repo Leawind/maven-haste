@@ -44,14 +44,10 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 
 ## 配置 Schema
 
-- 配置的 JSON Schema（`maven-haste.schema.json`）由 schemars 从 `src/config.rs` 的配置结构自动生成，不要手写维护；用 `maven-haste config schema -o maven-haste.schema.json` 重新生成。
-- 配置结构体都派生 `JsonSchema`；字段的 `///` 文档注释会成为 schema 的 description，新增字段时同步补充文档注释。
+- 配置的 JSON Schema 由 schemars 从配置结构自动生成，不要手写；修改配置结构后重新生成并随改动提交，一致性测试会在过期时失败。
 - `Duration`（humantime_serde）字段必须加 `#[schemars(schema_with = "crate::config::duration_schema")]`，`server.bind` 加 `socket_addr_schema`，否则无法编译。
-- 修改配置结构后重新生成 schema 并随改动一起提交；`committed_schema_matches_the_generated_schema` 测试会在提交的 schema 过期时失败。
-- 配置文件中的 `$schema` 键被接受并忽略（`Config.schema` 字段），不要报错或删除。
-- `config init`/`config example` 生成无注释的最小配置（仅 `$schema` 与必需键），由 `src/config.rs` 的 `Example` 模型（`schema`/`storage`/`repositories`）经对应格式序列化器（toml/serde_yaml_ng/serde_json）生成，`example_config(ConfigFormat)` 注入版本；三种格式同源，可解析性由 round-trip 测试覆盖；不再有仓库内示例模板文件或手写模板常量。输出统一以恰好一个尾换行 `\n` 结束（`example_config` 内 trim 后补一个）。
-- 语言由路径扩展名决定（`config.rs` 的 `format_for_path`）：`json`→JSON、`yaml`/`yml`→YAML、`toml`→TOML，未知或缺失扩展名报错（不回退 TOML）；`parse_config` 与 `config init` 共用该分发。
-- `$schema` URL 由 `schema_reference()` 用 `env!("CARGO_PKG_VERSION")` 构造为 `vX.Y.Z` tag URL；不要硬编码或推测具体版本号。示例内容改动时改 `Example` 模型字段，新增格式时加一个序列化分支，保持最小模型。
+- 配置中的 `$schema` 键被接受并忽略，不要报错或删除；其 URL 由当前版本自动注入，不要硬编码或推测版本号。
+- 配置语言由文件扩展名决定（json/yaml/yml/toml），未知或缺失扩展名报错，不要回退到 TOML；`config init`/`config example` 生成仅含必需键的最小配置。
 
 ## 提交与拉取请求指南
 
