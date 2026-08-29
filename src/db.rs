@@ -20,14 +20,13 @@ PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
 "#;
 
-/// Schema migrations applied in order at startup. Each migration runs in its
-/// own transaction and `PRAGMA user_version` records how many have been
-/// applied, so pending migrations run exactly once. To change the schema,
-/// append a new `.sql` file under `migrations/` and add it to this list.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../migrations/0001-init.sql"),
-    include_str!("../migrations/0002-request_count.sql"),
-];
+// Schema migrations embedded from the `migrations/` directory at build time
+// (see `build.rs`), which is the single source of truth: adding a migration is
+// just adding a `NUM-NAME.sql` file to that directory. Migrations run in
+// numeric filename order at startup, each in its own transaction, and
+// `PRAGMA user_version` records how many have been applied so pending
+// migrations run exactly once.
+include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
 #[derive(Clone)]
 pub struct Database {
@@ -627,6 +626,15 @@ mod tests {
         assert_eq!(columns, vec!["id"]);
     }
 
+    #[test]
+    fn embeds_migrations_in_numeric_order() {
+        // The migration list is generated from the `migrations/` directory by
+        // build.rs, so this test guards against ordering regressions there.
+        assert_eq!(MIGRATIONS.len(), 2);
+        assert!(MIGRATIONS[0].contains("CREATE TABLE IF NOT EXISTS artifacts"));
+        assert!(MIGRATIONS[1].contains("request_count"));
+    }
+
     fn user_version_for(connection: &rusqlite::Connection) -> i64 {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -668,9 +676,7 @@ mod tests {
         let path = directory.path().join("cache.db");
         {
             let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(include_str!("../migrations/0001-init.sql"))
-                .unwrap();
+            connection.execute_batch(MIGRATIONS[0]).unwrap();
             connection
                 .execute(
                     "INSERT INTO artifacts (path, group_id, artifact_id, version, file_type, \
