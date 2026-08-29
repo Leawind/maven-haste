@@ -102,6 +102,37 @@ fn config_example_prints_the_embedded_commented_template() {
 }
 
 #[test]
+fn config_init_pins_the_schema_reference_to_the_current_version() {
+    let directory = TempDir::new().unwrap();
+    let output = Command::new(binary())
+        .args(["config", "init"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let version = Command::new(binary()).arg("--version").output().unwrap();
+    assert!(version.status.success());
+    let version = String::from_utf8(version.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+
+    let config = std::fs::read_to_string(directory.path().join("maven-haste.toml")).unwrap();
+    let expected = format!(
+        "https://raw.githubusercontent.com/Leawind/maven-haste/v{version}/maven-haste.schema.json"
+    );
+    assert!(
+        config.contains(&expected),
+        "schema reference must be pinned to {version}"
+    );
+    assert!(!config.contains("main/maven-haste.schema.json"));
+    assert!(!config.contains("${VERSION}"));
+}
+
+#[test]
 fn discovers_json_and_yaml_configuration_in_the_working_directory() {
     let directory = TempDir::new().unwrap();
     let bind = unused_address().to_string();
@@ -195,8 +226,8 @@ fn config_schema_prints_a_valid_json_schema() {
     );
 }
 
-fn example_config() -> &'static str {
-    include_str!("../maven-haste.example.toml")
+fn example_config() -> String {
+    include_str!("../maven-haste.example.toml").replace("${VERSION}", env!("CARGO_PKG_VERSION"))
 }
 
 #[test]

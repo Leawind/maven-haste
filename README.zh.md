@@ -64,11 +64,15 @@ maven-haste run
 
 ### 借助 Schema 编辑
 
-描述整个配置的 JSON Schema 位于 [maven-haste.schema.json](maven-haste.schema.json)，也可用 `maven-haste config schema` 输出（`-o <PATH>` 写入文件）。在配置文件中引用 schema 后，编辑器或 AI 工具会自动获得补全、字段说明、默认值和校验提示，无需任何 IDE 设置，与配置文件所在位置无关。选择适合的引用形式：
+描述整个配置的 JSON Schema 位于 [maven-haste.schema.json](maven-haste.schema.json)，也可用 `maven-haste config schema` 输出（`-o <PATH>` 写入文件）。`config init` 生成的模板已默认启用 `$schema` 键，且 URL 固定指向当前发布版本，因此编辑器或 AI 工具无需任何编辑与 IDE 设置即可获得补全、字段说明、默认值和校验提示：
 
-- 在线（推荐）：`https://raw.githubusercontent.com/Leawind/maven-haste/main/maven-haste.schema.json` —— 有网络即可在任何位置使用，无需本地生成。
-- 本地（离线）：先在配置旁生成一次 `maven-haste config schema -o ./maven-haste.schema.json`，引用 `./maven-haste.schema.json`；两者一起移动时依然有效。
-- 绝对路径：指向磁盘上任意位置的副本，例如 `/etc/maven-haste/maven-haste.schema.json`。
+```toml
+"$schema" = "https://raw.githubusercontent.com/Leawind/maven-haste/vX.Y.Z/maven-haste.schema.json"
+```
+
+其中 `X.Y.Z` 为 `maven-haste --version` 显示的版本；`config init` 会自动填入。手工引用时照此替换版本号即可。
+
+URL 指向当前发布版本的 tag 而非 `main`，因此按发行版保持有效（从包含 schema 的发布 tag 起可访问，之后的每个发行版 tag 都能精确匹配）。离线环境可在配置旁生成一次本地副本 `maven-haste config schema -o ./maven-haste.schema.json`，改为引用 `./maven-haste.schema.json`。
 
 在配置文件中写入引用：
 

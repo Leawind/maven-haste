@@ -49,6 +49,7 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 - `Duration`（humantime_serde）字段必须加 `#[schemars(schema_with = "crate::config::duration_schema")]`，`server.bind` 加 `socket_addr_schema`，否则无法编译。
 - 修改配置结构后重新生成 schema 并随改动一起提交；`committed_schema_matches_the_generated_schema` 测试会在提交的 schema 过期时失败。
 - 配置文件中的 `$schema` 键被接受并忽略（`Config.schema` 字段），不要报错或删除。
+- 模板中 `$schema` 行的 URL 写在 `maven-haste.example.toml` 里是 `${VERSION}` 占位符；`config init` 与 `config example` 经 `example_config()` 注入 `env!("CARGO_PKG_VERSION")` 生成 `vX.Y.Z` tag URL。改模板时保持占位符，不要硬编码或推测具体版本号。
 
 ## 提交与拉取请求指南
 

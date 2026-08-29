@@ -64,11 +64,15 @@ Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.to
 
 ### Schema-Assisted Editing
 
-A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). Point a config file at the schema and editors or AI tools pick it up automatically, with no IDE settings, wherever the file lives. Choose the reference that fits:
+A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). `config init` generates a template whose `$schema` key is already active and pinned to the current release, so editors or AI tools pick the schema up with no editing and no IDE settings:
 
-- Online (recommended): `https://raw.githubusercontent.com/Leawind/maven-haste/main/maven-haste.schema.json` — works from anywhere with a network connection, no local generation required.
-- Local (offline): create a copy next to the config once with `maven-haste config schema -o ./maven-haste.schema.json` and reference `./maven-haste.schema.json`; the pair keeps working when moved together.
-- Absolute path: point at a copy stored anywhere on disk, such as `/etc/maven-haste/maven-haste.schema.json`.
+```toml
+"$schema" = "https://raw.githubusercontent.com/Leawind/maven-haste/vX.Y.Z/maven-haste.schema.json"
+```
+
+where `X.Y.Z` is the version printed by `maven-haste --version`; `config init` fills it in automatically.
+
+The pinned URL points at the tag of the current release, not `main`, so it stays valid per released version (the reference becomes reachable once a release tag includes the schema; the tag of every later release is matchable exactly). Offline environments can instead generate a local copy next to the config once with `maven-haste config schema -o ./maven-haste.schema.json` and reference `./maven-haste.schema.json`.
 
 Write the reference into the config file as:
 

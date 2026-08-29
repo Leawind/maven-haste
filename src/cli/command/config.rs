@@ -67,7 +67,7 @@ impl ConfigCommand {
                 Ok(())
             }
             ConfigCommand::Example => {
-                print!("{}", crate::config::EXAMPLE_CONFIG);
+                print!("{}", crate::config::example_config());
                 Ok(())
             }
             ConfigCommand::Schema { output } => {
@@ -129,7 +129,7 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
                 path.display()
             ))
         })?;
-    file.write_all(crate::config::EXAMPLE_CONFIG.as_bytes())
+    file.write_all(crate::config::example_config().as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|error| {
             AppError::Runtime(format!(

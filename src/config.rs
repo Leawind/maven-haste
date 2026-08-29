@@ -19,6 +19,16 @@ const CONFIG_FILE_NAMES: &[&str] = &["maven-haste.json", "maven-haste.toml", "ma
 pub const CONFIG_EXAMPLE_FILE_NAME: &str = "maven-haste.toml";
 pub const EXAMPLE_CONFIG: &str = include_str!("../maven-haste.example.toml");
 
+/// Placeholder in `EXAMPLE_CONFIG` where the current version is injected into
+/// the pinned schema reference.
+const SCHEMA_VERSION_PLACEHOLDER: &str = "${VERSION}";
+
+/// Example configuration with the pinned schema reference injected; the URL
+/// always points at the tag of the current release instead of `main`.
+pub fn example_config() -> String {
+    EXAMPLE_CONFIG.replace(SCHEMA_VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION"))
+}
+
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
     let current_dir = env::current_dir()
         .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
@@ -1591,6 +1601,27 @@ cache_writes = false
         assert_eq!(
             loaded.config.schema.as_deref(),
             Some("./maven-haste.schema.json")
+        );
+    }
+
+    #[test]
+    fn example_config_injects_the_current_version() {
+        let example = example_config();
+        let version = env!("CARGO_PKG_VERSION");
+        let expected = format!(
+            "https://raw.githubusercontent.com/Leawind/maven-haste/v{version}/maven-haste.schema.json"
+        );
+        assert!(
+            example.contains(&expected),
+            "missing pinned schema reference"
+        );
+        assert!(
+            !example.contains("main/maven-haste.schema.json"),
+            "schema reference must not point at main"
+        );
+        assert!(
+            !example.contains("${VERSION}"),
+            "placeholder must be injected"
         );
     }
 }

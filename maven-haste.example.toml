@@ -2,10 +2,14 @@
 # maven-haste.yaml, chosen by the file extension. This template is TOML; the
 # same keys work in the other formats.
 
-# # Optional: let editors and AI tools find the JSON schema of this configuration.
-# # Uncomment one line; the local form needs a schema file next to the config,
-# # created once by `maven-haste config schema -o ./maven-haste.schema.json`.
-# "$schema" = 'https://raw.githubusercontent.com/Leawind/maven-haste/main/maven-haste.schema.json'
+# # Schema hint: the URL below is pinned to the current release version and
+# # works from anywhere with a network connection. `config init` replaces
+# # ${VERSION} with the actual version automatically; when copying this file
+# # manually, substitute the version printed by `maven-haste --version`.
+"$schema" = 'https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json'
+
+# # Offline alternative: create a local copy next to this config once with
+# # `maven-haste config schema -o ./maven-haste.schema.json`, then uncomment:
 # "$schema" = './maven-haste.schema.json'
 
 # # Optional server settings. Omit this table to use 127.0.0.1:8080 and /maven.
