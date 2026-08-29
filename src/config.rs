@@ -628,6 +628,16 @@ fn validate_raw_logging_paths(logging: &LoggingConfig) -> Result<(), ConfigError
 }
 
 fn validate(config: &Config) -> Result<(), ConfigError> {
+    validate_logging(config)?;
+    validate_server(config)?;
+    validate_storage(config)?;
+    validate_upstream(config)?;
+    validate_cache(config)?;
+    validate_circuit_breaker(config)?;
+    validate_repositories(config)
+}
+
+fn validate_logging(config: &Config) -> Result<(), ConfigError> {
     if config.logging.directory().as_os_str().is_empty() {
         return Err(ConfigError::new("logging.directory must not be empty"));
     }
@@ -636,6 +646,10 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     }
     tracing_subscriber::EnvFilter::try_new(&config.logging.filter)
         .map_err(|error| ConfigError::new(format!("invalid logging.filter: {error}")))?;
+    Ok(())
+}
+
+fn validate_server(config: &Config) -> Result<(), ConfigError> {
     if config.server.base_path.is_empty()
         || !config.server.base_path.starts_with('/')
         || config.server.base_path.contains('?')
@@ -662,6 +676,10 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "server.base_path must not be '/' or overlap the reserved '/api' path",
         ));
     }
+    Ok(())
+}
+
+fn validate_storage(config: &Config) -> Result<(), ConfigError> {
     if config.storage.root.as_os_str().is_empty() {
         return Err(ConfigError::new("storage.root must not be empty"));
     }
@@ -676,14 +694,13 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_upstream(config: &Config) -> Result<(), ConfigError> {
     if config.upstream.connect_timeout.is_zero() {
         return Err(ConfigError::new(
             "upstream.connect_timeout must be greater than zero",
-        ));
-    }
-    if config.cache.max_size == Some(0) {
-        return Err(ConfigError::new(
-            "cache.max_size must be greater than zero when specified",
         ));
     }
     if config.upstream.read_timeout.is_zero() {
@@ -716,6 +733,19 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_cache(config: &Config) -> Result<(), ConfigError> {
+    if config.cache.max_size == Some(0) {
+        return Err(ConfigError::new(
+            "cache.max_size must be greater than zero when specified",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_circuit_breaker(config: &Config) -> Result<(), ConfigError> {
     if config.circuit_breaker.failure_threshold == 0 {
         return Err(ConfigError::new(
             "circuit_breaker.failure_threshold must be greater than zero",
@@ -726,6 +756,10 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             "circuit_breaker.recovery_timeout must be greater than zero",
         ));
     }
+    Ok(())
+}
+
+fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
     if config.repositories.is_empty() {
         return Err(ConfigError::new(
             "at least one [[repositories]] entry is required",
