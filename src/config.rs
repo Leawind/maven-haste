@@ -19,10 +19,6 @@ const CONFIG_FILE_NAMES: &[&str] = &["maven-haste.json", "maven-haste.toml", "ma
 /// is written as TOML.
 pub const CONFIG_EXAMPLE_FILE_NAME: &str = "maven-haste.toml";
 
-/// Placeholder in the generated examples where the current version is injected
-/// into the pinned schema reference.
-const SCHEMA_VERSION_PLACEHOLDER: &str = "${VERSION}";
-
 /// Configuration formats supported by file extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigFormat {
@@ -57,28 +53,62 @@ pub fn format_for_path(path: &Path) -> Result<ConfigFormat, ConfigError> {
     }
 }
 
-/// Minimal TOML example: only the pinned schema reference and the required
-/// keys, without comments.
-const EXAMPLE_TOML: &str = "\"$schema\" = 'https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json'\n\n[storage]\nroot = './repository'\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/'\n";
+/// Schema reference pinned to the tag of the current release instead of
+/// `main`; the version comes from the package at compile time.
+fn schema_reference() -> String {
+    format!(
+        "https://raw.githubusercontent.com/Leawind/maven-haste/v{}/maven-haste.schema.json",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
-/// Minimal YAML example: only the pinned schema reference and the required
-/// keys, without comments.
-const EXAMPLE_YAML: &str = "\"$schema\": \"https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json\"\nstorage:\n  root: \"./repository\"\nrepositories:\n  - id: \"central\"\n    url: \"https://repo.example/\"\n";
+/// Minimal example model: only the pinned schema reference and the required
+/// keys, so the serialized output stays minimal and comment-free and
+/// round-trips through the config parser.
+#[derive(Serialize)]
+struct Example {
+    #[serde(rename = "$schema")]
+    schema: String,
+    storage: ExampleStorage,
+    repositories: Vec<ExampleRepository>,
+}
 
-/// Minimal JSON example: only the pinned schema reference and the required
-/// keys, without comments.
-const EXAMPLE_JSON: &str = "{\n  \"$schema\": \"https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json\",\n  \"storage\": {\n    \"root\": \"./repository\"\n  },\n  \"repositories\": [\n    {\n      \"id\": \"central\",\n      \"url\": \"https://repo.example/\"\n    }\n  ]\n}\n";
+#[derive(Serialize)]
+struct ExampleStorage {
+    root: String,
+}
 
-/// Minimal example configuration in the given format with the pinned schema
-/// reference injected; the URL always points at the tag of the current release
-/// instead of `main`.
+#[derive(Serialize)]
+struct ExampleRepository {
+    id: String,
+    url: String,
+}
+
+/// Minimal example configuration in the given format, generated from the same
+/// model for every format; the schema reference is pinned to the current
+/// release instead of `main`.
 pub fn example_config(format: ConfigFormat) -> String {
-    let template = match format {
-        ConfigFormat::Toml => EXAMPLE_TOML,
-        ConfigFormat::Yaml => EXAMPLE_YAML,
-        ConfigFormat::Json => EXAMPLE_JSON,
+    let example = Example {
+        schema: schema_reference(),
+        storage: ExampleStorage {
+            root: "./repository".to_owned(),
+        },
+        repositories: vec![ExampleRepository {
+            id: "central".to_owned(),
+            url: "https://repo.example/".to_owned(),
+        }],
     };
-    template.replace(SCHEMA_VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION"))
+    match format {
+        ConfigFormat::Toml => {
+            toml::to_string_pretty(&example).expect("a static example serializes to TOML")
+        }
+        ConfigFormat::Yaml => {
+            serde_yaml_ng::to_string(&example).expect("a static example serializes to YAML")
+        }
+        ConfigFormat::Json => {
+            serde_json::to_string_pretty(&example).expect("a static example serializes to JSON")
+        }
+    }
 }
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {

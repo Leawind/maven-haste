@@ -49,9 +49,9 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 - `Duration`（humantime_serde）字段必须加 `#[schemars(schema_with = "crate::config::duration_schema")]`，`server.bind` 加 `socket_addr_schema`，否则无法编译。
 - 修改配置结构后重新生成 schema 并随改动一起提交；`committed_schema_matches_the_generated_schema` 测试会在提交的 schema 过期时失败。
 - 配置文件中的 `$schema` 键被接受并忽略（`Config.schema` 字段），不要报错或删除。
-- `config init`/`config example` 生成无注释的最小配置（仅 `$schema` 与必需键），模板是 `src/config.rs` 内的 `EXAMPLE_TOML`/`EXAMPLE_YAML`/`EXAMPLE_JSON` 常量，`example_config(ConfigFormat)` 注入版本；不再有仓库内示例模板文件。
+- `config init`/`config example` 生成无注释的最小配置（仅 `$schema` 与必需键），由 `src/config.rs` 的 `Example` 模型（`schema`/`storage`/`repositories`）经对应格式序列化器（toml/serde_yaml_ng/serde_json）生成，`example_config(ConfigFormat)` 注入版本；三种格式同源，可解析性由 round-trip 测试覆盖；不再有仓库内示例模板文件或手写模板常量。
 - 语言由路径扩展名决定（`config.rs` 的 `format_for_path`）：`json`→JSON、`yaml`/`yml`→YAML、`toml`→TOML，未知或缺失扩展名报错（不回退 TOML）；`parse_config` 与 `config init` 共用该分发。
-- 模板中 `$schema` 行的 URL 是 `${VERSION}` 占位符，经 `env!("CARGO_PKG_VERSION")` 注入为 `vX.Y.Z` tag URL。改模板时保持占位符，不要硬编码或推测具体版本号。
+- `$schema` URL 由 `schema_reference()` 用 `env!("CARGO_PKG_VERSION")` 构造为 `vX.Y.Z` tag URL；不要硬编码或推测具体版本号。示例内容改动时改 `Example` 模型字段，新增格式时加一个序列化分支，保持最小模型。
 
 ## 提交与拉取请求指南
 
