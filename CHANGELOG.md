@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file.
 - Added a per-artifact request counter to the cache database; every client request increments it for the requested path, and it is recorded but not used yet.
 - Added JSON, TOML, and YAML configuration support; without `--config`, maven-haste discovers `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` and fails when several formats exist instead of choosing one.
 - Added a JSON schema for the configuration; editors and AI tools can use `maven-haste.schema.json` for hints and validation, `maven-haste config schema` prints or writes it, and the `$schema` key is accepted in any format.
+- Added optional `$schema` lines to the config template and a `config init` hint, so editors and AI tools pick up the schema with zero setup whether the config is edited online or beside the schema.
 
 ## [0.1.1]
 

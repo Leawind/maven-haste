@@ -43,6 +43,9 @@ impl ConfigCommand {
                 );
                 println!("next: maven-haste config check --config {}", path.display());
                 println!("then: maven-haste run --config {}", path.display());
+                println!(
+                    "then (optional): maven-haste config schema -o ./maven-haste.schema.json  # IDE and AI tool hints"
+                );
                 Ok(())
             }
             ConfigCommand::Check => {

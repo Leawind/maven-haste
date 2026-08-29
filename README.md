@@ -64,13 +64,19 @@ Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.to
 
 ### Schema-Assisted Editing
 
-A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). Editors, linters, and AI tools can use it for completion, descriptions, defaults, and validation. Pin a config file to the schema with:
+A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). Point a config file at the schema and editors or AI tools pick it up automatically, with no IDE settings, wherever the file lives. Choose the reference that fits:
 
-- JSON: `"$schema": "./maven-haste.schema.json"`
-- YAML: `# yaml-language-server: $schema=./maven-haste.schema.json`
-- TOML: `"$schema" = "./maven-haste.schema.json"` (recognized by the Even Better TOML VS Code extension)
+- Online (recommended): `https://raw.githubusercontent.com/Leawind/maven-haste/main/maven-haste.schema.json` — works from anywhere with a network connection, no local generation required.
+- Local (offline): create a copy next to the config once with `maven-haste config schema -o ./maven-haste.schema.json` and reference `./maven-haste.schema.json`; the pair keeps working when moved together.
+- Absolute path: point at a copy stored anywhere on disk, such as `/etc/maven-haste/maven-haste.schema.json`.
 
-maven-haste accepts and ignores the `$schema` key in any format. The schema is generated from the Rust configuration types (schemars), so after changing the config structure, regenerate it with `maven-haste config schema -o maven-haste.schema.json` and commit it together with the change; a unit test fails when the committed schema is out of date.
+Write the reference into the config file as:
+
+- JSON: `"$schema": "<reference>"` at the top level.
+- YAML: `$schema: <reference>` at the top level, or `# yaml-language-server: $schema=<reference>` as the first line.
+- TOML: `"$schema" = "<reference>"` at the top level; the quotes are required by TOML and the Even Better TOML extension activates on this key.
+
+maven-haste accepts and ignores the `$schema` key in any format, so annotated configs still pass `config check`. The schema is generated from the Rust configuration types (schemars): after changing the config structure, regenerate it with `maven-haste config schema -o maven-haste.schema.json` and commit it together with the change; a unit test fails when the committed schema is out of date.
 
 ### Upstream Routing
 
