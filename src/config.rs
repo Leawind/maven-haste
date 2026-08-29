@@ -98,7 +98,7 @@ pub fn example_config(format: ConfigFormat) -> String {
             url: "https://repo.example/".to_owned(),
         }],
     };
-    match format {
+    let serialized = match format {
         ConfigFormat::Toml => {
             toml::to_string_pretty(&example).expect("a static example serializes to TOML")
         }
@@ -108,7 +108,9 @@ pub fn example_config(format: ConfigFormat) -> String {
         ConfigFormat::Json => {
             serde_json::to_string_pretty(&example).expect("a static example serializes to JSON")
         }
-    }
+    };
+    let trimmed = serialized.trim_end_matches('\n');
+    format!("{trimmed}\n")
 }
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
@@ -990,6 +992,14 @@ mod tests {
             );
             assert!(!example.contains("${VERSION}"), "{format:?}");
             assert!(!example.contains("# "), "comments in {format:?}");
+            assert!(
+                example.ends_with('\n'),
+                "missing trailing newline in {format:?}"
+            );
+            assert!(
+                !example.ends_with("\n\n"),
+                "more than one trailing newline in {format:?}"
+            );
         }
 
         let toml_value: toml::Value = toml::from_str(&example_config(ConfigFormat::Toml)).unwrap();
