@@ -1,3 +1,7 @@
+# maven-haste reads configuration from maven-haste.json, maven-haste.toml, or
+# maven-haste.yaml, chosen by the file extension. This template is TOML; the
+# same keys work in the other formats.
+
 # # Optional server settings. Omit this table to use 127.0.0.1:8080 and /maven.
 # [server]
 # # Address on which Maven Haste accepts HTTP requests.

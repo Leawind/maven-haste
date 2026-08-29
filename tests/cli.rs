@@ -101,6 +101,81 @@ fn config_example_prints_the_embedded_commented_template() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), example_config());
 }
 
+#[test]
+fn discovers_json_and_yaml_configuration_in_the_working_directory() {
+    let directory = TempDir::new().unwrap();
+    let bind = unused_address().to_string();
+    let json = directory.path().join("maven-haste.json");
+    std::fs::write(
+        &json,
+        format!(
+            "{{\"server\": {{\"bind\": \"{bind}\"}}, \"storage\": {{\"root\": \"./repository\"}}, \
+             \"repositories\": [{{\"id\": \"excluded\", \"url\": \"http://127.0.0.1:9/\", \
+             \"rules\": [\"!**\"]}}]}}"
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(binary())
+        .args(["config", "check"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("configuration is valid"), "{stdout}");
+    assert!(stdout.contains("maven-haste.json"), "{stdout}");
+
+    std::fs::remove_file(&json).unwrap();
+    let yaml = directory.path().join("maven-haste.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server:\n  bind: '{bind}'\nstorage:\n  root: ./repository\nrepositories:\n  - id: excluded\n    url: http://127.0.0.1:9/\n    rules:\n      - '!**'\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new(binary())
+        .args(["config", "check"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("configuration is valid"), "{stdout}");
+    assert!(stdout.contains("maven-haste.yaml"), "{stdout}");
+}
+
+#[test]
+fn multiple_default_configurations_are_rejected() {
+    let directory = TempDir::new().unwrap();
+    std::fs::write(
+        directory.path().join("maven-haste.json"),
+        "{\"server\": {\"bind\": \"127.0.0.1:9\"}, \"storage\": {\"root\": \"./repository\"}, \
+         \"repositories\": [{\"id\": \"excluded\", \"url\": \"http://127.0.0.1:9/\", \
+         \"rules\": [\"!**\"]}]}",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("maven-haste.toml"),
+        "[server]\nbind = '127.0.0.1:9'\n\n[storage]\nroot = './repository'\n\n\
+         [[repositories]]\nid = 'excluded'\nurl = 'http://127.0.0.1:9/'\nrules = ['!**']\n",
+    )
+    .unwrap();
+
+    let output = Command::new(binary())
+        .args(["config", "check"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("multiple configuration files found"),
+        "{stderr}"
+    );
+}
+
 fn example_config() -> &'static str {
     include_str!("../maven-haste.example.toml")
 }

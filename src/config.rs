@@ -11,13 +11,112 @@ use url::Url;
 use crate::cli::Cli;
 use crate::error::ConfigError;
 
-const CONFIG_FILE_NAME: &str = "maven-haste.toml";
+/// Configuration file names probed per directory, one for each supported format.
+const CONFIG_FILE_NAMES: &[&str] = &["maven-haste.json", "maven-haste.toml", "maven-haste.yaml"];
+
+/// File name used by `config init`; the commented example is written as TOML.
+pub const CONFIG_EXAMPLE_FILE_NAME: &str = "maven-haste.toml";
 pub const EXAMPLE_CONFIG: &str = include_str!("../maven-haste.example.toml");
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
     let current_dir = env::current_dir()
         .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
-    Ok(current_dir.join(CONFIG_FILE_NAME))
+    Ok(current_dir.join(CONFIG_EXAMPLE_FILE_NAME))
+}
+
+/// Canonicalizes a configuration path so the reported path is stable.
+fn canonical_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    dunce::canonicalize(path).map_err(|error| {
+        ConfigError::new(format!(
+            "configuration file {} is unavailable: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    let current_dir = env::current_dir()
+        .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
+    if let Some(path) = explicit {
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            current_dir.join(path)
+        };
+        return canonical_config_path(&path);
+    }
+    let config_dir = BaseDirs::new().map(|base_dirs| base_dirs.config_dir().join("maven-haste"));
+    find_default_config(&current_dir, config_dir.as_deref())
+}
+
+/// Finds the default configuration by probing each supported file name, first
+/// in the working directory and then in the user configuration directory.
+/// Several present formats in one directory are an error instead of a choice.
+fn find_default_config(
+    current_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    let mut directories = vec![current_dir.to_owned()];
+    if let Some(config_dir) = config_dir {
+        directories.push(config_dir.to_owned());
+    }
+
+    let mut attempted = Vec::new();
+    for directory in &directories {
+        let mut found = Vec::new();
+        for name in CONFIG_FILE_NAMES {
+            let path = directory.join(name);
+            attempted.push(path.clone());
+            if path.is_file() {
+                found.push(path);
+            }
+        }
+        match found.len() {
+            0 => continue,
+            1 => return canonical_config_path(&found[0]),
+            _ => {
+                let paths = found
+                    .iter()
+                    .map(|path| format!("  - {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(ConfigError::new(format!(
+                    "multiple configuration files found in {}:\n{paths}\n\
+                     keep only one format or pass --config <PATH>",
+                    directory.display()
+                )));
+            }
+        }
+    }
+
+    let paths = attempted
+        .iter()
+        .map(|path| format!("  - {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(ConfigError::new(format!(
+        "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
+    )))
+}
+
+/// Parses configuration source according to the file extension; an unknown or
+/// missing extension is parsed as TOML for backwards compatibility.
+fn parse_config(source: &str, path: &Path) -> Result<Config, ConfigError> {
+    let parse_error = |message: &str| {
+        ConfigError::new(format!(
+            "failed to parse configuration {}: {message}",
+            path.display()
+        ))
+    };
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("json") => {
+            serde_json::from_str(source).map_err(|error| parse_error(&error.to_string()))
+        }
+        Some("yaml") => {
+            serde_yaml_ng::from_str(source).map_err(|error| parse_error(&error.to_string()))
+        }
+        _ => toml::from_str(source).map_err(|error| parse_error(&error.to_string())),
+    }
 }
 
 #[derive(Debug)]
@@ -256,55 +355,6 @@ impl Config {
             }
         }
 
-        fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
-            fn canonical_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
-                dunce::canonicalize(path).map_err(|error| {
-                    ConfigError::new(format!(
-                        "configuration file {} is unavailable: {error}",
-                        path.display()
-                    ))
-                })
-            }
-
-            let current_dir = env::current_dir().map_err(|error| {
-                ConfigError::new(format!("failed to read current directory: {error}"))
-            })?;
-
-            if let Some(path) = explicit {
-                let path = if path.is_absolute() {
-                    path.to_owned()
-                } else {
-                    current_dir.join(path)
-                };
-                return canonical_config_path(&path);
-            }
-
-            let mut attempted = vec![current_dir.join(CONFIG_FILE_NAME)];
-            if let Some(base_dirs) = BaseDirs::new() {
-                attempted.push(
-                    base_dirs
-                        .config_dir()
-                        .join("maven-haste")
-                        .join(CONFIG_FILE_NAME),
-                );
-            }
-
-            for path in &attempted {
-                if path.is_file() {
-                    return canonical_config_path(path);
-                }
-            }
-
-            let paths = attempted
-                .iter()
-                .map(|path| format!("  - {}", path.display()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(ConfigError::new(format!(
-                "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
-            )))
-        }
-
         let path = locate(cli.config.as_deref())?;
         let source = std::fs::read_to_string(&path).map_err(|error| {
             ConfigError::new(format!(
@@ -312,12 +362,7 @@ impl Config {
                 path.display()
             ))
         })?;
-        let mut config: Config = toml::from_str(&source).map_err(|error| {
-            ConfigError::new(format!(
-                "failed to parse configuration {}: {error}",
-                path.display()
-            ))
-        })?;
+        let mut config: Config = parse_config(&source, &path)?;
 
         validate_raw_storage_paths(&config.storage)?;
         validate_raw_logging_paths(&config.logging)?;
@@ -611,13 +656,130 @@ mod tests {
     use super::*;
 
     fn write_config(directory: &TempDir, body: &str) -> PathBuf {
-        let path = directory.path().join(CONFIG_FILE_NAME);
+        let path = directory.path().join("maven-haste.toml");
         fs::write(&path, body).unwrap();
         path
     }
 
     fn cli(path: &Path) -> Cli {
         Cli::try_parse_from(["maven-haste", "run", "--config", path.to_str().unwrap()]).unwrap()
+    }
+
+    #[test]
+    fn loads_a_json_configuration() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("maven-haste.json");
+        fs::write(
+            &path,
+            r#"{
+  "storage": {"root": "repository"},
+  "repositories": [{"id": "central", "url": "https://repo.example/maven2"}]
+}"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load(&cli(&path)).unwrap();
+        assert_eq!(
+            loaded.config.storage.root,
+            directory.path().join("repository")
+        );
+        assert_eq!(
+            loaded.config.repositories[0].url.as_str(),
+            "https://repo.example/maven2/"
+        );
+    }
+
+    #[test]
+    fn loads_a_yaml_configuration() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("maven-haste.yaml");
+        fs::write(
+            &path,
+            "storage:\n  root: repository\nrepositories:\n  - id: central\n    url: https://repo.example/maven2\n",
+        )
+        .unwrap();
+
+        let loaded = Config::load(&cli(&path)).unwrap();
+        assert_eq!(
+            loaded.config.storage.root,
+            directory.path().join("repository")
+        );
+        assert_eq!(
+            loaded.config.repositories[0].url.as_str(),
+            "https://repo.example/maven2/"
+        );
+    }
+
+    #[test]
+    fn parses_an_explicit_configuration_with_unknown_extension_as_toml() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("maven-haste.conf");
+        fs::write(
+            &path,
+            "[storage]\nroot = 'repository'\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/maven2'\n",
+        )
+        .unwrap();
+
+        let loaded = Config::load(&cli(&path)).unwrap();
+        assert_eq!(loaded.config.repositories[0].id, "central");
+    }
+
+    #[test]
+    fn finds_a_single_default_configuration_in_any_format() {
+        let directory = TempDir::new().unwrap();
+        let candidates = [
+            (
+                "maven-haste.json",
+                "{\"storage\":{\"root\":\"repository\"},\"repositories\":[]}",
+            ),
+            (
+                "maven-haste.toml",
+                "[storage]\nroot = 'repository'\n\n[[repositories]]\n",
+            ),
+            (
+                "maven-haste.yaml",
+                "storage:\n  root: repository\nrepositories: []\n",
+            ),
+        ];
+        for (name, body) in candidates {
+            let path = directory.path().join(name);
+            fs::write(&path, body).unwrap();
+            assert_eq!(
+                find_default_config(directory.path(), None).unwrap(),
+                dunce::canonicalize(&path).unwrap()
+            );
+            fs::remove_file(&path).unwrap();
+        }
+
+        let error = find_default_config(directory.path(), None).unwrap_err();
+        assert!(
+            error.to_string().contains("configuration file not found"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_default_configurations_in_one_directory() {
+        let directory = TempDir::new().unwrap();
+        fs::write(
+            directory.path().join("maven-haste.json"),
+            "{\"storage\":{\"root\":\"repository\"},\"repositories\":[]}",
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("maven-haste.toml"),
+            "[storage]\nroot = 'repository'\n\n[[repositories]]\n",
+        )
+        .unwrap();
+
+        let error = find_default_config(directory.path(), None).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("multiple configuration files found"),
+            "{message}"
+        );
+        assert!(message.contains("maven-haste.json"), "{message}");
+        assert!(message.contains("maven-haste.toml"), "{message}");
     }
 
     #[test]

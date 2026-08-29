@@ -38,7 +38,7 @@ maven-haste 以单个命令行工具的形式发布。
 maven-haste config init [PATH]
 ```
 
-使用当前工作目录下的配置文件 `maven-haste.toml` 启动
+使用当前工作目录下的配置启动；`maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml` 会被自动发现
 
 ```bash
 maven-haste run
@@ -60,7 +60,7 @@ maven-haste run
 4. 按网络环境调整缓存 TTL、上游超时、并发和熔断参数。
 5. 用 `maven-haste config check -c <配置文件>` 验证配置和存储目录，再启动服务。
 
-程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.toml`。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入 TOML 文件。
+程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定。启动时可以用全局参数临时覆盖监听地址或启用调试日志；
 
 ### 上游路由
 
