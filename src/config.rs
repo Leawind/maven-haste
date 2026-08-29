@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use directories::BaseDirs;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -119,15 +120,42 @@ fn parse_config(source: &str, path: &Path) -> Result<Config, ConfigError> {
     }
 }
 
+/// Builds the JSON schema for humantime-formatted duration values (`5m`,
+/// `1h30m`, `30d`). Humantime also accepts looser natural-language forms, so
+/// no pattern is enforced; the example guides editors instead.
+pub fn duration_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "string",
+        "description": "A human-readable duration such as `5m`, `1h30m`, or `30d`.",
+        "examples": ["5m"]
+    })
+}
+
+/// Builds the JSON schema for listen addresses written as `host:port`.
+pub fn socket_addr_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "string",
+        "pattern": "^(\\[[0-9a-fA-F:]+\\]|[0-9.]+):\\d+$",
+        "examples": ["127.0.0.1:8080"]
+    })
+}
+
 #[derive(Debug)]
 pub struct LoadedConfig {
     pub path: PathBuf,
     pub config: Config,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Everything maven-haste needs to run: server, storage, cache, upstream,
+/// circuit breaker, logging, and repository settings.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "Maven Haste Configuration")]
 pub struct Config {
+    /// Editor and linter hint that locates the JSON schema describing this
+    /// configuration; maven-haste accepts and ignores this key.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     #[serde(default)]
     pub server: ServerConfig,
     pub storage: StorageConfig,
@@ -142,14 +170,22 @@ pub struct Config {
     pub repositories: Vec<RepositoryConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Optional JSON Lines file logging settings.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
+    /// Write JSON Lines logs to daily files.
     pub enabled: bool,
+    /// Directory for daily JSON Lines log files; defaults to
+    /// `<root>/.maven-haste/logs`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
+    /// Retention period for completed daily log files.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub retention: Duration,
+    /// Rust EnvFilter expression for file output; see
+    /// <https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives>.
     pub filter: String,
 }
 
@@ -172,10 +208,16 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Optional server settings; omit this table to use `127.0.0.1:8080` and
+/// `/maven`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
+    /// Address on which Maven Haste accepts HTTP requests.
+    #[schemars(schema_with = "crate::config::socket_addr_schema")]
     pub bind: SocketAddr,
+    /// URL prefix for the local Maven repository endpoint. The root path and
+    /// `/api` namespace are reserved for Maven Haste itself.
     pub base_path: String,
 }
 
@@ -188,12 +230,21 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Storage layout: the cache root plus the internal directories, all resolved
+/// relative to the configuration file's directory.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
+    /// Directory used for cached artifacts, temporary downloads, and the
+    /// SQLite database. Relative paths are resolved against the configuration
+    /// file's directory.
     pub root: PathBuf,
+    /// Optional directory for temporary downloads; defaults to
+    /// `<root>/.maven-haste/tmp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tmp_dir: Option<PathBuf>,
+    /// Optional SQLite database path; defaults to
+    /// `<root>/.maven-haste/cache.db`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     db_path: Option<PathBuf>,
 }
@@ -222,15 +273,25 @@ impl StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Optional cache settings; omit this table to use the defaults below.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
-    /// Maximum cached artifact bytes. No limit is applied when omitted.
+    /// Optional maximum number of cached artifact bytes; omit to retain
+    /// cached files indefinitely.
     pub max_size: Option<u64>,
+    /// How long mutable metadata may be served before a background refresh
+    /// starts.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub metadata_ttl: Duration,
+    /// How long a confirmed 404 is remembered for one path in one upstream
+    /// repository.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub negative_ttl: Duration,
+    /// Serve the last cached mutable file when refreshing it encounters an
+    /// upstream failure.
     pub serve_stale_on_error: bool,
 }
 
@@ -245,16 +306,30 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Optional upstream settings; omit this table to use the defaults below.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpstreamConfig {
+    /// Maximum time allowed to establish a connection to an upstream
+    /// repository.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub connect_timeout: Duration,
+    /// Maximum idle time while reading each upstream response body; this is
+    /// not a limit on the total download time of a large file.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub read_timeout: Duration,
+    /// Maximum number of simultaneous requests across all upstream
+    /// repositories.
     pub max_concurrency: usize,
+    /// Per-repository concurrency limit when a repository does not override
+    /// it.
     pub default_repository_max_concurrency: usize,
+    /// Admit one queued cache refresh after this many foreground downloads
+    /// while both are waiting.
     pub foreground_priority_burst: usize,
+    /// Optional global upstream proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Url>,
 }
@@ -272,11 +347,18 @@ impl Default for UpstreamConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Optional circuit-breaker settings; omit this table to use the defaults
+/// below.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CircuitBreakerConfig {
+    /// Consecutive upstream failures required before temporarily skipping
+    /// that repository.
     pub failure_threshold: u32,
+    /// Time to wait before probing an upstream repository after its circuit
+    /// opens.
     #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
     pub recovery_timeout: Duration,
 }
 
@@ -289,17 +371,33 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// One upstream Maven repository; at least one entry is required.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
+    /// Required unique repository id used for routing, circuit breaking,
+    /// logging, and statistics; use only lowercase letters, digits,
+    /// underscores, and hyphens.
     pub id: String,
+    /// Upstream repository base URL.
     pub url: Url,
+    /// Optional per-repository proxy switch: `true` uses `[upstream].proxy`,
+    /// `false` connects directly, omitted follows `[upstream].proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_proxy: Option<bool>,
+    /// Optional per-repository override of
+    /// `default_repository_max_concurrency`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
+    /// Optional ordered request-path glob rules; the first matching rule
+    /// decides participation. Prefix a rule with `!` to exclude it; `*`
+    /// matches within one path segment and `**` may match across path
+    /// separators.
     #[serde(default)]
     pub rules: Vec<String>,
+    /// Per-repository cache switch; defaults to `true`. `false` stops writing
+    /// new artifacts, checksums, and negative entries from this repository:
+    /// previously cached content is still served and nothing is deleted.
     #[serde(default = "default_true")]
     pub cache_writes: bool,
 }
@@ -1430,5 +1528,69 @@ cache_writes = false
 
         let cli1 = &cli(&path);
         assert!(!Config::load(cli1).unwrap().config.repositories[0].cache_writes);
+    }
+
+    #[test]
+    fn committed_schema_matches_the_generated_schema() {
+        // `maven-haste.schema.json` is generated by `config schema`; this test
+        // guards against forgetting to regenerate it after a config change.
+        let generated = serde_json::to_value(schemars::schema_for!(Config)).unwrap();
+        let committed: serde_json::Value =
+            serde_json::from_str(include_str!("../maven-haste.schema.json")).unwrap();
+        assert_eq!(generated, committed);
+    }
+
+    #[test]
+    fn schema_describes_key_validation_rules() {
+        let schema = serde_json::to_value(schemars::schema_for!(Config)).unwrap();
+        let root = schema.as_object().unwrap();
+        assert_eq!(root["additionalProperties"], serde_json::Value::Bool(false));
+        assert_eq!(
+            root["required"],
+            serde_json::json!(["storage", "repositories"])
+        );
+        let defs = root["$defs"].as_object().unwrap();
+        let server = defs["ServerConfig"].as_object().unwrap();
+        assert!(server["properties"]["bind"]["pattern"].is_string());
+        assert_eq!(
+            server["properties"]["bind"]["examples"],
+            serde_json::json!(["127.0.0.1:8080"])
+        );
+        assert_eq!(
+            defs["CacheConfig"]["properties"]["metadata_ttl"]["type"],
+            serde_json::json!("string")
+        );
+        assert_eq!(
+            defs["RepositoryConfig"]["required"],
+            serde_json::json!(["id", "url"])
+        );
+    }
+
+    #[test]
+    fn accepts_a_schema_key_in_json_and_toml() {
+        let directory = TempDir::new().unwrap();
+        let json = directory.path().join("maven-haste.json");
+        fs::write(
+            &json,
+            r#"{"$schema": "./maven-haste.schema.json", "storage": {"root": "repository"}, "repositories": [{"id": "central", "url": "https://repo.example/maven2"}]}"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load(&cli(&json)).unwrap();
+        assert_eq!(
+            loaded.config.schema.as_deref(),
+            Some("./maven-haste.schema.json")
+        );
+        assert_eq!(loaded.config.repositories[0].id, "central");
+
+        let toml = write_config(
+            &directory,
+            "\"$schema\" = './maven-haste.schema.json'\n[storage]\nroot = 'repository'\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/maven2'\n",
+        );
+        let loaded = Config::load(&cli(&toml)).unwrap();
+        assert_eq!(
+            loaded.config.schema.as_deref(),
+            Some("./maven-haste.schema.json")
+        );
     }
 }

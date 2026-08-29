@@ -43,3 +43,9 @@ impl From<toml::ser::Error> for AppError {
         Self::Runtime(error.to_string())
     }
 }
+
+impl From<serde_json::Error> for AppError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Runtime(error.to_string())
+    }
+}

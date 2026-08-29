@@ -176,6 +176,25 @@ fn multiple_default_configurations_are_rejected() {
     );
 }
 
+#[test]
+fn config_schema_prints_a_valid_json_schema() {
+    let output = Command::new(binary())
+        .args(["config", "schema"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert!(schema["$defs"].is_object());
+    assert_eq!(
+        schema["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+}
+
 fn example_config() -> &'static str {
     include_str!("../maven-haste.example.toml")
 }

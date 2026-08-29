@@ -233,6 +233,7 @@ async fn newer_case_variant_replaces_old_database_identity() {
     let directory = TempDir::new().unwrap();
     let storage = StorageConfig::resolved(directory.path().join("repository"));
     let config = Config {
+        schema: None,
         server: ServerConfig::default(),
         storage,
         cache: CacheConfig::default(),
@@ -1436,6 +1437,7 @@ async fn test_app_with_cache(
 ) -> (Router, Database) {
     let storage = StorageConfig::resolved(directory.path().join("repository"));
     let config = Config {
+        schema: None,
         server: ServerConfig::default(),
         storage,
         cache: cache_config,

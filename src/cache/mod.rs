@@ -525,6 +525,7 @@ mod tests {
         let storage = StorageConfig::resolved(directory.path().join("repository"));
         fs::create_dir_all(storage.tmp_dir()).await.unwrap();
         let config = Config {
+            schema: None,
             server: ServerConfig::default(),
             storage: storage.clone(),
             cache: CacheConfig {

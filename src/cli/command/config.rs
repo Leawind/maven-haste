@@ -22,6 +22,13 @@ pub enum ConfigCommand {
 
     /// Print the commented example configuration
     Example,
+
+    /// Write the JSON schema describing the configuration
+    Schema {
+        /// Destination path; defaults to standard output
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
 }
 
 impl ConfigCommand {
@@ -58,6 +65,33 @@ impl ConfigCommand {
             }
             ConfigCommand::Example => {
                 print!("{}", crate::config::EXAMPLE_CONFIG);
+                Ok(())
+            }
+            ConfigCommand::Schema { output } => {
+                let schema =
+                    serde_json::to_string_pretty(&schemars::schema_for!(crate::config::Config))?;
+                match output {
+                    Some(path) => {
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(path)
+                            .map_err(|error| {
+                                AppError::Runtime(format!(
+                                    "failed to write configuration schema: {error}"
+                                ))
+                            })?;
+                        file.write_all(schema.as_bytes())
+                            .and_then(|()| file.sync_all())
+                            .map_err(|error| {
+                                AppError::Runtime(format!(
+                                    "failed to write configuration schema: {error}"
+                                ))
+                            })?;
+                    }
+                    None => print!("{schema}"),
+                }
                 Ok(())
             }
         }
