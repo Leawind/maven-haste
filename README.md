@@ -50,7 +50,7 @@ Use `-c --config <PATH>` to specify a config file path.
 
 > [!TIP]
 >
-> See [maven-haste.example.toml](https://github.com/Leawind/maven-haste/blob/main/maven-haste.example.toml) for a full template and descriptions of all options.
+> Run `maven-haste config init [PATH]` to create a minimal configuration with only the required keys; the format (TOML, YAML, or JSON) follows the extension of `PATH`, defaulting to `maven-haste.toml`. Field descriptions live in the JSON schema listed below.
 
 Recommended steps:
 
@@ -60,11 +60,11 @@ Recommended steps:
 4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
 5. Run `maven-haste config check -c <config>` to validate the config and storage directory before starting.
 
-Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
+Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension (`json`, `yaml`, `yml`, or `toml`); an unsupported or missing extension is an error rather than a TOML fallback. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
 
 ### Schema-Assisted Editing
 
-A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). `config init` generates a template whose `$schema` key is already active and pinned to the current release, so editors or AI tools pick the schema up with no editing and no IDE settings:
+A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). `config init` generates a minimal config in the format of the target path's extension, and its `$schema` key is already active and pinned to the current release, so editors or AI tools pick the schema up with no editing and no IDE settings:
 
 ```toml
 "$schema" = "https://raw.githubusercontent.com/Leawind/maven-haste/vX.Y.Z/maven-haste.schema.json"

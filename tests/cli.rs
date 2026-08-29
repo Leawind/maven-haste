@@ -60,7 +60,7 @@ fn invalid_rust_log_is_reported_instead_of_ignored() {
 }
 
 #[test]
-fn config_init_creates_a_commented_example_without_overwriting() {
+fn config_init_creates_a_minimal_example_without_overwriting() {
     let directory = TempDir::new().unwrap();
     let expected = example_config();
     let first = Command::new(binary())
@@ -91,7 +91,7 @@ fn config_init_creates_a_commented_example_without_overwriting() {
 }
 
 #[test]
-fn config_example_prints_the_embedded_commented_template() {
+fn config_example_prints_a_minimal_toml_configuration() {
     let output = Command::new(binary())
         .args(["config", "example"])
         .output()
@@ -130,6 +130,69 @@ fn config_init_pins_the_schema_reference_to_the_current_version() {
     );
     assert!(!config.contains("main/maven-haste.schema.json"));
     assert!(!config.contains("${VERSION}"));
+}
+
+#[test]
+fn config_init_generates_the_format_of_the_target_extension() {
+    let directory = TempDir::new().unwrap();
+    for name in [
+        "maven-haste.toml",
+        "maven-haste.json",
+        "maven-haste.yaml",
+        "maven-haste.yml",
+    ] {
+        let output = Command::new(binary())
+            .args(["config", "init"])
+            .arg(name)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "init {name}");
+
+        let config_path = directory.path().join(name);
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            config.contains("https://raw.githubusercontent.com/Leawind/maven-haste/v"),
+            "{name}"
+        );
+        assert!(!config.contains("${VERSION}"), "{name}");
+        assert!(!config.contains("#"), "{name} must not contain comments");
+
+        let check = Command::new(binary())
+            .args(["config", "check", "--config"])
+            .arg(&config_path)
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "check {name}: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        std::fs::remove_file(config_path).unwrap();
+    }
+}
+
+#[test]
+fn config_init_rejects_unsupported_and_missing_extensions() {
+    let directory = TempDir::new().unwrap();
+    for name in ["maven-haste.foo", "maven-haste"] {
+        let output = Command::new(binary())
+            .args(["config", "init"])
+            .arg(name)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name} must be rejected");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("supported extensions are json, yaml, yml, toml"),
+            "{stderr}"
+        );
+        assert!(
+            !directory.path().join(name).exists(),
+            "{name} must not be created"
+        );
+    }
 }
 
 #[test]
@@ -227,7 +290,7 @@ fn config_schema_prints_a_valid_json_schema() {
 }
 
 fn example_config() -> String {
-    include_str!("../maven-haste.example.toml").replace("${VERSION}", env!("CARGO_PKG_VERSION"))
+    maven_haste::config::example_config(maven_haste::config::ConfigFormat::Toml)
 }
 
 #[test]

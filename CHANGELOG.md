@@ -9,9 +9,9 @@ All notable changes to this project are documented in this file.
 - Enforced a repository id naming rule (lowercase ASCII letters, digits, underscores, and hyphens).
 - Added per-repository `cache_writes` to stop writing new artifacts, checksums, and negative entries from a repository while previously cached content keeps being served.
 - Added a per-artifact request counter to the cache database; every client request increments it for the requested path, and it is recorded but not used yet.
-- Added JSON, TOML, and YAML configuration support; without `--config`, maven-haste discovers `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` and fails when several formats exist instead of choosing one.
+- Added JSON, TOML, and YAML configuration support; without `--config`, maven-haste discovers `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` and fails when several formats exist instead of choosing one. The parser is selected by the file extension (`json`, `yaml`, `yml`, or `toml`); unsupported or missing extensions are rejected instead of falling back to TOML.
 - Added a JSON schema for the configuration; editors and AI tools can use `maven-haste.schema.json` for hints and validation, `maven-haste config schema` prints or writes it, and the `$schema` key is accepted in any format.
-- The config template ships with an active `$schema` reference pinned to the current release version, so editors and AI tools pick up the schema with zero setup; the version is injected by `config init` and `config example` instead of being hard-coded.
+- `config init` and `config example` now generate a minimal, comment-free configuration (only the `$schema` key and the required keys) in the format of the target path's extension, defaulting to TOML; the in-repo example template file was removed. The generated `$schema` reference is pinned to the current release version, so editors and AI tools pick up the schema with zero setup; the version is injected instead of being hard-coded.
 
 ## [0.1.1]
 

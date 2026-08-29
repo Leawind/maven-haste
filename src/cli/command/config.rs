@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Create a commented example configuration without overwriting an existing file
+    /// Create a minimal example configuration without overwriting an existing file
     Init {
         /// Destination path; defaults to ./maven-haste.toml
         #[arg(value_name = "PATH")]
@@ -20,7 +20,7 @@ pub enum ConfigCommand {
     /// Print the fully resolved effective configuration
     Show,
 
-    /// Print the commented example configuration
+    /// Print the minimal example configuration in TOML
     Example,
 
     /// Write the JSON schema describing the configuration
@@ -37,10 +37,7 @@ impl ConfigCommand {
             ConfigCommand::Init { path } => {
                 let path = path.as_deref().or(cli.config.as_deref());
                 let path = initialize_config(path)?;
-                println!(
-                    "created commented example configuration: {}",
-                    path.display()
-                );
+                println!("created minimal example configuration: {}", path.display());
                 println!("next: maven-haste config check --config {}", path.display());
                 println!("then: maven-haste run --config {}", path.display());
                 println!(
@@ -67,7 +64,10 @@ impl ConfigCommand {
                 Ok(())
             }
             ConfigCommand::Example => {
-                print!("{}", crate::config::example_config());
+                print!(
+                    "{}",
+                    crate::config::example_config(crate::config::ConfigFormat::Toml)
+                );
                 Ok(())
             }
             ConfigCommand::Schema { output } => {
@@ -111,6 +111,7 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
             .join(path),
         None => default_path,
     };
+    let format = crate::config::format_for_path(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             AppError::Runtime(format!(
@@ -129,7 +130,7 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
                 path.display()
             ))
         })?;
-    file.write_all(crate::config::example_config().as_bytes())
+    file.write_all(crate::config::example_config(format).as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|error| {
             AppError::Runtime(format!(

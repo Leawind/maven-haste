@@ -15,18 +15,70 @@ use crate::error::ConfigError;
 /// Configuration file names probed per directory, one for each supported format.
 const CONFIG_FILE_NAMES: &[&str] = &["maven-haste.json", "maven-haste.toml", "maven-haste.yaml"];
 
-/// File name used by `config init`; the commented example is written as TOML.
+/// File name used by `config init` when no path is given; the minimal example
+/// is written as TOML.
 pub const CONFIG_EXAMPLE_FILE_NAME: &str = "maven-haste.toml";
-pub const EXAMPLE_CONFIG: &str = include_str!("../maven-haste.example.toml");
 
-/// Placeholder in `EXAMPLE_CONFIG` where the current version is injected into
-/// the pinned schema reference.
+/// Placeholder in the generated examples where the current version is injected
+/// into the pinned schema reference.
 const SCHEMA_VERSION_PLACEHOLDER: &str = "${VERSION}";
 
-/// Example configuration with the pinned schema reference injected; the URL
-/// always points at the tag of the current release instead of `main`.
-pub fn example_config() -> String {
-    EXAMPLE_CONFIG.replace(SCHEMA_VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION"))
+/// Configuration formats supported by file extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigFormat {
+    Toml,
+    Yaml,
+    Json,
+}
+
+/// Supported file extensions, listed in errors when a path cannot be matched.
+const SUPPORTED_EXTENSIONS: &str = "json, yaml, yml, toml";
+
+/// Selects the configuration format from the path's file extension; an
+/// unsupported or missing extension is an error instead of a fallback.
+pub fn format_for_path(path: &Path) -> Result<ConfigFormat, ConfigError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| {
+            ConfigError::new(format!(
+                "configuration {} has no file extension; supported extensions are {SUPPORTED_EXTENSIONS}",
+                path.display()
+            ))
+        })?;
+    match extension {
+        "json" => Ok(ConfigFormat::Json),
+        "yaml" | "yml" => Ok(ConfigFormat::Yaml),
+        "toml" => Ok(ConfigFormat::Toml),
+        _ => Err(ConfigError::new(format!(
+            "unsupported configuration file extension `{extension}` for {}; supported extensions are {SUPPORTED_EXTENSIONS}",
+            path.display()
+        ))),
+    }
+}
+
+/// Minimal TOML example: only the pinned schema reference and the required
+/// keys, without comments.
+const EXAMPLE_TOML: &str = "\"$schema\" = 'https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json'\n\n[storage]\nroot = './repository'\n\n[[repositories]]\nid = 'central'\nurl = 'https://repo.example/'\n";
+
+/// Minimal YAML example: only the pinned schema reference and the required
+/// keys, without comments.
+const EXAMPLE_YAML: &str = "\"$schema\": \"https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json\"\nstorage:\n  root: \"./repository\"\nrepositories:\n  - id: \"central\"\n    url: \"https://repo.example/\"\n";
+
+/// Minimal JSON example: only the pinned schema reference and the required
+/// keys, without comments.
+const EXAMPLE_JSON: &str = "{\n  \"$schema\": \"https://raw.githubusercontent.com/Leawind/maven-haste/v${VERSION}/maven-haste.schema.json\",\n  \"storage\": {\n    \"root\": \"./repository\"\n  },\n  \"repositories\": [\n    {\n      \"id\": \"central\",\n      \"url\": \"https://repo.example/\"\n    }\n  ]\n}\n";
+
+/// Minimal example configuration in the given format with the pinned schema
+/// reference injected; the URL always points at the tag of the current release
+/// instead of `main`.
+pub fn example_config(format: ConfigFormat) -> String {
+    let template = match format {
+        ConfigFormat::Toml => EXAMPLE_TOML,
+        ConfigFormat::Yaml => EXAMPLE_YAML,
+        ConfigFormat::Json => EXAMPLE_JSON,
+    };
+    template.replace(SCHEMA_VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION"))
 }
 
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
@@ -110,8 +162,8 @@ fn find_default_config(
     )))
 }
 
-/// Parses configuration source according to the file extension; an unknown or
-/// missing extension is parsed as TOML for backwards compatibility.
+/// Parses configuration source in the format selected by the path's file
+/// extension; an unsupported or missing extension is an error.
 fn parse_config(source: &str, path: &Path) -> Result<Config, ConfigError> {
     let parse_error = |message: &str| {
         ConfigError::new(format!(
@@ -119,14 +171,16 @@ fn parse_config(source: &str, path: &Path) -> Result<Config, ConfigError> {
             path.display()
         ))
     };
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("json") => {
+    match format_for_path(path)? {
+        ConfigFormat::Json => {
             serde_json::from_str(source).map_err(|error| parse_error(&error.to_string()))
         }
-        Some("yaml") => {
+        ConfigFormat::Yaml => {
             serde_yaml_ng::from_str(source).map_err(|error| parse_error(&error.to_string()))
         }
-        _ => toml::from_str(source).map_err(|error| parse_error(&error.to_string())),
+        ConfigFormat::Toml => {
+            toml::from_str(source).map_err(|error| parse_error(&error.to_string()))
+        }
     }
 }
 
@@ -819,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_an_explicit_configuration_with_unknown_extension_as_toml() {
+    fn rejects_an_explicit_configuration_with_unknown_extension() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("maven-haste.conf");
         fs::write(
@@ -828,8 +882,112 @@ mod tests {
         )
         .unwrap();
 
+        let error = Config::load(&cli(&path)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported configuration file extension `conf`"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("json, yaml, yml, toml"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parses_an_explicit_yml_configuration_as_yaml() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("maven-haste.yml");
+        fs::write(
+            &path,
+            "storage:\n  root: repository\nrepositories:\n  - id: central\n    url: https://repo.example/maven2\n",
+        )
+        .unwrap();
+
         let loaded = Config::load(&cli(&path)).unwrap();
         assert_eq!(loaded.config.repositories[0].id, "central");
+        assert_eq!(
+            loaded.config.repositories[0].url.as_str(),
+            "https://repo.example/maven2/"
+        );
+    }
+
+    #[test]
+    fn format_for_path_dispatches_by_extension() {
+        assert_eq!(
+            format_for_path(Path::new("maven-haste.json")).unwrap(),
+            ConfigFormat::Json
+        );
+        assert_eq!(
+            format_for_path(Path::new("maven-haste.yaml")).unwrap(),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            format_for_path(Path::new("maven-haste.yml")).unwrap(),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            format_for_path(Path::new("maven-haste.toml")).unwrap(),
+            ConfigFormat::Toml
+        );
+        let missing = format_for_path(Path::new("maven-haste")).unwrap_err();
+        assert!(
+            missing.to_string().contains("has no file extension"),
+            "unexpected error: {missing}"
+        );
+        let unsupported = format_for_path(Path::new("maven-haste.foo")).unwrap_err();
+        assert!(
+            unsupported
+                .to_string()
+                .contains("unsupported configuration file extension `foo`"),
+            "unexpected error: {unsupported}"
+        );
+    }
+
+    #[test]
+    fn example_config_generates_minimal_configs_in_each_format() {
+        let version = env!("CARGO_PKG_VERSION");
+        let pinned = format!(
+            "https://raw.githubusercontent.com/Leawind/maven-haste/v{version}/maven-haste.schema.json"
+        );
+        for format in [ConfigFormat::Toml, ConfigFormat::Yaml, ConfigFormat::Json] {
+            let example = example_config(format);
+            assert!(example.contains(&pinned), "{format:?}");
+            assert!(
+                !example.contains("main/maven-haste.schema.json"),
+                "{format:?}"
+            );
+            assert!(!example.contains("${VERSION}"), "{format:?}");
+            assert!(!example.contains("# "), "comments in {format:?}");
+        }
+
+        let toml_value: toml::Value = toml::from_str(&example_config(ConfigFormat::Toml)).unwrap();
+        assert_eq!(toml_value["storage"]["root"].as_str(), Some("./repository"));
+        assert_eq!(
+            toml_value["repositories"][0]["id"].as_str(),
+            Some("central")
+        );
+        assert_eq!(
+            toml_value["repositories"][0]["url"].as_str(),
+            Some("https://repo.example/")
+        );
+
+        let yaml_value: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&example_config(ConfigFormat::Yaml)).unwrap();
+        assert_eq!(yaml_value["storage"]["root"].as_str(), Some("./repository"));
+        assert_eq!(
+            yaml_value["repositories"][0]["id"].as_str(),
+            Some("central")
+        );
+
+        let json_value: serde_json::Value =
+            serde_json::from_str(&example_config(ConfigFormat::Json)).unwrap();
+        assert_eq!(json_value["storage"]["root"].as_str(), Some("./repository"));
+        assert_eq!(
+            json_value["repositories"][0]["url"].as_str(),
+            Some("https://repo.example/")
+        );
     }
 
     #[test]
@@ -1606,7 +1764,7 @@ cache_writes = false
 
     #[test]
     fn example_config_injects_the_current_version() {
-        let example = example_config();
+        let example = example_config(ConfigFormat::Toml);
         let version = env!("CARGO_PKG_VERSION");
         let expected = format!(
             "https://raw.githubusercontent.com/Leawind/maven-haste/v{version}/maven-haste.schema.json"
