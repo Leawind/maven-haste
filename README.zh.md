@@ -60,7 +60,17 @@ maven-haste run
 4. 按网络环境调整缓存 TTL、上游超时、并发和熔断参数。
 5. 用 `maven-haste config check -c <配置文件>` 验证配置和存储目录，再启动服务。
 
-程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定。启动时可以用全局参数临时覆盖监听地址或启用调试日志；
+程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入配置文件。
+
+### 借助 Schema 编辑
+
+描述整个配置的 JSON Schema 位于 [maven-haste.schema.json](maven-haste.schema.json)，也可用 `maven-haste config schema` 输出（`-o <PATH>` 写入文件）。编辑器、linter 和 AI 工具可以据此获得补全、字段说明、默认值和校验提示。将配置文件关联到 schema：
+
+- JSON：`"$schema": "./maven-haste.schema.json"`
+- YAML：`# yaml-language-server: $schema=./maven-haste.schema.json`
+- TOML：`"$schema" = "./maven-haste.schema.json"`（Even Better TOML VS Code 插件可识别）
+
+任何格式下 maven-haste 都会接受并忽略 `$schema` 键。schema 由 Rust 配置类型自动生成（schemars）：修改配置结构后，用 `maven-haste config schema -o maven-haste.schema.json` 重新生成并随改动一起提交；单元测试会在提交的 schema 过期时失败。
 
 ### 上游路由
 

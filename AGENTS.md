@@ -42,6 +42,14 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 - 迁移涉及新列时同步更新 `sql/cache.sql`（SELECT 列顺序对应 `artifact_from_row` 的索引、`upsert_artifact` 参数）与 `ArtifactRecord` 结构体。
 - 每次 schema 改动都要保持两个 db 测试通过：新库落在最新版本（`fresh_database_ends_at_the_latest_schema_version`）、旧库被采纳升级（`adopts_an_existing_database_without_changing_data`）。
 
+## 配置 Schema
+
+- 配置的 JSON Schema（`maven-haste.schema.json`）由 schemars 从 `src/config.rs` 的配置结构自动生成，不要手写维护；用 `maven-haste config schema -o maven-haste.schema.json` 重新生成。
+- 配置结构体都派生 `JsonSchema`；字段的 `///` 文档注释会成为 schema 的 description，新增字段时同步补充文档注释。
+- `Duration`（humantime_serde）字段必须加 `#[schemars(schema_with = "crate::config::duration_schema")]`，`server.bind` 加 `socket_addr_schema`，否则无法编译。
+- 修改配置结构后重新生成 schema 并随改动一起提交；`committed_schema_matches_the_generated_schema` 测试会在提交的 schema 过期时失败。
+- 配置文件中的 `$schema` 键被接受并忽略（`Config.schema` 字段），不要报错或删除。
+
 ## 提交与拉取请求指南
 
 历史记录使用简短的祈使句主题，包括 `init` 和 `docs: add design.md`；保持这种风格，并在有用时使用范围，例如 `cache: handle missing files`。保持提交聚焦。拉取请求应描述行为、链接问题或设计章节、列出验证步骤，并包含用户可见的 CLI 或 HTTP 变更示例。

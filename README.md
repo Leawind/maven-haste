@@ -60,7 +60,17 @@ Recommended steps:
 4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
 5. Run `maven-haste config check -c <config>` to validate the config and storage directory before starting.
 
-Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension. Global flags can temporarily override the listen address or enable debug logging at startup;
+Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
+
+### Schema-Assisted Editing
+
+A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). Editors, linters, and AI tools can use it for completion, descriptions, defaults, and validation. Pin a config file to the schema with:
+
+- JSON: `"$schema": "./maven-haste.schema.json"`
+- YAML: `# yaml-language-server: $schema=./maven-haste.schema.json`
+- TOML: `"$schema" = "./maven-haste.schema.json"` (recognized by the Even Better TOML VS Code extension)
+
+maven-haste accepts and ignores the `$schema` key in any format. The schema is generated from the Rust configuration types (schemars), so after changing the config structure, regenerate it with `maven-haste config schema -o maven-haste.schema.json` and commit it together with the change; a unit test fails when the committed schema is out of date.
 
 ### Upstream Routing
 
