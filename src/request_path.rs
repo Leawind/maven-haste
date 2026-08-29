@@ -130,67 +130,70 @@ struct Coordinates {
 
 impl Coordinates {
     fn parse(segments: &[String]) -> Result<Self, PathError> {
-        let filename = segments
-            .last()
-            .expect("a Maven path always has at least one segment");
-        let metadata = is_metadata_file(filename);
+        let (filename, before) = segments
+            .split_last()
+            .ok_or_else(|| PathError::Invalid("artifact path is empty".into()))?;
 
-        if metadata {
-            if segments.len() < 2 {
-                return Err(PathError::Invalid(
-                    "metadata path has no group or artifact component".into(),
-                ));
-            }
-            let before_file = &segments[..segments.len() - 1];
-            let version_level = before_file.len() >= 3
-                && before_file
-                    .last()
-                    .is_some_and(|segment| segment.ends_with("-SNAPSHOT"));
-            let (group_segments, artifact_id, version) = if version_level {
-                (
-                    &before_file[..before_file.len() - 2],
-                    before_file[before_file.len() - 2].clone(),
-                    before_file[before_file.len() - 1].clone(),
-                )
-            } else if before_file.len() >= 2 {
-                (
-                    &before_file[..before_file.len() - 1],
-                    before_file[before_file.len() - 1].clone(),
-                    String::new(),
-                )
-            } else {
-                (before_file, String::new(), String::new())
-            };
-            let policy = cache_policy(filename, &artifact_id, &version);
-            return Ok(Self {
-                group_id: group_segments.join("."),
-                artifact_id,
-                version,
-                file_type: if filename == "maven-metadata.xml" {
-                    "metadata".into()
-                } else {
-                    checksum_file_type(filename).into()
-                },
-                policy,
-                checksum: filename != "maven-metadata.xml",
-            });
+        if is_metadata_file(filename) {
+            return Self::metadata(filename, before);
         }
 
-        if segments.len() < 4 {
-            return Err(PathError::Invalid(
-                "artifact path must contain group, artifact, version, and filename".into(),
-            ));
-        }
-        let artifact_index = segments.len() - 3;
-        let artifact_id = &segments[artifact_index];
-        let version = &segments[artifact_index + 1];
+        // Artifact paths are laid out as [group/.../, artifact, version,
+        // filename]: the last three segments are artifact, version, and
+        // filename, and the group must occupy at least the first segment.
+        let split = segments
+            .len()
+            .checked_sub(3)
+            .filter(|&split| split > 0)
+            .ok_or_else(|| {
+                PathError::Invalid(
+                    "artifact path must contain group, artifact, version, and filename".into(),
+                )
+            })?;
+        let (group, artifact_version) = segments.split_at(split);
+        let (artifact_id, version) = (&artifact_version[0], &artifact_version[1]);
         Ok(Self {
-            group_id: segments[..artifact_index].join("."),
+            group_id: group.join("."),
             artifact_id: artifact_id.clone(),
             version: version.clone(),
             file_type: regular_file_type(filename).into(),
             policy: cache_policy(filename, artifact_id, version),
             checksum: has_checksum_suffix(filename),
+        })
+    }
+
+    /// Resolves metadata coordinates whose final segment is
+    /// `maven-metadata.xml` or one of its checksum files.
+    fn metadata(filename: &str, before: &[String]) -> Result<Self, PathError> {
+        // Metadata paths are laid out as [group/.../, artifact, (version)]:
+        // the last segment is the artifact, except at the version level where
+        // the last two are artifact and a `-SNAPSHOT` version.
+        let (group_segments, artifact_id, version) = match before {
+            [] => {
+                return Err(PathError::Invalid(
+                    "metadata path has no group or artifact component".into(),
+                ));
+            }
+            [_] => (before, String::new(), String::new()),
+            [.., artifact, version] if before.len() >= 3 && version.ends_with("-SNAPSHOT") => (
+                &before[..before.len() - 2],
+                artifact.clone(),
+                version.clone(),
+            ),
+            [.., artifact] => (&before[..before.len() - 1], artifact.clone(), String::new()),
+        };
+        let policy = cache_policy(filename, &artifact_id, &version);
+        Ok(Self {
+            group_id: group_segments.join("."),
+            artifact_id,
+            version,
+            file_type: if filename == "maven-metadata.xml" {
+                "metadata".into()
+            } else {
+                checksum_file_type(filename).into()
+            },
+            policy,
+            checksum: filename != "maven-metadata.xml",
         })
     }
 }
