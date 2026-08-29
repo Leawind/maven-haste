@@ -60,6 +60,17 @@ impl crate::cache::CacheManager {
         &self,
         request: &MavenPath,
     ) -> Result<DownloadOutcome, CacheFailure> {
+        self.fetch_main_or_cached(request).await
+    }
+
+    /// Fetches the requested main file, installing it into the cache when its
+    /// repository allows writes, or returning it for direct passthrough when
+    /// caching is disabled. Returns `Installed` when a concurrent request
+    /// already cached it.
+    async fn fetch_main_or_cached(
+        &self,
+        request: &MavenPath,
+    ) -> Result<DownloadOutcome, CacheFailure> {
         let existing = self
             .inner
             .database

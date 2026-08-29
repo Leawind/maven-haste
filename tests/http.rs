@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,6 +22,7 @@ use maven_haste::config::{
 use maven_haste::db::Database;
 use maven_haste::server::router;
 use maven_haste::storage;
+use maven_haste::upstream::UpstreamClient;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -244,7 +246,26 @@ async fn newer_case_variant_replaces_old_database_identity() {
     };
     storage::prepare(&config.storage).await.unwrap();
     let database = Database::open(config.storage.db_path()).await.unwrap();
-    let cache = CacheManager::new(&config, database.clone(), false).unwrap();
+    let upstream = UpstreamClient::new(
+        config.repositories.clone(),
+        &config.upstream,
+        &config.circuit_breaker,
+    )
+    .unwrap();
+    let caching_disabled = config
+        .repositories
+        .iter()
+        .filter(|repository| !repository.cache_writes)
+        .map(|repository| repository.id.clone())
+        .collect::<HashSet<_>>();
+    let cache = CacheManager::new(
+        config.storage.clone(),
+        config.cache.clone(),
+        database.clone(),
+        upstream,
+        false,
+        caching_disabled,
+    );
     let app = router("/maven".into(), cache);
 
     let upper = "/maven/Com/Example/demo/1.0/demo-1.0.jar";
@@ -1448,7 +1469,26 @@ async fn test_app_with_cache(
     };
     let environment = storage::prepare(&config.storage).await.unwrap();
     let database = Database::open(config.storage.db_path()).await.unwrap();
-    let cache = CacheManager::new(&config, database.clone(), environment.case_sensitive).unwrap();
+    let upstream = UpstreamClient::new(
+        config.repositories.clone(),
+        &config.upstream,
+        &config.circuit_breaker,
+    )
+    .unwrap();
+    let caching_disabled = config
+        .repositories
+        .iter()
+        .filter(|repository| !repository.cache_writes)
+        .map(|repository| repository.id.clone())
+        .collect::<HashSet<_>>();
+    let cache = CacheManager::new(
+        config.storage.clone(),
+        config.cache.clone(),
+        database.clone(),
+        upstream,
+        environment.case_sensitive,
+        caching_disabled,
+    );
     (router("/maven".into(), cache), database)
 }
 
