@@ -25,8 +25,8 @@ PRAGMA busy_timeout=5000;
 /// applied, so pending migrations run exactly once. To change the schema,
 /// append a new `.sql` file under `migrations/` and add it to this list.
 const MIGRATIONS: &[&str] = &[
-    include_str!("../migrations/0001_init.sql"),
-    include_str!("../migrations/0002_request_count.sql"),
+    include_str!("../migrations/0001-init.sql"),
+    include_str!("../migrations/0002-request_count.sql"),
 ];
 
 #[derive(Clone)]
@@ -669,7 +669,7 @@ mod tests {
         {
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection
-                .execute_batch(include_str!("../migrations/0001_init.sql"))
+                .execute_batch(include_str!("../migrations/0001-init.sql"))
                 .unwrap();
             connection
                 .execute(
