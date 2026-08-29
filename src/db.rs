@@ -365,7 +365,12 @@ fn run_migrations(
     migrations: &[&str],
 ) -> Result<(), rusqlite::Error> {
     let applied: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    for (index, source) in migrations.iter().enumerate().skip(applied.max(0) as usize) {
+    let from = applied.max(0);
+    let target = migrations.len() as i64;
+    if from < target {
+        tracing::info!(from, to = target, "migrating database schema");
+    }
+    for (index, source) in migrations.iter().enumerate().skip(from as usize) {
         let transaction = connection.transaction()?;
         transaction.execute_batch(source)?;
         transaction.pragma_update(None, "user_version", (index + 1) as i64)?;
