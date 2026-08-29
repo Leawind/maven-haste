@@ -65,8 +65,8 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 1. 编辑相关文件
    - 更新 `CHANGELOG.md`，并添加与标签 `vX.Y.Z` 对应的 `## [X.Y.Z]` 小节。
    - 编辑 Cargo.toml 中的版本号
-2. 在本地执行构建 `cargo build`
-3. 提交并添加 `v*` 标签
+2. 本地完整验证通过（`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets -- -D warnings`、`deno fmt --check`）；一致性测试会拦截过期的 schema 文件。
+3. 提交并添加 `v*` 标签，等待 `publish` 工作流的 verify 通过；若不通过，修正提交并重建标签，不要在过期标签上继续。
 
 ## 配置与安全
 
