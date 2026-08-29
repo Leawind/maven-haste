@@ -192,6 +192,14 @@ fn track_response(
 ) -> Response<Body> {
     let status = response.status().as_u16();
     let (parts, body) = response.into_parts();
+    // HEAD responses carry no body on the wire: serve an empty one so access
+    // tracking finishes eagerly with the response instead of waiting on a body
+    // that is never polled.
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        body
+    };
     let expected_bytes = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -610,6 +618,40 @@ mod tests {
             completion: None,
             temporary: None,
         }))
+    }
+
+    #[tokio::test]
+    async fn head_error_responses_complete_with_the_response() {
+        let response = track_response(
+            error_response(StatusCode::NOT_FOUND, "artifact not found"),
+            Method::HEAD,
+            "/maven/test",
+            "none",
+            None,
+            Instant::now(),
+            None,
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.body().is_end_stream());
+    }
+
+    #[tokio::test]
+    async fn get_error_responses_keep_their_message_body() {
+        let response = track_response(
+            error_response(StatusCode::NOT_FOUND, "artifact not found"),
+            Method::GET,
+            "/maven/test",
+            "none",
+            None,
+            Instant::now(),
+            None,
+        );
+        assert!(!response.body().is_end_stream());
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(body, &b"artifact not found"[..]);
     }
 
     #[tokio::test]
