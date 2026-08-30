@@ -62,11 +62,27 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
 
 ## 发布流程
 
-1. 编辑相关文件
-   - 更新 `CHANGELOG.md`，并添加与标签 `vX.Y.Z` 对应的 `## [X.Y.Z]` 小节。
+1. 确定下一个版本号，通常用户会明确指定
+2. 编辑相关文件
    - 编辑 Cargo.toml 中的版本号
-2. 本地完整验证通过（`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets -- -D warnings`、`deno fmt --check`）；一致性测试会拦截过期的 schema 文件。
-3. 提交并添加 `v*` 标签，等待 `publish` 工作流的 verify 通过；若不通过，修正提交并重建标签，不要在过期标签上继续。
+   - 更新 `CHANGELOG.md`，确保其格式如下：
+   ```markdown
+   （省略开头）
+
+   ## [Unreleased]
+
+   （这里为空）
+
+   ## [即将发布的版本号]
+
+   （自上一个版本以来的更改）
+
+   ## [曾发布的版本号]
+
+   （省略其余旧版本）
+   ```
+3. 本地完整验证通过（`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets -- -D warnings`、`deno fmt --check`）；一致性测试会拦截过期的 schema 文件。
+4. 提交并添加 `v*` 标签，等待 `publish` 工作流的 verify 通过；若不通过，修正提交并重建标签，不要在过期标签上继续。
 
 ## 配置与安全
 
