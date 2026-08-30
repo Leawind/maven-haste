@@ -82,7 +82,8 @@ deno fmt --check    # 验证 Markdown/JSON/YAML 格式
    （省略其余旧版本）
    ```
 3. 本地完整验证通过（`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets -- -D warnings`、`deno fmt --check`）；一致性测试会拦截过期的 schema 文件。
-4. 提交并添加 `v*` 标签，等待 `publish` 工作流的 verify 通过；若不通过，修正提交并重建标签，不要在过期标签上继续。
+4. 提交并推送到 `main`。
+5. 在 GitHub Actions 页面手动触发 `Publish` 工作流（选择 `main` 分支，无需填写参数）。版本号由工作流从 `Cargo.toml` 自动读取，标签 `v<版本号>` 由工作流创建；若 verify 不通过，修正提交并重新触发。
 
 ## 配置与安全
 

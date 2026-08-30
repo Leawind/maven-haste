@@ -1,9 +1,6 @@
 name: Publish
 
 on:
-    push:
-        tags:
-            - 'v*'
     workflow_dispatch:
 
 permissions:
@@ -25,6 +22,7 @@ jobs:
             - run: cargo fmt --check
             - run: cargo clippy -- -D warnings
             - run: cargo test
+
     build-binaries:
         name: Build ${{ matrix.name }} binary
         needs: verify
@@ -73,25 +71,43 @@ jobs:
     draft-release:
         name: Create GitHub release draft
         needs: build-binaries
-        if: github.ref_type == 'tag'
         runs-on: ubuntu-latest
         permissions:
             contents: write
 
+        outputs:
+            version: ${{ steps.resolve.outputs.version }}
+
         steps:
             - uses: actions/checkout@v4
 
+            - name: Resolve version from Cargo.toml
+              id: resolve
+              run: |
+                  version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+                  test -n "$version"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
             - name: Extract release notes
               env:
-                  RELEASE_TAG: ${{ github.ref_name }}
+                  VERSION: ${{ steps.resolve.outputs.version }}
               run: |
-                  version="${RELEASE_TAG#v}"
-                  awk -v version="$version" '
+                  awk -v version="$VERSION" '
                       index($0, "## [" version "]") == 1 { in_section = 1; next }
                       in_section && /^## / { exit }
                       in_section { print }
                   ' CHANGELOG.md > RELEASE_NOTES.md
                   test -s RELEASE_NOTES.md
+
+            - name: Push release tag
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: v${{ steps.resolve.outputs.version }}
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git tag -f "$TAG"
+                  git push --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" "$TAG"
 
             - uses: actions/download-artifact@v4
               with:
@@ -100,6 +116,7 @@ jobs:
 
             - uses: softprops/action-gh-release@v2
               with:
+                  tag_name: v${{ steps.resolve.outputs.version }}
                   draft: true
                   body_path: RELEASE_NOTES.md
                   files: release-assets/*
@@ -132,5 +149,5 @@ jobs:
               env:
                   GH_TOKEN: ${{ github.token }}
                   GH_REPO: ${{ github.repository }}
-                  RELEASE_TAG: ${{ github.ref_name }}
+                  RELEASE_TAG: v${{ needs.draft-release.outputs.version }}
               run: gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false
