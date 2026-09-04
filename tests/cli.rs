@@ -340,6 +340,46 @@ fn file_logging_writes_daily_json_access_events() {
     child.0.wait().unwrap();
 }
 
+#[test]
+fn cache_verify_reports_a_fresh_cache_as_healthy() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, "127.0.0.1:0");
+
+    let output = Command::new(binary())
+        .args(["cache", "verify", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("checked 0 artifacts, 0 issues"), "{stdout}");
+}
+
+#[test]
+fn cache_remove_prefix_reports_removed_files_and_rejects_unsafe_prefixes() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, "127.0.0.1:0");
+
+    let output = Command::new(binary())
+        .args(["cache", "remove-prefix", "com/example", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("removed 0 files, 0 bytes"), "{stdout}");
+
+    let output = Command::new(binary())
+        .args(["cache", "remove-prefix", "../outside", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("non-empty safe relative path"), "{stderr}");
+}
+
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_maven-haste")
 }

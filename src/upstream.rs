@@ -398,14 +398,6 @@ impl UpstreamClient {
             .collect()
     }
 
-    pub fn candidate_names(&self, relative_path: &str) -> Vec<String> {
-        self.routes
-            .candidates(relative_path)
-            .into_iter()
-            .map(|repository| repository.id.clone())
-            .collect()
-    }
-
     pub fn all_candidates_negative(&self, relative_path: &str, negative: &HashSet<String>) -> bool {
         let candidates = self.routes.candidates(relative_path);
         !candidates.is_empty()

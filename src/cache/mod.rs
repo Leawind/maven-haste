@@ -200,10 +200,6 @@ impl CacheManager {
             upstreams: self.inner.upstream.statuses(),
         })
     }
-
-    pub fn route_candidates(&self, path: &str) -> Vec<String> {
-        self.inner.upstream.candidate_names(path)
-    }
 }
 
 #[cfg(test)]

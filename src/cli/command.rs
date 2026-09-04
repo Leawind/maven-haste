@@ -7,12 +7,19 @@ use crate::{cache, db, logging, server, storage, upstream};
 use clap::Subcommand;
 use config::ConfigCommand;
 
+mod cache_command;
 mod config;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Start the server
     Run,
+
+    /// Verify and maintain the local artifact cache
+    Cache {
+        #[command(subcommand)]
+        command: cache_command::CacheCommand,
+    },
 
     /// Create, print, validate, or inspect configuration
     Config {
@@ -63,6 +70,7 @@ impl Command {
                 tracing::info!(%bind, "Maven proxy is ready");
                 server::serve(listener, loaded.config.server.base_path, cache).await
             }
+            Command::Cache { command } => command.execute(cli).await,
             Command::Config { command } => command.execute(cli).await,
         }
     }
