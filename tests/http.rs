@@ -1440,6 +1440,54 @@ async fn does_not_cache_artifacts_when_repository_writes_are_disabled() {
     task.abort();
 }
 
+#[tokio::test]
+async fn concurrent_passthrough_requests_share_one_temporary_file_safely() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Response::new(Body::from("artifact-body"))
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository_with_cache("nocache", &url, &[], false)],
+        CacheConfig::default(),
+        UpstreamConfig::default(),
+    )
+    .await;
+
+    let requests = (0..8).map(|_| {
+        let app = app.clone();
+        tokio::spawn(async move { request(&app, Method::GET, ARTIFACT_PATH).await })
+    });
+    for response in futures_util::future::join_all(requests).await {
+        let response = response.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "artifact-body");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    wait_for(|| {
+        std::fs::read_dir(directory.path().join("repository/.maven-haste/tmp"))
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(false)
+    })
+    .await;
+
+    task.abort();
+}
+
 async fn test_app(directory: &TempDir, repositories: Vec<RepositoryConfig>) -> (Router, Database) {
     test_app_with_cache(
         directory,

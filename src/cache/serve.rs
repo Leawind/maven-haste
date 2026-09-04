@@ -80,13 +80,12 @@ impl CacheManager {
                 Ok(cached)
             }
             DownloadOutcome::Passthrough(prepared) => {
-                let temporary = prepared.temporary;
-                let record = prepared.record;
+                let path = prepared.temporary.path().to_path_buf();
                 Ok(CachedArtifact {
-                    file_path: temporary.clone(),
-                    record,
+                    file_path: path,
+                    record: prepared.record,
                     status: CacheStatus::Miss,
-                    temporary: Some(temporary),
+                    temporary: Some(prepared.temporary),
                 })
             }
         }

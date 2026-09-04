@@ -22,6 +22,8 @@ use crate::upstream::UpstreamClient;
 
 use types::DownloadOutcome;
 
+pub use types::SharedTemp;
+
 type Flight = OnceCell<Result<DownloadOutcome, CacheFailure>>;
 
 #[derive(Clone)]
@@ -50,8 +52,9 @@ pub struct CachedArtifact {
     pub file_path: PathBuf,
     pub record: ArtifactRecord,
     pub status: CacheStatus,
-    /// Temporary file to remove after the response body is fully consumed.
-    pub temporary: Option<PathBuf>,
+    /// Shared temporary file to release after the response body is fully
+    /// consumed; the file is removed when the last response releases it.
+    pub temporary: Option<SharedTemp>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

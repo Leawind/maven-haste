@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
-use crate::cache::{CacheFailure, CacheManager, CachedArtifact};
+use crate::cache::{CacheFailure, CacheManager, CachedArtifact, SharedTemp};
 use crate::error::AppError;
 use crate::request_path::{CachePolicy, MavenPath};
 
@@ -137,10 +136,10 @@ async fn artifact(
         }
     };
     let (response, cache_status, upstream, temporary) = match state.cache.get(&request).await {
-        Ok(cached) => {
+        Ok(mut cached) => {
             let cache_status = cached.status.as_str();
             let upstream = cached.record.upstream.clone();
-            let temporary = cached.temporary.clone();
+            let temporary = cached.temporary.take();
             (
                 cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
                 cache_status,
@@ -188,7 +187,7 @@ fn track_response(
     cache: &str,
     upstream: Option<&str>,
     started: Instant,
-    temporary: Option<PathBuf>,
+    temporary: Option<SharedTemp>,
 ) -> Response<Body> {
     let status = response.status().as_u16();
     let (parts, body) = response.into_parts();
@@ -296,7 +295,7 @@ struct AccessState {
     started: Instant,
     bytes_sent: u64,
     completion: Option<&'static str>,
-    temporary: Option<PathBuf>,
+    temporary: Option<SharedTemp>,
 }
 
 fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
@@ -336,11 +335,11 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
         completion,
         "{message}"
     );
-    if let Some(path) = state.temporary.take() {
-        tokio::spawn(async move {
-            let _ = tokio::fs::remove_file(path).await;
-        });
-    }
+    // Releasing the shared temporary removes the file once this response is
+    // the last holder; concurrent responses keep their own references. The
+    // drop runs synchronously because it may also fire outside a runtime
+    // context when a response body is dropped after shutdown.
+    drop(state.temporary.take());
 }
 
 async fn cached_response(

@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::db::ArtifactRecord;
 
@@ -22,7 +24,80 @@ pub(crate) struct PreparedFile {
 #[derive(Clone)]
 pub(crate) enum DownloadOutcome {
     Installed,
-    Passthrough(Box<PreparedFile>),
+    Passthrough(Box<PassthroughFile>),
+}
+
+/// A downloaded file served directly to responses without being installed in
+/// the cache. All concurrent requests that share one download flight hold a
+/// reference to the same temporary file; the file is removed only when the
+/// last reference is dropped, so one response finishing can never remove the
+/// file out from under another.
+#[derive(Clone, Debug)]
+pub(crate) struct PassthroughFile {
+    pub(crate) temporary: SharedTemp,
+    pub(crate) record: ArtifactRecord,
+}
+
+/// A temporary file whose removal is tied to shared ownership: cloning adds a
+/// reference, dropping the last reference removes the file.
+pub struct SharedTemp {
+    inner: Arc<SharedTempInner>,
+}
+
+struct SharedTempInner {
+    path: PathBuf,
+    references: AtomicUsize,
+}
+
+impl SharedTemp {
+    /// Takes ownership of a temporary file with a single reference.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            inner: Arc::new(SharedTempInner {
+                path,
+                references: AtomicUsize::new(1),
+            }),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+}
+
+impl Clone for SharedTemp {
+    fn clone(&self) -> Self {
+        self.inner.references.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Drop for SharedTemp {
+    fn drop(&mut self) {
+        if self.inner.references.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        match std::fs::remove_file(&self.inner.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::debug!(
+                path = %self.inner.path.display(),
+                %error,
+                "failed to remove shared temporary file"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Debug for SharedTemp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedTemp")
+            .field("path", &self.inner.path)
+            .finish()
+    }
 }
 
 /// A downloaded main artifact plus its computed hashes and validators.
@@ -34,4 +109,36 @@ pub(crate) struct DownloadedMain {
     pub(crate) sha512: String,
     pub(crate) etag: Option<String>,
     pub(crate) last_modified: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_the_file_only_after_the_last_reference_is_dropped() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("shared.part");
+        std::fs::write(&path, b"content").unwrap();
+
+        let original = SharedTemp::new(path.clone());
+        let first_clone = original.clone();
+        let second_clone = original.clone();
+
+        drop(first_clone);
+        assert!(path.exists());
+        drop(original);
+        assert!(path.exists());
+        drop(second_clone);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn dropping_a_reference_for_a_missing_file_is_not_an_error() {
+        let original = SharedTemp::new(std::env::temp_dir().join("maven-haste-missing.part"));
+        let clone = original.clone();
+        std::fs::remove_file(original.path()).ok();
+        drop(clone);
+        drop(original);
+    }
 }

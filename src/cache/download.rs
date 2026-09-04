@@ -10,7 +10,9 @@ use crate::cache::io::{
     read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, unix_timestamp,
     write_temporary,
 };
-use crate::cache::types::{DownloadOutcome, DownloadedMain, PreparedFetch, PreparedFile};
+use crate::cache::types::{
+    DownloadOutcome, DownloadedMain, PassthroughFile, PreparedFetch, PreparedFile, SharedTemp,
+};
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
@@ -43,13 +45,15 @@ impl crate::cache::CacheManager {
                     .regenerate_checksum(request, &source)
                     .await
                     .map(|()| DownloadOutcome::Installed),
-                DownloadOutcome::Passthrough(prepared) => {
-                    let source_temporary = prepared.temporary.clone();
+                DownloadOutcome::Passthrough(source) => {
                     let checksum = self
-                        .build_checksum(request, &prepared.record.upstream, &prepared.temporary)
+                        .build_checksum(request, &source.record.upstream, source.temporary.path())
                         .await?;
-                    let _ = remove_file_if_exists(&source_temporary).await;
-                    Ok(DownloadOutcome::Passthrough(Box::new(checksum)))
+                    drop(source);
+                    Ok(DownloadOutcome::Passthrough(Box::new(PassthroughFile {
+                        temporary: SharedTemp::new(checksum.temporary),
+                        record: checksum.record,
+                    })))
                 }
             };
         }
@@ -94,7 +98,10 @@ impl crate::cache::CacheManager {
                     .split_first()
                     .expect("a prepared bundle always contains the main file");
                 cleanup_prepared(generated).await;
-                Ok(DownloadOutcome::Passthrough(Box::new(main.clone())))
+                Ok(DownloadOutcome::Passthrough(Box::new(PassthroughFile {
+                    temporary: SharedTemp::new(main.temporary.clone()),
+                    record: main.record.clone(),
+                })))
             }
             PreparedFetch::NotFound => {
                 self.log_not_found(request);
