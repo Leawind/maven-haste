@@ -38,13 +38,28 @@ Generate a config template in the current working directory (never overwrites ex
 maven-haste config init [PATH]
 ```
 
-Start using the config in the current working directory; `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` is discovered automatically
+Start using the config in the current working directory; `maven-haste.json`, `maven-haste.toml`, `maven-haste.yaml`, or `maven-haste.yml` is discovered automatically
 
 ```bash
 maven-haste run
 ```
 
 Use `-c --config <PATH>` to specify a config file path.
+
+Validate the config and storage directory before starting:
+
+```bash
+maven-haste config check
+```
+
+Maintain the local cache: re-check every cached artifact's size and checksums, or remove all cached content under a path prefix
+
+```bash
+maven-haste cache verify
+maven-haste cache remove-prefix com/example
+```
+
+`cache verify` exits with an error when it finds issues, listing each one.
 
 ## Configuration
 
@@ -60,7 +75,7 @@ Recommended steps:
 4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
 5. Run `maven-haste config check -c <config>` to validate the config and storage directory before starting.
 
-Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, or `maven-haste.yaml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension (`json`, `yaml`, `yml`, or `toml`); an unsupported or missing extension is an error rather than a TOML fallback. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
+Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, `maven-haste.yaml`, or `maven-haste.yml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension (`json`, `yaml`, `yml`, or `toml`); an unsupported or missing extension is an error rather than a TOML fallback. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
 
 ### Schema-Assisted Editing
 

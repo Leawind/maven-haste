@@ -38,13 +38,28 @@ maven-haste 以单个命令行工具的形式发布。
 maven-haste config init [PATH]
 ```
 
-使用当前工作目录下的配置启动；`maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml` 会被自动发现
+使用当前工作目录下的配置启动；`maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`、`maven-haste.yml` 会被自动发现
 
 ```bash
 maven-haste run
 ```
 
 可以通过命令行参数 `-c --config <PATH>` 指定配置文件路径。
+
+启动前验证配置和存储目录：
+
+```bash
+maven-haste config check
+```
+
+维护本地缓存：重新校验每个缓存产物的尺寸与校验和，或删除某个路径前缀下的全部缓存内容
+
+```bash
+maven-haste cache verify
+maven-haste cache remove-prefix com/example
+```
+
+`cache verify` 发现问题时会逐条列出并以错误码退出。
 
 ## 配置
 
@@ -60,7 +75,7 @@ maven-haste run
 4. 按网络环境调整缓存 TTL、上游超时、并发和熔断参数。
 5. 用 `maven-haste config check -c <配置文件>` 验证配置和存储目录，再启动服务。
 
-程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定（`json`、`yaml`、`yml`、`toml`）；无法识别或缺失的扩展名会直接报错，不再回退为 TOML。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入配置文件。
+程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`、`maven-haste.yml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定（`json`、`yaml`、`yml`、`toml`）；无法识别或缺失的扩展名会直接报错，不再回退为 TOML。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入配置文件。
 
 ### 借助 Schema 编辑
 
