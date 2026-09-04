@@ -114,22 +114,14 @@ ON CONFLICT(path, repository_id) DO UPDATE SET observed_at = excluded.observed_a
 UPDATE artifacts SET last_refresh_attempt = :timestamp WHERE path = :path
 /
 
--- name: touch_access!
+-- name: record_hit!
 --
--- Updates the last access timestamp of an artifact.
+-- Counts one request for a path and refreshes its access timestamp in a
+-- single write. Paths without a cached record are not counted.
 --
 -- param: path: &str
 -- param: timestamp: i64
-UPDATE artifacts SET last_accessed = :timestamp WHERE path = :path
-/
-
--- name: bump_request_count!
---
--- Increments the per-artifact request counter for a path.
--- Paths without a cached record are not counted.
---
--- param: path: &str
-UPDATE artifacts SET request_count = request_count + 1 WHERE path = :path
+UPDATE artifacts SET request_count = request_count + 1, last_accessed = :timestamp WHERE path = :path
 /
 
 -- name: records_by_access?

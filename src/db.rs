@@ -244,20 +244,12 @@ impl Database {
         .await
     }
 
-    pub async fn touch_access(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
+    /// Counts one request for a path and refreshes its access timestamp in a
+    /// single write.
+    pub async fn record_hit(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {
-            connection.touch_access(&path, timestamp)?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Increments the per-artifact request counter for a path.
-    pub async fn bump_request_count(&self, path: &str) -> Result<(), AppError> {
-        let path = path.to_owned();
-        self.with_connection(move |connection| {
-            connection.bump_request_count(&path)?;
+            connection.record_hit(&path, timestamp)?;
             Ok(())
         })
         .await
@@ -518,8 +510,8 @@ mod tests {
             0
         );
 
-        database.bump_request_count(&record.path).await.unwrap();
-        database.bump_request_count(&record.path).await.unwrap();
+        database.record_hit(&record.path, 1).await.unwrap();
+        database.record_hit(&record.path, 2).await.unwrap();
         database.upsert_many(vec![record.clone()]).await.unwrap();
         assert_eq!(
             database
@@ -531,10 +523,7 @@ mod tests {
             2
         );
 
-        database
-            .bump_request_count("missing/path.jar")
-            .await
-            .unwrap();
+        database.record_hit("missing/path.jar", 3).await.unwrap();
         assert!(database.get("missing/path.jar").await.unwrap().is_none());
     }
 

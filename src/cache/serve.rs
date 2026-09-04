@@ -21,14 +21,17 @@ impl CacheManager {
     /// upstream repository on a miss.
     pub async fn get(&self, request: &MavenPath) -> Result<CachedArtifact, CacheFailure> {
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        let record = self
+        let mut record = self
             .inner
             .database
             .get(request.relative())
             .await
             .map_err(internal)?;
         if record.is_some() {
-            self.bump_request_count(request).await;
+            self.record_hit(request).await;
+            if let Some(record) = record.as_mut() {
+                record.last_accessed = unix_timestamp();
+            }
         }
 
         if request.policy() == CachePolicy::Mutable {
@@ -64,7 +67,7 @@ impl CacheManager {
         match self.synchronous_download(request).await? {
             DownloadOutcome::Installed => {
                 if record.is_none() {
-                    self.bump_request_count(request).await;
+                    self.record_hit(request).await;
                 }
                 let record = self
                     .inner
@@ -95,17 +98,17 @@ impl CacheManager {
         }
     }
 
-    async fn bump_request_count(&self, request: &MavenPath) {
+    async fn record_hit(&self, request: &MavenPath) {
         if let Err(error) = self
             .inner
             .database
-            .bump_request_count(request.relative())
+            .record_hit(request.relative(), unix_timestamp())
             .await
         {
             tracing::warn!(
                 %error,
                 path = request.relative(),
-                "failed to record the request counter"
+                "failed to record the request hit"
             );
         }
     }
@@ -119,8 +122,8 @@ impl CacheManager {
         }
     }
 
-    /// Builds a cached artifact from a database record whose file is present,
-    /// refreshing the access timestamp in the database when it changed.
+    /// Builds a cached artifact from a database record whose file is present
+    /// and whose size matches the record.
     pub(crate) async fn positive_cache(
         &self,
         request: &MavenPath,
@@ -142,19 +145,9 @@ impl CacheManager {
                     );
                     return Ok(None);
                 }
-                let now = unix_timestamp();
-                let mut record = record.clone();
-                if record.last_accessed != now {
-                    self.inner
-                        .database
-                        .touch_access(request.relative(), now)
-                        .await
-                        .map_err(internal)?;
-                    record.last_accessed = now;
-                }
                 Ok(Some(CachedArtifact {
                     file_path,
-                    record,
+                    record: record.clone(),
                     status: CacheStatus::Hit,
                     temporary: None,
                     serve_guard: None,
