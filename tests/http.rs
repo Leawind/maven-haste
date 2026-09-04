@@ -190,6 +190,13 @@ async fn serves_client_validators_and_single_byte_ranges_from_cache() {
     assert_eq!(suffix.headers()[CONTENT_LENGTH], "4");
     assert!(body(suffix).await.is_empty());
 
+    let mut inverted_headers = HeaderMap::new();
+    inverted_headers.insert(RANGE, HeaderValue::from_static("bytes=5-2"));
+    let inverted = request_with_headers(&app, Method::GET, ARTIFACT_PATH, inverted_headers).await;
+    assert_eq!(inverted.status(), StatusCode::OK);
+    assert_eq!(inverted.headers()[CONTENT_LENGTH], "13");
+    assert_eq!(body(inverted).await, "artifact-body");
+
     let mut unsatisfiable_headers = HeaderMap::new();
     unsatisfiable_headers.insert(RANGE, HeaderValue::from_static("bytes=20-30"));
     let unsatisfiable =

@@ -587,7 +587,9 @@ fn requested_range(headers: &HeaderMap, size: u64) -> ByteRange {
         end.min(size - 1)
     };
     if end < start {
-        ByteRange::Unsatisfiable
+        // A last-byte-pos below the first-byte-pos makes the whole header
+        // invalid, and an invalid Range header must be ignored (RFC 9110).
+        ByteRange::Full
     } else {
         ByteRange::Partial { start, end }
     }
@@ -607,13 +609,28 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response<Bo
 }
 
 async fn shutdown_signal() {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => {
-            if let Err(error) = crate::logging::notify_shutdown_requested() {
-                tracing::error!(%error, "failed to print shutdown notice");
-            }
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl-C handler");
         }
-        Err(error) => tracing::error!(%error, "failed to install Ctrl-C handler"),
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = interrupt => {}
+        _ = terminate => {}
+    }
+    if let Err(error) = crate::logging::notify_shutdown_requested() {
+        tracing::error!(%error, "failed to print shutdown notice");
     }
 }
 
