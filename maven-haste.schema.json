@@ -16,8 +16,7 @@
             "default": {
                 "max_size": null,
                 "metadata_ttl": "5m",
-                "negative_ttl": "5m",
-                "serve_stale_on_error": true
+                "negative_ttl": "5m"
             }
         },
         "circuit_breaker": {
@@ -97,11 +96,6 @@
                     "examples": [
                         "5m"
                     ]
-                },
-                "serve_stale_on_error": {
-                    "description": "Serve the last cached mutable file when refreshing it encounters an\nupstream failure.",
-                    "type": "boolean",
-                    "default": true
                 }
             },
             "additionalProperties": false

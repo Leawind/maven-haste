@@ -392,9 +392,6 @@ pub struct CacheConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(schema_with = "crate::config::duration_schema")]
     pub negative_ttl: Duration,
-    /// Serve the last cached mutable file when refreshing it encounters an
-    /// upstream failure.
-    pub serve_stale_on_error: bool,
 }
 
 impl Default for CacheConfig {
@@ -403,7 +400,6 @@ impl Default for CacheConfig {
             max_size: None,
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
-            serve_stale_on_error: true,
         }
     }
 }
