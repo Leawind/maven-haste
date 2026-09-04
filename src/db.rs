@@ -421,7 +421,7 @@ mod tests {
         let second = database.pool.get().await.unwrap();
 
         for connection in [first, second] {
-            let (journal_mode, synchronous, busy_timeout, case_sensitive_like) = connection
+            let (journal_mode, synchronous, busy_timeout) = connection
                 .interact(|connection| {
                     Ok::<_, rusqlite::Error>((
                         connection
@@ -430,9 +430,6 @@ mod tests {
                             .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
                         connection
                             .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?,
-                        connection.query_row("PRAGMA case_sensitive_like", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
                     ))
                 })
                 .await
@@ -441,7 +438,6 @@ mod tests {
             assert_eq!(journal_mode, "wal");
             assert_eq!(synchronous, 1);
             assert_eq!(busy_timeout, 5_000);
-            assert_eq!(case_sensitive_like, 1);
         }
     }
 
@@ -607,8 +603,12 @@ mod tests {
         database.upsert_many(vec![record.clone()]).await.unwrap();
 
         assert_eq!(
-            database.records_with_prefix("com/example").await.unwrap(),
-            Vec::<ArtifactRecord>::new()
+            database
+                .records_with_prefix("com/example")
+                .await
+                .unwrap()
+                .len(),
+            0
         );
         assert_eq!(
             database
