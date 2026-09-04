@@ -296,7 +296,7 @@ fn example_config() -> String {
 #[test]
 fn running_binary_serves_health_endpoint() {
     let directory = TempDir::new().unwrap();
-    let (address, response, mut child) = spawn_server(&directory, |bind| {
+    let (_, response, mut child) = spawn_server(&directory, |bind| {
         write_config(&directory, bind);
     });
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
