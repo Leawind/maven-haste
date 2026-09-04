@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
-use crate::cache::{CacheFailure, CacheManager, CachedArtifact, SharedTemp};
+use crate::cache::{CacheFailure, CacheManager, CachedArtifact, ServeGuard, SharedTemp};
 use crate::error::AppError;
 use crate::request_path::{CachePolicy, MavenPath};
 
@@ -132,32 +132,43 @@ async fn artifact(
         Ok(request) => request,
         Err(error) => {
             let response = error_response(StatusCode::BAD_REQUEST, error.to_string());
-            return track_response(response, method, uri.path(), "invalid", None, started, None);
+            return track_response(
+                response,
+                method,
+                uri.path(),
+                "invalid",
+                None,
+                started,
+                ResponseArtifacts::default(),
+            );
         }
     };
-    let (response, cache_status, upstream, temporary) = match state.cache.get(&request).await {
+    let (response, cache_status, upstream, artifacts) = match state.cache.get(&request).await {
         Ok(mut cached) => {
             let cache_status = cached.status.as_str();
             let upstream = cached.record.upstream.clone();
-            let temporary = cached.temporary.take();
+            let artifacts = ResponseArtifacts {
+                temporary: cached.temporary.take(),
+                serve_guard: cached.serve_guard.take(),
+            };
             (
                 cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
                 cache_status,
                 Some(upstream),
-                temporary,
+                artifacts,
             )
         }
         Err(CacheFailure::NotFound) => (
             error_response(StatusCode::NOT_FOUND, "artifact not found"),
             "none",
             None,
-            None,
+            ResponseArtifacts::default(),
         ),
         Err(CacheFailure::Gateway) => (
             error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed"),
             "none",
             None,
-            None,
+            ResponseArtifacts::default(),
         ),
         Err(CacheFailure::Internal(error)) => {
             tracing::error!(path = request.relative(), %error, "cache request failed");
@@ -165,7 +176,7 @@ async fn artifact(
                 error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error"),
                 "error",
                 None,
-                None,
+                ResponseArtifacts::default(),
             )
         }
     };
@@ -176,8 +187,16 @@ async fn artifact(
         cache_status,
         upstream.as_deref(),
         started,
-        temporary,
+        artifacts,
     )
+}
+
+/// Cache-owned resources tied to one response: released when the response
+/// body finishes, aborts, or errors.
+#[derive(Default)]
+struct ResponseArtifacts {
+    temporary: Option<SharedTemp>,
+    serve_guard: Option<ServeGuard>,
 }
 
 fn track_response(
@@ -187,7 +206,7 @@ fn track_response(
     cache: &str,
     upstream: Option<&str>,
     started: Instant,
-    temporary: Option<SharedTemp>,
+    artifacts: ResponseArtifacts,
 ) -> Response<Body> {
     let status = response.status().as_u16();
     let (parts, body) = response.into_parts();
@@ -214,7 +233,7 @@ fn track_response(
         started,
         bytes_sent: 0,
         completion: None,
-        temporary,
+        artifacts,
     }));
     if body.is_end_stream() {
         finish_access(&state, "complete");
@@ -295,7 +314,7 @@ struct AccessState {
     started: Instant,
     bytes_sent: u64,
     completion: Option<&'static str>,
-    temporary: Option<SharedTemp>,
+    artifacts: ResponseArtifacts,
 }
 
 fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
@@ -339,7 +358,9 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     // the last holder; concurrent responses keep their own references. The
     // drop runs synchronously because it may also fire outside a runtime
     // context when a response body is dropped after shutdown.
-    drop(state.temporary.take());
+    let artifacts = &mut state.artifacts;
+    drop(artifacts.temporary.take());
+    drop(artifacts.serve_guard.take());
 }
 
 async fn cached_response(
@@ -615,7 +636,7 @@ mod tests {
             started: Instant::now(),
             bytes_sent: 0,
             completion: None,
-            temporary: None,
+            artifacts: ResponseArtifacts::default(),
         }))
     }
 
@@ -628,7 +649,7 @@ mod tests {
             "none",
             None,
             Instant::now(),
-            None,
+            ResponseArtifacts::default(),
         );
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(response.body().is_end_stream());
@@ -643,7 +664,7 @@ mod tests {
             "none",
             None,
             Instant::now(),
-            None,
+            ResponseArtifacts::default(),
         );
         assert!(!response.body().is_end_stream());
         let body = http_body_util::BodyExt::collect(response.into_body())

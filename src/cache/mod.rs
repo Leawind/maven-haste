@@ -20,9 +20,9 @@ use crate::config::{CacheConfig, StorageConfig};
 use crate::db::{ArtifactRecord, Database};
 use crate::upstream::UpstreamClient;
 
-use types::DownloadOutcome;
+use types::{DownloadOutcome, ServeRegistry};
 
-pub use types::SharedTemp;
+pub use types::{ServeGuard, SharedTemp};
 
 type Flight = OnceCell<Result<DownloadOutcome, CacheFailure>>;
 
@@ -40,6 +40,7 @@ struct CacheInner {
     caching_disabled: HashSet<String>,
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
+    serves: ServeRegistry,
     requests: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -55,6 +56,9 @@ pub struct CachedArtifact {
     /// Shared temporary file to release after the response body is fully
     /// consumed; the file is removed when the last response releases it.
     pub temporary: Option<SharedTemp>,
+    /// Marks the cached file as being served so capacity eviction and prefix
+    /// removal skip it until the response finishes.
+    pub serve_guard: Option<ServeGuard>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +144,7 @@ impl CacheManager {
                 caching_disabled,
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
+                serves: ServeRegistry::default(),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -322,6 +327,23 @@ mod tests {
         assert!(database.get("com/example/mid.jar").await.unwrap().is_some());
         assert!(database.get("com/example/new.jar").await.unwrap().is_some());
         assert_eq!(database.stats().await.unwrap().total_size, 8);
+    }
+
+    #[tokio::test]
+    async fn eviction_skips_files_that_are_currently_being_served() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, Some(8)).await;
+        add_record(&cache, &database, "com/example/old.jar", b"old!", 1, "test").await;
+        add_record(&cache, &database, "com/example/mid.jar", b"mid!", 2, "test").await;
+        add_record(&cache, &database, "com/example/new.jar", b"new!", 3, "test").await;
+
+        let serving = cache.inner.serves.acquire("com/example/old.jar");
+        cache.enforce_capacity(&HashSet::new()).await.unwrap();
+
+        assert!(database.get("com/example/old.jar").await.unwrap().is_some());
+        assert!(database.get("com/example/mid.jar").await.unwrap().is_none());
+        assert!(database.get("com/example/new.jar").await.unwrap().is_some());
+        drop(serving);
     }
 
     #[tokio::test]

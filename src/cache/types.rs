@@ -2,7 +2,59 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use dashmap::DashMap;
+
 use crate::db::ArtifactRecord;
+
+/// Tracks which cached files are currently being served. Eviction and removal
+/// consult the registry so a response never loses its file mid-stream.
+#[derive(Default)]
+pub(crate) struct ServeRegistry {
+    active: Arc<DashMap<String, usize>>,
+}
+
+impl ServeRegistry {
+    /// Marks a cached file as being served; the returned guard releases the
+    /// mark when dropped.
+    pub(crate) fn acquire(&self, path: &str) -> ServeGuard {
+        *self.active.entry(path.to_owned()).or_default() += 1;
+        ServeGuard {
+            registry: Arc::clone(&self.active),
+            path: path.to_owned(),
+        }
+    }
+
+    pub(crate) fn is_busy(&self, path: &str) -> bool {
+        self.active.contains_key(path)
+    }
+}
+
+/// An active-serve mark for one cached file.
+pub struct ServeGuard {
+    registry: Arc<DashMap<String, usize>>,
+    path: String,
+}
+
+impl std::fmt::Debug for ServeGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServeGuard")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl Drop for ServeGuard {
+    fn drop(&mut self) {
+        if let Some(mut count) = self.registry.get_mut(&self.path) {
+            *count -= 1;
+            if *count == 0 {
+                drop(count);
+                self.registry.remove(&self.path);
+            }
+        }
+    }
+}
 
 /// The outcome of a prepared fetch, before anything is written into the cache.
 pub(crate) enum PreparedFetch {

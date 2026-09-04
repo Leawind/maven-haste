@@ -161,7 +161,9 @@ impl crate::cache::CacheManager {
     }
 
     fn path_is_busy(&self, path: &str) -> bool {
-        self.inner.flights.contains_key(path) || self.inner.refreshes.contains_key(path)
+        self.inner.flights.contains_key(path)
+            || self.inner.refreshes.contains_key(path)
+            || self.inner.serves.is_busy(path)
     }
 
     pub(crate) async fn fresh_negative_entries(

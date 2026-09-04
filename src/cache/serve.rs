@@ -40,6 +40,7 @@ impl CacheManager {
                     self.trigger_refresh(request.clone(), cached.record.clone());
                 }
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
+                cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
                 return Ok(cached);
             }
             let negative = self.fresh_negative_entries(request.relative()).await?;
@@ -53,8 +54,9 @@ impl CacheManager {
                 self.log_not_found(request);
                 return Err(CacheFailure::NotFound);
             }
-        } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
+        } else if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
             self.inner.hits.fetch_add(1, Ordering::Relaxed);
+            cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
             return Ok(cached);
         }
 
@@ -77,6 +79,7 @@ impl CacheManager {
                         CacheFailure::Internal("download completed without a cache record".into())
                     })?;
                 cached.status = CacheStatus::Miss;
+                cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
                 Ok(cached)
             }
             DownloadOutcome::Passthrough(prepared) => {
@@ -86,6 +89,7 @@ impl CacheManager {
                     record: prepared.record,
                     status: CacheStatus::Miss,
                     temporary: Some(prepared.temporary),
+                    serve_guard: None,
                 })
             }
         }
@@ -128,6 +132,16 @@ impl CacheManager {
         let file_path = request.final_path(&self.inner.storage.root);
         match fs::metadata(&file_path).await {
             Ok(metadata) if metadata.is_file() => {
+                let expected = record.file_size.max(0) as u64;
+                if metadata.len() != expected {
+                    tracing::warn!(
+                        path = request.relative(),
+                        database = expected,
+                        file = metadata.len(),
+                        "cached file size does not match its record; fetching it again"
+                    );
+                    return Ok(None);
+                }
                 let now = unix_timestamp();
                 let mut record = record.clone();
                 if record.last_accessed != now {
@@ -143,6 +157,7 @@ impl CacheManager {
                     record,
                     status: CacheStatus::Hit,
                     temporary: None,
+                    serve_guard: None,
                 }))
             }
             Ok(_) => Ok(None),

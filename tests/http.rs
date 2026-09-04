@@ -102,6 +102,44 @@ async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
 }
 
 #[tokio::test]
+async fn refetches_a_cached_file_whose_size_no_longer_matches_its_record() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                Response::new(Body::from("artifact-body"))
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    let cached_path = directory
+        .path()
+        .join("repository/com/example/demo/1.0/demo-1.0.jar");
+    tokio::fs::create_dir_all(cached_path.parent().unwrap())
+        .await
+        .unwrap();
+
+    let first = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(body(first).await, "artifact-body");
+    tokio::fs::write(&cached_path, "corrupt").await.unwrap();
+
+    let second = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(body(second).await, "artifact-body");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
+#[tokio::test]
 async fn serves_client_validators_and_single_byte_ranges_from_cache() {
     let upstream = Router::new().route(
         "/{*path}",
