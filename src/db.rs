@@ -14,10 +14,13 @@ include_sql!("/sql/cache.sql");
 /// Connection settings applied to every pooled connection. `journal_mode=WAL`
 /// is a persistent database-file property; setting it on each connection keeps
 /// fresh databases in WAL mode without mixing pragmas into schema migrations.
+/// `case_sensitive_like` keeps prefix matching exact so a removal cannot match
+/// differently cased paths whose files would then be left behind.
 const CONNECTION_PRAGMAS: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 PRAGMA busy_timeout=5000;
+PRAGMA case_sensitive_like=ON;
 "#;
 
 // Schema migrations embedded from the `migrations/` directory at build time
@@ -418,7 +421,7 @@ mod tests {
         let second = database.pool.get().await.unwrap();
 
         for connection in [first, second] {
-            let (journal_mode, synchronous, busy_timeout) = connection
+            let (journal_mode, synchronous, busy_timeout, case_sensitive_like) = connection
                 .interact(|connection| {
                     Ok::<_, rusqlite::Error>((
                         connection
@@ -427,6 +430,9 @@ mod tests {
                             .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))?,
                         connection
                             .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?,
+                        connection.query_row("PRAGMA case_sensitive_like", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
                     ))
                 })
                 .await
@@ -435,6 +441,7 @@ mod tests {
             assert_eq!(journal_mode, "wal");
             assert_eq!(synchronous, 1);
             assert_eq!(busy_timeout, 5_000);
+            assert_eq!(case_sensitive_like, 1);
         }
     }
 
@@ -572,6 +579,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(database.stats().await.unwrap().negative_entries, 1);
+    }
+
+    #[tokio::test]
+    async fn matches_prefixes_case_sensitively() {
+        let directory = TempDir::new().unwrap();
+        let database = Database::open(&directory.path().join("cache.db"))
+            .await
+            .unwrap();
+        let record = ArtifactRecord {
+            path: "COM/Example/demo.jar".into(),
+            group_id: "Com.Example".into(),
+            artifact_id: "demo".into(),
+            version: "1.0".into(),
+            file_type: "jar".into(),
+            upstream: "central".into(),
+            sha1: None,
+            sha256: None,
+            etag: None,
+            last_modified: None,
+            file_size: 42,
+            created_at: 123,
+            last_refresh_attempt: None,
+            last_accessed: 123,
+            request_count: 0,
+        };
+        database.upsert_many(vec![record.clone()]).await.unwrap();
+
+        assert_eq!(
+            database.records_with_prefix("com/example").await.unwrap(),
+            Vec::<ArtifactRecord>::new()
+        );
+        assert_eq!(
+            database
+                .records_with_prefix("COM/Example")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
