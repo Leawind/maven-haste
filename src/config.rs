@@ -13,7 +13,12 @@ use crate::cli::Cli;
 use crate::error::ConfigError;
 
 /// Configuration file names probed per directory, one for each supported format.
-const CONFIG_FILE_NAMES: &[&str] = &["maven-haste.json", "maven-haste.toml", "maven-haste.yaml"];
+const CONFIG_FILE_NAMES: &[&str] = &[
+    "maven-haste.json",
+    "maven-haste.toml",
+    "maven-haste.yaml",
+    "maven-haste.yml",
+];
 
 /// File name used by `config init` when no path is given; the minimal example
 /// is written as TOML.
@@ -375,6 +380,7 @@ impl StorageConfig {
 pub struct CacheConfig {
     /// Optional maximum number of cached artifact bytes; omit to retain
     /// cached files indefinitely.
+    #[schemars(range(min = 1))]
     pub max_size: Option<u64>,
     /// How long mutable metadata may be served before a background refresh
     /// starts.
@@ -418,12 +424,15 @@ pub struct UpstreamConfig {
     pub read_timeout: Duration,
     /// Maximum number of simultaneous requests across all upstream
     /// repositories.
+    #[schemars(range(min = 1))]
     pub max_concurrency: usize,
     /// Per-repository concurrency limit when a repository does not override
     /// it.
+    #[schemars(range(min = 1))]
     pub default_repository_max_concurrency: usize,
     /// Admit one queued cache refresh after this many foreground downloads
     /// while both are waiting.
+    #[schemars(range(min = 1))]
     pub foreground_priority_burst: usize,
     /// Optional global upstream proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -450,6 +459,7 @@ impl Default for UpstreamConfig {
 pub struct CircuitBreakerConfig {
     /// Consecutive upstream failures required before temporarily skipping
     /// that repository.
+    #[schemars(range(min = 1))]
     pub failure_threshold: u32,
     /// Time to wait before probing an upstream repository after its circuit
     /// opens.
@@ -484,6 +494,7 @@ pub struct RepositoryConfig {
     /// Optional per-repository override of
     /// `default_repository_max_concurrency`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
     pub max_concurrency: Option<usize>,
     /// Optional ordered request-path glob rules; the first matching rule
     /// decides participation. Prefix a rule with `!` to exclude it; `*`
@@ -767,6 +778,7 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
     }
 
     let mut ids = HashSet::new();
+    let mut urls = HashSet::new();
     for repository in &config.repositories {
         if repository.id.trim().is_empty() {
             return Err(ConfigError::new("repository id must not be empty"));
@@ -778,6 +790,12 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
             )));
         }
         validate_repository_id(&repository.id)?;
+        if !urls.insert(repository.url.as_str().to_owned()) {
+            return Err(ConfigError::new(format!(
+                "repository {:?} URL {} is already used by another repository",
+                repository.id, repository.url
+            )));
+        }
         if repository.use_proxy == Some(true) && config.upstream.proxy.is_none() {
             return Err(ConfigError::new(format!(
                 "repository {:?} has use_proxy = true but [upstream].proxy is not configured",
@@ -1080,6 +1098,10 @@ mod tests {
                 "maven-haste.yaml",
                 "storage:\n  root: repository\nrepositories: []\n",
             ),
+            (
+                "maven-haste.yml",
+                "storage:\n  root: repository\nrepositories: []\n",
+            ),
         ];
         for (name, body) in candidates {
             let path = directory.path().join(name);
@@ -1246,6 +1268,35 @@ url = "https://repo.example/"
         assert_eq!(
             Config::load(cli1).unwrap().config.server.base_path,
             "/apiary"
+        );
+    }
+
+    #[test]
+    fn rejects_repositories_that_share_one_url() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/maven2"
+
+[[repositories]]
+id = "mirror"
+url = "https://repo.example/maven2"
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is already used by another repository"),
+            "unexpected error: {error}"
         );
     }
 

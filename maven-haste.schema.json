@@ -80,7 +80,7 @@
                     ],
                     "format": "uint64",
                     "default": null,
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "metadata_ttl": {
                     "description": "How long mutable metadata may be served before a background refresh\nstarts.",
@@ -115,7 +115,7 @@
                     "type": "integer",
                     "format": "uint32",
                     "default": 3,
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "recovery_timeout": {
                     "description": "Time to wait before probing an upstream repository after its circuit\nopens.",
@@ -180,7 +180,7 @@
                         "null"
                     ],
                     "format": "uint",
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "rules": {
                     "description": "Optional ordered request-path glob rules; the first matching rule\ndecides participation. Prefix a rule with `!` to exclude it; `*`\nmatches within one path segment and `**` may match across path\nseparators.",
@@ -275,21 +275,21 @@
                     "type": "integer",
                     "format": "uint",
                     "default": 10,
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "foreground_priority_burst": {
                     "description": "Admit one queued cache refresh after this many foreground downloads\nwhile both are waiting.",
                     "type": "integer",
                     "format": "uint",
                     "default": 8,
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "max_concurrency": {
                     "description": "Maximum number of simultaneous requests across all upstream\nrepositories.",
                     "type": "integer",
                     "format": "uint",
                     "default": 32,
-                    "minimum": 0
+                    "minimum": 1
                 },
                 "proxy": {
                     "description": "Optional global upstream proxy.",

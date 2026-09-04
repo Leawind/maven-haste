@@ -47,10 +47,20 @@ impl ConfigCommand {
             }
             ConfigCommand::Check => {
                 let loaded = Config::load(cli)?;
+                let storage = crate::storage::prepare(&loaded.config.storage).await?;
                 if loaded.config.logging.enabled {
                     crate::logging::validate_directory(&loaded.config.logging)?;
                 }
                 println!("configuration is valid: {}", loaded.path.display());
+                println!(
+                    "storage is ready: {} ({})",
+                    loaded.config.storage.root.display(),
+                    if storage.case_sensitive {
+                        "case-sensitive"
+                    } else {
+                        "case-insensitive"
+                    }
+                );
                 println!(
                     "start the proxy: maven-haste run --config {}",
                     loaded.path.display()
