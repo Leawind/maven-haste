@@ -18,26 +18,44 @@ impl CircuitBreaker {
         }
     }
 
+    /// Whether a request to `repository` may proceed. In the half-open state
+    /// exactly one probe is admitted; a probe whose lease (the recovery
+    /// timeout) expires without reporting an outcome — for example because the
+    /// requesting task was canceled mid-download — releases the slot so a new
+    /// probe can run and the repository cannot stay wedged.
     pub fn allow(&self, repository: &str) -> bool {
         let mut state = self.states.entry(repository.to_owned()).or_default();
         match state.mode {
             CircuitMode::Closed => true,
             CircuitMode::Open { since } if since.elapsed() >= self.recovery_timeout => {
-                state.mode = CircuitMode::HalfOpen { in_flight: true };
+                state.mode = CircuitMode::HalfOpen {
+                    probe_since: Instant::now(),
+                };
                 true
             }
             CircuitMode::Open { .. } => false,
-            CircuitMode::HalfOpen { in_flight: false } => {
-                state.mode = CircuitMode::HalfOpen { in_flight: true };
+            CircuitMode::HalfOpen { probe_since }
+                if probe_since.elapsed() >= self.recovery_timeout =>
+            {
+                state.mode = CircuitMode::HalfOpen {
+                    probe_since: Instant::now(),
+                };
                 true
             }
-            CircuitMode::HalfOpen { in_flight: true } => false,
+            CircuitMode::HalfOpen { .. } => false,
         }
     }
 
+    /// Records a successful upstream exchange. A success observed while the
+    /// circuit is open (for example a long download that was admitted before
+    /// the circuit opened) leaves the open circuit and its failure count
+    /// untouched.
     pub fn record_success(&self, repository: &str) {
-        self.states
-            .insert(repository.to_owned(), CircuitState::default());
+        let mut state = self.states.entry(repository.to_owned()).or_default();
+        if matches!(state.mode, CircuitMode::Open { .. }) {
+            return;
+        }
+        *state = CircuitState::default();
     }
 
     pub fn record_failure(&self, repository: &str) {
@@ -104,7 +122,7 @@ impl Default for CircuitState {
 enum CircuitMode {
     Closed,
     Open { since: Instant },
-    HalfOpen { in_flight: bool },
+    HalfOpen { probe_since: Instant },
 }
 
 #[cfg(test)]
@@ -126,12 +144,35 @@ mod tests {
 
     #[test]
     fn half_open_allows_only_one_probe() {
-        let breaker = CircuitBreaker::new(1, Duration::ZERO);
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(20));
         breaker.record_failure("central");
+        std::thread::sleep(Duration::from_millis(40));
         assert!(breaker.allow("central"));
         assert!(!breaker.allow("central"));
         breaker.record_success("central");
         assert!(breaker.allow("central"));
+    }
+
+    #[test]
+    fn abandoned_half_open_probe_releases_the_slot_after_the_recovery_timeout() {
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(20));
+        breaker.record_failure("central");
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(breaker.allow("central"));
+        assert!(!breaker.allow("central"));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(breaker.allow("central"));
+    }
+
+    #[test]
+    fn success_does_not_close_an_open_circuit() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(60));
+        assert!(breaker.allow("central"));
+        breaker.record_failure("central");
+        assert!(!breaker.allow("central"));
+        breaker.record_success("central");
+        assert_eq!(breaker.status("central").state, "open");
+        assert!(!breaker.allow("central"));
     }
 
     #[test]
