@@ -66,6 +66,15 @@ impl crate::cache::CacheManager {
             })?;
         }
 
+        // Records are written before the files are renamed into place: an
+        // interruption then leaves a record whose file is missing or stale,
+        // which the next request detects and repairs by fetching again. The
+        // reverse order would leave untracked files that nothing can see.
+        self.inner
+            .database
+            .upsert_many(files.iter().map(|file| file.record.clone()).collect())
+            .await
+            .map_err(internal)?;
         let install_order = (1..files.len()).chain(std::iter::once(0));
         for index in install_order {
             let file = &files[index];
@@ -79,11 +88,6 @@ impl crate::cache::CacheManager {
                     ))
                 })?;
         }
-        self.inner
-            .database
-            .upsert_many(files.iter().map(|file| file.record.clone()).collect())
-            .await
-            .map_err(internal)?;
         let protected = files
             .iter()
             .map(|file| file.relative.as_str())

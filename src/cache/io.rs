@@ -119,10 +119,19 @@ pub(crate) async fn create_temporary(path: &Path) -> Result<fs::File, CacheFailu
         })
 }
 
+/// Flushes user-space buffers and persists the file contents before the file
+/// is renamed into the cache, so a rename can never publish a file whose data
+/// was not yet written to disk.
 pub(crate) async fn flush_temporary(mut file: fs::File, path: &Path) -> Result<(), CacheFailure> {
     file.flush().await.map_err(|error| {
         CacheFailure::Internal(format!(
             "failed to flush temporary file {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.sync_all().await.map_err(|error| {
+        CacheFailure::Internal(format!(
+            "failed to persist temporary file {}: {error}",
             path.display()
         ))
     })?;
