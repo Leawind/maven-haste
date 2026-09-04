@@ -296,19 +296,9 @@ fn example_config() -> String {
 #[test]
 fn running_binary_serves_health_endpoint() {
     let directory = TempDir::new().unwrap();
-    let address = unused_address();
-    let config = write_config(&directory, &address.to_string());
-    let child = Command::new(binary())
-        .arg("run")
-        .arg("--config")
-        .arg(config)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut child = KillOnDrop(child);
-
-    let response = wait_for_health(address);
+    let (address, response, mut child) = spawn_server(&directory, |bind| {
+        write_config(&directory, bind);
+    });
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.ends_with("OK"), "{response}");
 
@@ -319,22 +309,13 @@ fn running_binary_serves_health_endpoint() {
 #[test]
 fn file_logging_writes_daily_json_access_events() {
     let directory = TempDir::new().unwrap();
-    let address = unused_address();
-    let config = write_config(&directory, &address.to_string());
-    let mut source = std::fs::read_to_string(&config).unwrap();
-    source.push_str("\n[logging]\nenabled = true\n");
-    std::fs::write(&config, source).unwrap();
-    let child = Command::new(binary())
-        .arg("run")
-        .arg("--config")
-        .arg(config)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut child = KillOnDrop(child);
+    let (address, _, mut child) = spawn_server(&directory, |bind| {
+        let config = write_config(&directory, bind);
+        let mut source = std::fs::read_to_string(&config).unwrap();
+        source.push_str("\n[logging]\nenabled = true\n");
+        std::fs::write(&config, source).unwrap();
+    });
 
-    wait_for_health(address);
     let response = wait_for_response(address, "/maven/com/example/demo/1.0/demo-1.0.jar");
     assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
 
@@ -381,8 +362,37 @@ fn unused_address() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 
-fn wait_for_health(address: SocketAddr) -> String {
+/// Spawns the binary on a freshly probed unused port and waits for its health
+/// endpoint, returning the address, the health response, and the child
+/// process. The port probe cannot hold the port, so losing the bind to
+/// another process between the probe and the server start is retried with a
+/// new port instead of failing the test.
+fn spawn_server(directory: &TempDir, configure: impl Fn(&str)) -> (SocketAddr, String, KillOnDrop) {
+    for _ in 0..5 {
+        let address = unused_address();
+        configure(&address.to_string());
+        let mut child = KillOnDrop(
+            Command::new(binary())
+                .arg("run")
+                .arg("--config")
+                .arg(directory.path().join("maven-haste.toml"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        if let Some(response) = wait_for_health(&address, &mut child) {
+            return (address, response, child);
+        }
+    }
+    panic!("server did not start on any unused port");
+}
+
+fn wait_for_health(address: &SocketAddr, child: &mut KillOnDrop) -> Option<String> {
     for _ in 0..100 {
+        if matches!(child.0.try_wait(), Ok(Some(_))) {
+            return None;
+        }
         if let Ok(mut stream) = TcpStream::connect(address) {
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
@@ -394,11 +404,11 @@ fn wait_for_health(address: SocketAddr) -> String {
                 .unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
-            return response;
+            return Some(response);
         }
         thread::sleep(Duration::from_millis(20));
     }
-    panic!("server did not listen on {address}");
+    None
 }
 
 fn wait_for_response(address: SocketAddr, path: &str) -> String {
