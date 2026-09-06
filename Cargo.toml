@@ -23,7 +23,7 @@ humantime-serde = "1.1"
 include-sqlite-sql = "0.2"
 mime_guess = "2.0"
 percent-encoding = "2.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 sha1 = "0.11"
