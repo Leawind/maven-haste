@@ -47,6 +47,9 @@ impl ConfigCommand {
             }
             ConfigCommand::Check => {
                 let loaded = Config::load(cli)?;
+                for warning in &loaded.warnings {
+                    println!("warning: {warning}");
+                }
                 let storage = crate::storage::prepare(&loaded.config.storage).await?;
                 if loaded.config.logging.enabled {
                     crate::logging::validate_directory(&loaded.config.logging)?;
@@ -69,6 +72,9 @@ impl ConfigCommand {
             }
             ConfigCommand::Show => {
                 let loaded = Config::load(cli)?;
+                for warning in &loaded.warnings {
+                    eprintln!("warning: {warning}");
+                }
 
                 print!("{}", toml::to_string_pretty(&loaded.config)?);
                 Ok(())
@@ -81,8 +87,7 @@ impl ConfigCommand {
                 Ok(())
             }
             ConfigCommand::Schema { output } => {
-                let schema =
-                    serde_json::to_string_pretty(&schemars::schema_for!(crate::config::Config))?;
+                let schema = serde_json::to_string_pretty(&crate::config::generated_schema())?;
                 match output {
                     Some(path) => {
                         let mut file = std::fs::OpenOptions::new()

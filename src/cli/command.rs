@@ -36,6 +36,9 @@ impl Command {
                 let storage = storage::prepare(&loaded.config.storage).await?;
 
                 let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
+                for warning in &loaded.warnings {
+                    tracing::warn!("{warning}");
+                }
                 tracing::info!(config = %loaded.path.display(), "loaded configuration");
                 tracing::info!(
                     root = %loaded.config.storage.root.display(),

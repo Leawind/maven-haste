@@ -12,6 +12,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Configuration files with unknown fields now start with a warning naming each unknown path (for example `repositories[0].telemetry`) instead of being rejected; `run`, `config check`, and `config show` report the warnings. The JSON schema keeps flagging unknown keys for editors and AI tools.
 - Cache installation writes database records before renaming files into place, so an interrupted install is repaired by the next request instead of leaving untracked files. Temporary files are synced to disk before the atomic rename.
 - Each cache hit now issues a single database write that updates the request counter and the access timestamp together.
 - Prefix removal matches paths case-sensitively, symmetric with install-time case-conflict handling.

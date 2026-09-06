@@ -245,12 +245,154 @@ pub fn socket_addr_schema(_: &mut SchemaGenerator) -> Schema {
 pub struct LoadedConfig {
     pub path: PathBuf,
     pub config: Config,
+    /// Human-readable notices about configuration keys that are not part of
+    /// the current schema; the configuration is accepted regardless.
+    pub warnings: Vec<String>,
+}
+
+/// The JSON schema describing the configuration, with unknown-key rejection
+/// re-applied after generation: parsing tolerates unknown fields (they only
+/// warn), but editors and AI tools should still flag them.
+pub fn generated_schema() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(Config))
+        .expect("the configuration schema always serializes");
+    apply_strict_objects(&mut schema);
+    schema
+}
+
+fn apply_strict_objects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("properties") {
+                map.entry("additionalProperties")
+                    .or_insert(serde_json::Value::Bool(false));
+            }
+            for child in map.values_mut() {
+                apply_strict_objects(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                apply_strict_objects(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+enum SchemaSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn render_segment_path(path: &[SchemaSegment]) -> String {
+    path.iter()
+        .enumerate()
+        .map(|(index, segment)| match segment {
+            SchemaSegment::Key(key) if index == 0 => key.clone(),
+            SchemaSegment::Key(key) => format!(".{key}"),
+            SchemaSegment::Index(position) => format!("[{position}]"),
+        })
+        .collect()
+}
+
+/// Collects the rendered paths of document keys that the schema does not
+/// define, walking arrays and `$ref`-resolved definitions.
+fn collect_unknown_fields(
+    document: &serde_json::Value,
+    schema: &serde_json::Value,
+    root: &serde_json::Value,
+    path: &mut Vec<SchemaSegment>,
+    unknown: &mut Vec<String>,
+) {
+    let schema = resolve_schema_reference(schema, root);
+    match document {
+        serde_json::Value::Object(map) => {
+            let Some(properties) = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            else {
+                return;
+            };
+            let allows_all_keys = matches!(
+                schema.get("additionalProperties"),
+                Some(serde_json::Value::Bool(true))
+            );
+            let additional_schema = match schema.get("additionalProperties") {
+                Some(value) if value.is_object() => Some(value),
+                _ => None,
+            };
+            for (key, value) in map {
+                if let Some(property_schema) = properties.get(key) {
+                    path.push(SchemaSegment::Key(key.clone()));
+                    collect_unknown_fields(value, property_schema, root, path, unknown);
+                    path.pop();
+                } else if let Some(additional_schema) = additional_schema {
+                    path.push(SchemaSegment::Key(key.clone()));
+                    collect_unknown_fields(value, additional_schema, root, path, unknown);
+                    path.pop();
+                } else if !allows_all_keys {
+                    path.push(SchemaSegment::Key(key.clone()));
+                    unknown.push(render_segment_path(path));
+                    path.pop();
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if let Some(item_schema) = schema.get("items") {
+                for (position, item) in items.iter().enumerate() {
+                    path.push(SchemaSegment::Index(position));
+                    collect_unknown_fields(item, item_schema, root, path, unknown);
+                    path.pop();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_schema_reference<'a>(
+    schema: &'a serde_json::Value,
+    root: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    schema
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|name| root.get("$defs").and_then(|defs| defs.get(name)))
+        .unwrap_or(schema)
+}
+
+/// Parses the configuration source into a generic document for unknown-field
+/// detection; formats whose values cannot be normalized simply skip the scan.
+fn document_value(source: &str, format: ConfigFormat) -> Option<serde_json::Value> {
+    match format {
+        ConfigFormat::Json => serde_json::from_str(source).ok(),
+        ConfigFormat::Yaml => serde_yaml_ng::from_str::<serde_yaml_ng::Value>(source)
+            .ok()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        ConfigFormat::Toml => toml::from_str::<toml::Value>(source)
+            .ok()
+            .and_then(|value| serde_json::to_value(value).ok()),
+    }
+}
+
+fn unknown_field_warnings(source: &str, format: ConfigFormat) -> Vec<String> {
+    let Some(document) = document_value(source, format) else {
+        return Vec::new();
+    };
+    let schema = generated_schema();
+    let mut unknown = Vec::new();
+    collect_unknown_fields(&document, &schema, &schema, &mut Vec::new(), &mut unknown);
+    unknown
+        .into_iter()
+        .map(|path| format!("ignoring unknown configuration field `{path}`"))
+        .collect()
 }
 
 /// Everything maven-haste needs to run: server, storage, cache, upstream,
 /// circuit breaker, logging, and repository settings.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 #[schemars(title = "Maven Haste Configuration")]
 pub struct Config {
     /// Editor and linter hint that locates the JSON schema describing this
@@ -273,7 +415,7 @@ pub struct Config {
 
 /// Optional JSON Lines file logging settings.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LoggingConfig {
     /// Write JSON Lines logs to daily files.
     pub enabled: bool,
@@ -312,7 +454,7 @@ impl Default for LoggingConfig {
 /// Optional server settings; omit this table to use `127.0.0.1:8080` and
 /// `/maven`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ServerConfig {
     /// Address on which Maven Haste accepts HTTP requests.
     #[schemars(schema_with = "crate::config::socket_addr_schema")]
@@ -334,7 +476,6 @@ impl Default for ServerConfig {
 /// Storage layout: the cache root plus the internal directories, all resolved
 /// relative to the configuration file's directory.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     /// Directory used for cached artifacts, temporary downloads, and the
     /// SQLite database. Relative paths are resolved against the configuration
@@ -376,7 +517,7 @@ impl StorageConfig {
 
 /// Optional cache settings; omit this table to use the defaults below.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CacheConfig {
     /// Optional maximum number of cached artifact bytes; omit to retain
     /// cached files indefinitely.
@@ -406,7 +547,7 @@ impl Default for CacheConfig {
 
 /// Optional upstream settings; omit this table to use the defaults below.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct UpstreamConfig {
     /// Maximum time allowed to establish a connection to an upstream
     /// repository.
@@ -451,7 +592,7 @@ impl Default for UpstreamConfig {
 /// Optional circuit-breaker settings; omit this table to use the defaults
 /// below.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct CircuitBreakerConfig {
     /// Consecutive upstream failures required before temporarily skipping
     /// that repository.
@@ -475,7 +616,6 @@ impl Default for CircuitBreakerConfig {
 
 /// One upstream Maven repository; at least one entry is required.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
     /// Required unique repository id used for routing, circuit breaking,
     /// logging, and statistics; use only lowercase letters, digits,
@@ -564,6 +704,7 @@ impl Config {
             ))
         })?;
         let mut config: Config = parse_config(&source, &path)?;
+        let warnings = unknown_field_warnings(&source, format_for_path(&path)?);
 
         validate_raw_storage_paths(&config.storage)?;
         validate_raw_logging_paths(&config.logging)?;
@@ -578,7 +719,11 @@ impl Config {
         }
         validate(&config)?;
 
-        Ok(LoadedConfig { path, config })
+        Ok(LoadedConfig {
+            path,
+            config,
+            warnings,
+        })
     }
 }
 
@@ -1344,7 +1489,7 @@ url = "https://repo.example/"
     }
 
     #[test]
-    fn rejects_unknown_nested_logging_configuration() {
+    fn warns_about_unknown_nested_logging_fields() {
         let directory = TempDir::new().unwrap();
         let path = write_config(
             &directory,
@@ -1362,7 +1507,60 @@ url = "https://repo.example/"
         );
 
         let cli1 = &cli(&path);
-        assert!(Config::load(cli1).is_err());
+        let loaded = Config::load(cli1).unwrap();
+        assert_eq!(
+            loaded.warnings,
+            vec!["ignoring unknown configuration field `logging.file`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn warns_about_unknown_top_level_fields() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+telemetry = true
+
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
+        assert_eq!(
+            loaded.warnings,
+            vec!["ignoring unknown configuration field `telemetry`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn warns_about_unknown_repository_fields_with_index_paths() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+telemetry = true
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
+        assert_eq!(
+            loaded.warnings,
+            vec!["ignoring unknown configuration field `repositories[0].telemetry`".to_owned()]
+        );
     }
 
     #[test]
@@ -1599,7 +1797,7 @@ url = "https://repo.example/"
     }
 
     #[test]
-    fn rejects_zero_upstream_timeouts_and_removed_refresh_timeout() {
+    fn rejects_zero_upstream_timeouts() {
         let directory = TempDir::new().unwrap();
         for body in [
             r#"
@@ -1630,28 +1828,6 @@ root = "repository"
 
 [upstream]
 read_timeout = "0s"
-
-[[repositories]]
-id = "central"
-url = "https://repo.example/"
-"#,
-            r#"
-[storage]
-root = "repository"
-
-[cache]
-refresh_timeout = "10s"
-
-[[repositories]]
-id = "central"
-url = "https://repo.example/"
-"#,
-            r#"
-[storage]
-root = "repository"
-
-[cache]
-refresh_max_concurrency = 10
 
 [[repositories]]
 id = "central"
@@ -1703,6 +1879,45 @@ max_concurrency = 0
             let path = write_config(&directory, body);
             let cli1 = &cli(&path);
             assert!(Config::load(cli1).is_err());
+        }
+    }
+
+    #[test]
+    fn warns_about_removed_cache_keys_instead_of_rejecting() {
+        let directory = TempDir::new().unwrap();
+        for body in [
+            r#"
+[storage]
+root = "repository"
+
+[cache]
+refresh_timeout = "10s"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[cache]
+refresh_max_concurrency = 10
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        ] {
+            let path = write_config(&directory, body);
+            let cli1 = &cli(&path);
+            let loaded = Config::load(cli1).unwrap();
+            assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+            assert!(
+                loaded.warnings[0].starts_with("ignoring unknown configuration field `cache."),
+                "{:?}",
+                loaded.warnings
+            );
         }
     }
 
@@ -1823,7 +2038,7 @@ cache_writes = false
     fn committed_schema_matches_the_generated_schema() {
         // `maven-haste.schema.json` is generated by `config schema`; this test
         // guards against forgetting to regenerate it after a config change.
-        let generated = serde_json::to_value(schemars::schema_for!(Config)).unwrap();
+        let generated = generated_schema();
         let committed: serde_json::Value =
             serde_json::from_str(include_str!("../maven-haste.schema.json")).unwrap();
         assert_eq!(generated, committed);
@@ -1831,7 +2046,7 @@ cache_writes = false
 
     #[test]
     fn schema_describes_key_validation_rules() {
-        let schema = serde_json::to_value(schemars::schema_for!(Config)).unwrap();
+        let schema = generated_schema();
         let root = schema.as_object().unwrap();
         assert_eq!(root["additionalProperties"], serde_json::Value::Bool(false));
         assert_eq!(
