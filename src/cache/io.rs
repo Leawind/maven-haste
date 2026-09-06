@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
-use sha1::{Digest, Sha1};
-use sha2::{Sha256, Sha512};
+use sha1::{Digest as _, Sha1};
+use sha2::{Digest as _, Sha256, Sha512};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -51,9 +51,9 @@ pub(crate) async fn stream_to_file(
     flush_temporary(file, destination).await?;
     Ok((
         size,
-        format!("{:x}", sha1.finalize()),
-        format!("{:x}", sha256.finalize()),
-        format!("{:x}", sha512.finalize()),
+        to_hex(&sha1.finalize()),
+        to_hex(&sha256.finalize()),
+        to_hex(&sha512.finalize()),
     ))
 }
 
@@ -173,10 +173,14 @@ pub(crate) async fn hash_file(
     }
     Ok((
         size,
-        format!("{:x}", sha1.finalize()),
-        format!("{:x}", sha256.finalize()),
-        format!("{:x}", sha512.finalize()),
+        to_hex(&sha1.finalize()),
+        to_hex(&sha256.finalize()),
+        to_hex(&sha512.finalize()),
     ))
+}
+
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) async fn remove_empty_parents(parent: Option<&Path>, root: &Path) {

@@ -204,13 +204,13 @@ impl CacheManager {
 
 #[cfg(test)]
 mod tests {
-    use sha1::{Digest, Sha1};
-    use sha2::Sha256;
+    use sha1::{Digest as _, Sha1};
+    use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
     use url::Url;
 
     use super::*;
-    use crate::cache::io::relative_file_path;
+    use crate::cache::io::{relative_file_path, to_hex};
     use crate::config::{
         CircuitBreakerConfig, Config, LoggingConfig, RepositoryConfig, ServerConfig, UpstreamConfig,
     };
@@ -295,8 +295,8 @@ mod tests {
                 version: "1.0".into(),
                 file_type: "jar".into(),
                 upstream: upstream.into(),
-                sha1: Some(format!("{:x}", Sha1::digest(content))),
-                sha256: Some(format!("{:x}", Sha256::digest(content))),
+                sha1: Some(to_hex(&Sha1::digest(content))),
+                sha256: Some(to_hex(&Sha256::digest(content))),
                 etag: None,
                 last_modified: None,
                 file_size: content.len() as i64,
