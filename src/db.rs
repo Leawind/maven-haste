@@ -301,9 +301,9 @@ impl Database {
             };
             connection.stats(|row| {
                 stats = DatabaseStats {
-                    files: row.get::<_, u64>(0)?,
-                    total_size: row.get::<_, u64>(1)?,
-                    negative_entries: row.get::<_, u64>(2)?,
+                    files: row.get::<_, i64>(0)?.max(0) as u64,
+                    total_size: row.get::<_, i64>(1)?.max(0) as u64,
+                    negative_entries: row.get::<_, i64>(2)?.max(0) as u64,
                 };
                 Ok(())
             })?;
