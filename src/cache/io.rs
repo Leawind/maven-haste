@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use sha1::{Digest as _, Sha1};
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Sha256, Sha512};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;

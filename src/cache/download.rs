@@ -2,13 +2,13 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use reqwest::header::{ETAG, LAST_MODIFIED};
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 
 use crate::cache::CacheFailure;
 use crate::cache::io::{
     cleanup_downloads, cleanup_prepared, hash_file, header_string, internal,
-    read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, unix_timestamp,
-    write_temporary,
+    read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, to_hex,
+    unix_timestamp, write_temporary,
 };
 use crate::cache::types::{
     DownloadOutcome, DownloadedMain, PassthroughFile, PreparedFetch, PreparedFile, SharedTemp,
@@ -331,7 +331,7 @@ impl crate::cache::CacheManager {
         ] {
             let relative = format!("{}.{extension}", request.relative());
             let content = format!("{expected}\n");
-            let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+            let content_sha256 = to_hex(&Sha256::digest(content.as_bytes()));
             let temporary = temporary_path(self.inner.storage.tmp_dir());
             if let Err(error) = write_temporary(&temporary, content.as_bytes()).await {
                 cleanup_prepared(&files).await;
@@ -533,7 +533,7 @@ impl crate::cache::CacheManager {
                 file_type: request.file_type.clone(),
                 upstream: upstream.into(),
                 sha1: None,
-                sha256: Some(format!("{:x}", Sha256::digest(content.as_bytes()))),
+                sha256: Some(to_hex(&Sha256::digest(content.as_bytes()))),
                 etag: None,
                 last_modified: None,
                 file_size: content.len() as i64,

@@ -1,6 +1,6 @@
 mod download;
 mod install;
-mod io;
+pub(crate) mod io;
 mod maintain;
 mod serve;
 mod types;
@@ -205,7 +205,7 @@ impl CacheManager {
 #[cfg(test)]
 mod tests {
     use sha1::{Digest as _, Sha1};
-    use sha2::{Digest as _, Sha256};
+    use sha2::Sha256;
     use tempfile::TempDir;
     use url::Url;
 

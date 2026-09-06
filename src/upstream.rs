@@ -5,9 +5,10 @@ use std::time::Duration;
 use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::oneshot;
 
+use crate::cache::io::to_hex;
 use crate::circuit::CircuitBreaker;
 use crate::config::{CircuitBreakerConfig, RepositoryConfig, UpstreamConfig};
 use crate::error::AppError;
@@ -581,7 +582,7 @@ fn build_http_client(config: &UpstreamConfig, proxy: Option<&Url>) -> Result<Cli
 }
 
 fn repository_id(repository: &RepositoryConfig) -> String {
-    format!("{:x}", Sha256::digest(repository.url.as_str().as_bytes()))
+    to_hex(&Sha256::digest(repository.url.as_str().as_bytes()))
 }
 
 enum RepositoryResult {
