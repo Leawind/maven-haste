@@ -139,7 +139,7 @@ jobs:
 
     publish-release:
         name: Publish GitHub release
-        needs: publish-crate
+        needs: [draft-release, publish-crate]
         runs-on: ubuntu-latest
         permissions:
             contents: write
