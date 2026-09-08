@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
 
 - Added `maven-haste cache verify` to re-check every cached artifact's size and checksums, and `maven-haste cache remove-prefix` to delete all artifacts, checksums, and negative entries under a path prefix.
