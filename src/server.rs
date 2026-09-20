@@ -29,6 +29,7 @@ use crate::request_path::{CachePolicy, MavenPath};
 
 pub const HEALTH_PATH: &str = "/api/v1/health";
 const CACHE_STATS_PATH: &str = "/api/v1/cache/stats";
+const METRICS_PATH: &str = "/api/v1/metrics";
 
 static BYTES_SERVED: AtomicU64 = AtomicU64::new(0);
 static INTERRUPTED_REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -94,6 +95,7 @@ pub fn router(base_path: String, cache: CacheManager) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(CACHE_STATS_PATH, get(cache_stats))
+        .route(METRICS_PATH, get(metrics))
         .route(&route, get(artifact).head(artifact))
         .with_state(AppState { cache, base_path })
 }
@@ -104,6 +106,30 @@ async fn health(State(state): State<AppState>) -> Response<Body> {
         Err(error) => {
             tracing::error!(%error, "health check failed");
             error_response(StatusCode::SERVICE_UNAVAILABLE, "unhealthy")
+        }
+    }
+}
+
+async fn metrics(State(state): State<AppState>) -> Response<Body> {
+    match state.cache.stats().await {
+        Ok(stats) => {
+            let bytes_served = BYTES_SERVED.load(Ordering::Relaxed);
+            let interrupted = INTERRUPTED_REQUESTS.load(Ordering::Relaxed);
+            let body = crate::metrics::render(&stats, bytes_served, interrupted);
+            Response::builder()
+                .header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+                )
+                .body(Body::from(body))
+                .expect("metric responses are valid")
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to collect cache statistics");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cache statistics unavailable",
+            )
         }
     }
 }

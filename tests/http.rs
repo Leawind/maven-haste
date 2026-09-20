@@ -405,6 +405,43 @@ async fn reports_health_and_cache_statistics() {
                 && upstream["circuit"].as_str() == Some("closed")
         })
     }));
+
+    let metrics = request(&app, Method::GET, "/api/v1/metrics").await;
+    assert_eq!(metrics.status(), StatusCode::OK);
+    assert_eq!(
+        metrics.headers()[CONTENT_TYPE],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let metrics = body(metrics).await;
+    assert!(
+        metrics.contains("maven_haste_requests_total 2\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_cache_hits_total 1\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_cache_misses_total 1\n"),
+        "{metrics}"
+    );
+    assert!(metrics.contains("maven_haste_cache_files 4\n"), "{metrics}");
+    // bytes served is a process-global counter shared with concurrently
+    // running tests, so only its presence is asserted here
+    assert!(
+        metrics.contains("maven_haste_bytes_served_total "),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains(
+            "maven_haste_upstream_circuit_state{repository=\"central\",state=\"closed\"} 1\n"
+        ),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_build_info{version=\""),
+        "{metrics}"
+    );
     task.abort();
 }
 
