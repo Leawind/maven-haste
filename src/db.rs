@@ -238,6 +238,15 @@ impl Database {
         .await
     }
 
+    /// Deletes negative cache entries observed at or before a timestamp.
+    pub async fn delete_expired_negative_entries(&self, before: i64) -> Result<(), AppError> {
+        self.with_connection(move |connection| {
+            connection.delete_expired_negative_entries(before)?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn touch_refresh_attempt(&self, path: &str, timestamp: i64) -> Result<(), AppError> {
         let path = path.to_owned();
         self.with_connection(move |connection| {

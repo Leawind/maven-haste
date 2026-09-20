@@ -1,11 +1,31 @@
-//! Cache maintenance: prefix removal and integrity verification.
+//! Cache maintenance: capacity sweeps, expired negative-entry cleanup,
+//! prefix removal, and integrity verification.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 
-use crate::cache::io::{hash_file, internal, normalize_cache_prefix, relative_file_path};
+use crate::cache::io::{
+    hash_file, internal, normalize_cache_prefix, relative_file_path, unix_timestamp,
+};
 use crate::cache::{CacheFailure, CacheManager, IntegrityIssue, IntegrityReport, RemovalStats};
 
 impl CacheManager {
+    /// Runs one maintenance pass: evicts least-recently-used files above the
+    /// configured capacity and purges expired negative entries. The server
+    /// schedules this periodically so the size limit holds even when no new
+    /// files are written.
+    pub async fn run_maintenance(&self) -> Result<(), CacheFailure> {
+        self.enforce_capacity(&HashSet::new()).await?;
+        let ttl = self.inner.config.negative_ttl.as_secs() as i64;
+        let cutoff = unix_timestamp().saturating_sub(ttl);
+        self.inner
+            .database
+            .delete_expired_negative_entries(cutoff)
+            .await
+            .map_err(internal)?;
+        Ok(())
+    }
+
     /// Removes all cached artifacts, checksums, and negative entries under a
     /// path prefix, reporting how much was removed.
     pub async fn remove_prefix(&self, prefix: &str) -> Result<RemovalStats, CacheFailure> {

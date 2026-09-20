@@ -54,6 +54,14 @@ SELECT repository_id, observed_at
  WHERE path = :path
 /
 
+-- name: delete_expired_negative_entries!
+--
+-- Deletes every negative cache entry observed at or before a timestamp.
+--
+-- param: before: i64
+DELETE FROM negative_cache WHERE observed_at <= :before
+/
+
 -- name: upsert_artifact!
 --
 -- Inserts a cached artifact or fully replaces the existing record.

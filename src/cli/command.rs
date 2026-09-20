@@ -71,7 +71,21 @@ impl Command {
                     AppError::Runtime(format!("failed to inspect HTTP listener: {error}"))
                 })?;
                 tracing::info!(%bind, "Maven proxy is ready");
-                server::serve(listener, loaded.config.server.base_path, cache).await
+                let maintenance_cache = cache.clone();
+                let maintenance_interval = loaded.config.cache.maintenance_interval;
+                let maintenance = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(maintenance_interval);
+                    loop {
+                        interval.tick().await;
+                        if let Err(error) = maintenance_cache.run_maintenance().await {
+                            tracing::warn!(%error, "cache maintenance pass failed");
+                        }
+                    }
+                });
+                let result =
+                    server::serve(listener, loaded.config.server.base_path, cache.clone()).await;
+                maintenance.abort();
+                result
             }
             Command::Cache { command } => command.execute(cli).await,
             Command::Config { command } => command.execute(cli).await,

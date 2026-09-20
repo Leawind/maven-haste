@@ -326,6 +326,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maintenance_pass_enforces_capacity_and_purges_expired_negatives() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, Some(8)).await;
+        add_record(&cache, &database, "com/example/old.jar", b"old!", 1, "test").await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/new.jar",
+            b"newnew!!",
+            2,
+            "test",
+        )
+        .await;
+        database
+            .upsert_negative_entries(
+                "com/example/demo/maven-metadata.xml",
+                vec!["test".into()],
+                1,
+            )
+            .await
+            .unwrap();
+
+        cache.run_maintenance().await.unwrap();
+
+        assert!(database.get("com/example/old.jar").await.unwrap().is_none());
+        assert!(database.get("com/example/new.jar").await.unwrap().is_some());
+        assert_eq!(
+            database
+                .negative_entries("com/example/demo/maven-metadata.xml")
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "expired negative entries are purged"
+        );
+        assert_eq!(database.stats().await.unwrap().total_size, 8);
+    }
+
+    #[tokio::test]
     async fn eviction_skips_files_that_are_currently_being_served() {
         let directory = TempDir::new().unwrap();
         let (cache, database) = test_cache(&directory, Some(8)).await;

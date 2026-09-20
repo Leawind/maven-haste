@@ -533,6 +533,11 @@ pub struct CacheConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(schema_with = "crate::config::duration_schema")]
     pub negative_ttl: Duration,
+    /// Interval between background maintenance passes that enforce the cache
+    /// size limit and purge expired negative entries.
+    #[serde(with = "humantime_serde")]
+    #[schemars(schema_with = "crate::config::duration_schema")]
+    pub maintenance_interval: Duration,
 }
 
 impl Default for CacheConfig {
@@ -541,6 +546,7 @@ impl Default for CacheConfig {
             max_size: None,
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
+            maintenance_interval: Duration::from_secs(60),
         }
     }
 }
@@ -892,6 +898,11 @@ fn validate_cache(config: &Config) -> Result<(), ConfigError> {
     if config.cache.max_size == Some(0) {
         return Err(ConfigError::new(
             "cache.max_size must be greater than zero when specified",
+        ));
+    }
+    if config.cache.maintenance_interval.is_zero() {
+        return Err(ConfigError::new(
+            "cache.maintenance_interval must be greater than zero",
         ));
     }
     Ok(())

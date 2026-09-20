@@ -4,6 +4,14 @@
             "additionalProperties": false,
             "description": "Optional cache settings; omit this table to use the defaults below.",
             "properties": {
+                "maintenance_interval": {
+                    "default": "1m",
+                    "description": "Interval between background maintenance passes that enforce the cache\nsize limit and purge expired negative entries.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                },
                 "max_size": {
                     "default": null,
                     "description": "Optional maximum number of cached artifact bytes; omit to retain\ncached files indefinitely.",
@@ -252,6 +260,7 @@
         "cache": {
             "$ref": "#/$defs/CacheConfig",
             "default": {
+                "maintenance_interval": "1m",
                 "max_size": null,
                 "metadata_ttl": "5m",
                 "negative_ttl": "5m"
