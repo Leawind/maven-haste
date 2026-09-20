@@ -586,10 +586,10 @@ async fn downloads_slow_streams_that_continue_before_read_timeout() {
                 return error_response(StatusCode::NOT_FOUND, "missing checksum");
             }
             Response::new(delayed_body(vec![
-                (Duration::from_millis(30), b"slow-"),
-                (Duration::from_millis(30), b"stream-"),
-                (Duration::from_millis(30), b"still-"),
-                (Duration::from_millis(30), b"works"),
+                (Duration::from_millis(150), b"slow-"),
+                (Duration::from_millis(150), b"stream-"),
+                (Duration::from_millis(150), b"still-"),
+                (Duration::from_millis(150), b"works"),
             ]))
         }),
     );
@@ -600,8 +600,11 @@ async fn downloads_slow_streams_that_continue_before_read_timeout() {
         vec![repository("slow", &url, &[])],
         CacheConfig::default(),
         UpstreamConfig {
-            connect_timeout: Duration::from_millis(100),
-            read_timeout: Duration::from_millis(50),
+            // The gaps stay well below the idle read timeout while the whole
+            // stream exceeds it, and both keep enough slack for saturated CI
+            // machines to schedule the stream tasks.
+            connect_timeout: Duration::from_millis(500),
+            read_timeout: Duration::from_millis(500),
             ..UpstreamConfig::default()
         },
     )
@@ -710,7 +713,7 @@ async fn returns_stale_metadata_while_refreshing_in_background() {
                 if attempt == 0 {
                     Response::new(Body::from("metadata-v1"))
                 } else {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    tokio::time::sleep(Duration::from_millis(150)).await;
                     Response::new(Body::from("metadata-v2"))
                 }
             }
@@ -1699,7 +1702,9 @@ fn delayed_body(chunks: Vec<(Duration, &'static [u8])>) -> Body {
 }
 
 async fn wait_for(condition: impl Fn() -> bool) {
-    for _ in 0..100 {
+    // A generous budget: the helper only runs to completion on failure, and
+    // saturated CI machines can starve individual tasks for seconds.
+    for _ in 0..500 {
         if condition() {
             return;
         }
@@ -1709,7 +1714,7 @@ async fn wait_for(condition: impl Fn() -> bool) {
 }
 
 async fn wait_for_file(path: &std::path::Path, expected: &[u8]) {
-    for _ in 0..100 {
+    for _ in 0..500 {
         if tokio::fs::read(path)
             .await
             .is_ok_and(|content| content == expected)
