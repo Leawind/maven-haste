@@ -29,6 +29,15 @@ maven-haste ships as a single command-line tool.
   cargo install --path .
   ```
 - Download from [GitHub Releases](https://github.com/Leawind/maven-haste/releases)
+- Run the container image from GitHub Packages
+  ```bash
+  docker run -d -p 8080:8080 \
+      -v maven-haste-cache:/var/lib/maven-haste \
+      -v ./config:/etc/maven-haste \
+      ghcr.io/leawind/maven-haste
+  ```
+
+  The image expects a `maven-haste.toml` (or `.json`/`.yaml`/`.yml`) in the mounted `/etc/maven-haste` directory and stores cached artifacts under `/var/lib/maven-haste`; point `[storage].root` there in the config.
 
 ## Running
 
@@ -52,11 +61,12 @@ Validate the config and storage directory before starting:
 maven-haste config check
 ```
 
-Maintain the local cache: re-check every cached artifact's size and checksums, or remove all cached content under a path prefix
+Maintain the local cache: re-check every cached artifact's size and checksums, remove all cached content under a path prefix, or print cache totals
 
 ```bash
 maven-haste cache verify
 maven-haste cache remove-prefix com/example
+maven-haste cache stats
 ```
 
 `cache verify` exits with an error when it finds issues, listing each one.
@@ -128,7 +138,9 @@ fallbacks. A build may enforce its own repository policy, so inspect and adapt t
 - Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
 - When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1`, `.sha256`, and `.sha512` files are always computed from the bytes actually stored.
 
-Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes.
+Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes. Checksum files are fetched concurrently with the main artifact download, and a download interrupted mid-body resumes from the bytes already written via byte-range requests (up to three attempts) before the repository is skipped.
+
+The cache size limit is enforced after every write and by a periodic background maintenance pass (`cache.maintenance_interval`, default 1m) that also purges expired negative entries.
 
 ### HTTP API
 
@@ -136,8 +148,9 @@ The local Maven endpoint is set by `[server].base_path`, defaulting to `/maven`.
 
 - `GET /api/v1/health`: checks SQLite, cache directory, and temp directory; returns `200 OK` when healthy, otherwise service unavailable.
 - `GET /api/v1/cache/stats`: returns cached file count, total size, hit rate, negative cache count, and per-upstream circuit breaker status.
+- `GET /api/v1/metrics`: Prometheus text-format metrics covering cache totals, request and hit counters, bytes served, interrupted responses, and per-upstream circuit breaker states.
 
-Both endpoints are suitable for liveness/readiness checks in containers or process managers. Cache stats are intended for low-frequency monitoring, not per-request polling.
+These endpoints are suitable for liveness/readiness checks and scraping in containers or process managers. Cache stats and metrics are intended for low-frequency monitoring, not per-request polling.
 
 The Maven endpoint supports `GET`, `HEAD`, single byte-range requests, client validators, and cache-control headers. Permanent
 artifacts receive immutable client caching; mutable metadata requires revalidation against the local proxy.

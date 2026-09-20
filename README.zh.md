@@ -29,6 +29,15 @@ maven-haste 以单个命令行工具的形式发布。
   cargo install --path .
   ```
 - 从 [Github Release](https://github.com/Leawind/maven-haste/releases) 下载
+- 使用 GitHub Packages 的容器镜像运行
+  ```bash
+  docker run -d -p 8080:8080 \
+      -v maven-haste-cache:/var/lib/maven-haste \
+      -v ./config:/etc/maven-haste \
+      ghcr.io/leawind/maven-haste
+  ```
+
+  镜像期望在挂载的 `/etc/maven-haste` 目录中放置 `maven-haste.toml`（或 `.json`/`.yaml`/`.yml`），缓存产物保存在 `/var/lib/maven-haste` 下；请在配置中将 `[storage].root` 指向该目录。
 
 ## 跑起来
 
@@ -52,11 +61,12 @@ maven-haste run
 maven-haste config check
 ```
 
-维护本地缓存：重新校验每个缓存产物的尺寸与校验和，或删除某个路径前缀下的全部缓存内容
+维护本地缓存：重新校验每个缓存产物的尺寸与校验和，删除某个路径前缀下的全部缓存内容，或打印缓存总量
 
 ```bash
 maven-haste cache verify
 maven-haste cache remove-prefix com/example
+maven-haste cache stats
 ```
 
 `cache verify` 发现问题时会逐条列出并以错误码退出。
@@ -127,7 +137,9 @@ Gradle 示例会把 Maven Haste 添加到项目声明的仓库之前，并保留
 - 仅可变文件的上游 404 会被短暂记忆，减少对不存在文件的重复请求。
 - 上游校验和与下载内容不一致时，服务会通过重试区分不稳定下载和错误校验和。稳定内容会在记录警告后被接受；反复变化且无法验证的内容会被丢弃并尝试其他来源。缓存的 `.sha1`、`.sha256` 和 `.sha512` 始终根据实际保存的字节计算。
 
-上游请求受全局并发上限和单仓库并发上限共同约束；调度器会让首次下载的请求优先，同时定期为缓存刷新留出机会。
+上游请求受全局并发上限和单仓库并发上限共同约束；调度器会让首次下载的请求优先，同时定期为缓存刷新留出机会。校验和文件与主下载并行获取；下载中途断开时，会通过字节范围请求从已写入的字节续传（最多三次尝试），仍失败才跳过该仓库。
+
+缓存大小上限在每次写入后执行，同时由周期性的后台维护（`cache.maintenance_interval`，默认 1 分钟）执行；该维护还会清理过期的负缓存条目。
 
 ### HTTP 接口
 
@@ -135,8 +147,9 @@ Gradle 示例会把 Maven Haste 添加到项目声明的仓库之前，并保留
 
 - `GET /api/v1/health`：检查 SQLite、缓存目录和临时目录；健康时返回 `200 OK`，否则返回服务不可用。
 - `GET /api/v1/cache/stats`：返回缓存文件数量、总大小、命中率、负缓存数量和各上游熔断状态。
+- `GET /api/v1/metrics`：以 Prometheus 文本格式返回缓存总量、请求与命中计数、发送字节数、中断响应数和各上游熔断状态。
 
-这两个接口适合接入容器或进程管理器的存活/就绪检查。缓存统计适合用于低频监控，不建议在每个请求中轮询。
+这些接口适合接入容器或进程管理器的存活/就绪检查与指标抓取。缓存统计和指标适合用于低频监控，不建议在每个请求中轮询。
 
 Maven endpoint 支持 `GET`、`HEAD`、单段字节范围、客户端条件验证和缓存控制响应头。固定构件允许客户端按不可变内容
 缓存；可变元数据需要向本地代理重新验证。
