@@ -19,6 +19,9 @@ pub enum CacheCommand {
         #[arg(value_name = "PREFIX")]
         prefix: String,
     },
+
+    /// Print cache statistics from the database
+    Stats,
 }
 
 impl CacheCommand {
@@ -46,6 +49,17 @@ impl CacheCommand {
             CacheCommand::RemovePrefix { prefix } => {
                 let removed = cache.remove_prefix(prefix).await.map_err(app_error)?;
                 println!("removed {} files, {} bytes", removed.files, removed.bytes);
+                Ok(())
+            }
+            CacheCommand::Stats => {
+                let stats = cache.stats().await.map_err(app_error)?;
+                println!("files: {}", stats.files);
+                println!("total size: {} bytes", stats.total_size);
+                println!("negative entries: {}", stats.negative_entries);
+                match stats.max_size {
+                    Some(max_size) => println!("max size: {max_size} bytes"),
+                    None => println!("max size: unlimited"),
+                }
                 Ok(())
             }
         }
