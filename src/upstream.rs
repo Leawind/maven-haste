@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH, RANGE};
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -87,10 +87,14 @@ pub struct UpstreamStatus {
     pub failures: u32,
 }
 
-#[derive(Clone)]
-struct ConditionalHeaders {
+/// Extra request headers applied to a single upstream fetch: client
+/// validators for a conditional refresh, or a byte offset to resume an
+/// interrupted download from.
+#[derive(Clone, Default)]
+struct RequestExtras {
     etag: Option<String>,
     last_modified: Option<String>,
+    range_from: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -341,9 +345,10 @@ impl UpstreamClient {
         {
             repositories.push((
                 repository.clone(),
-                Some(ConditionalHeaders {
+                Some(RequestExtras {
                     etag: etag.map(str::to_owned),
                     last_modified: last_modified.map(str::to_owned),
+                    range_from: None,
                 }),
             ));
         }
@@ -372,6 +377,27 @@ impl UpstreamClient {
             return FetchResult::GatewayFailure;
         };
         self.fetch_ordered(relative_path, vec![(repository, None)], priority)
+            .await
+            .result
+    }
+
+    /// Fetches `relative_path` from one repository starting at `offset`, to
+    /// resume an interrupted download.
+    pub async fn fetch_range(
+        &self,
+        repository: &str,
+        relative_path: &str,
+        offset: u64,
+        priority: RequestPriority,
+    ) -> FetchResult {
+        let Some(repository) = self.routes.repository(repository).cloned() else {
+            return FetchResult::GatewayFailure;
+        };
+        let extras = RequestExtras {
+            range_from: Some(offset),
+            ..RequestExtras::default()
+        };
+        self.fetch_ordered(relative_path, vec![(repository, Some(extras))], priority)
             .await
             .result
     }
@@ -410,13 +436,13 @@ impl UpstreamClient {
     async fn fetch_ordered(
         &self,
         relative_path: &str,
-        repositories: Vec<(RepositoryConfig, Option<ConditionalHeaders>)>,
+        repositories: Vec<(RepositoryConfig, Option<RequestExtras>)>,
         priority: RequestPriority,
     ) -> FetchOutcome {
         let mut gateway_failure = false;
         let mut not_found = Vec::new();
 
-        for (repository, conditional) in repositories {
+        for (repository, extras) in repositories {
             if !self.circuits.allow(&repository.id) {
                 tracing::debug!(upstream = %repository.id, path = relative_path, "skipping open circuit");
                 gateway_failure = true;
@@ -432,7 +458,7 @@ impl UpstreamClient {
             };
 
             match self
-                .fetch_repository(&repository, url, conditional.as_ref(), priority)
+                .fetch_repository(&repository, url, extras.as_ref(), priority)
                 .await
             {
                 RepositoryResult::Found(response) => {
@@ -484,23 +510,29 @@ impl UpstreamClient {
         &self,
         repository: &RepositoryConfig,
         url: Url,
-        conditional: Option<&ConditionalHeaders>,
+        extras: Option<&RequestExtras>,
         priority: RequestPriority,
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
             let permit = self.scheduler.acquire(&repository.id, priority).await;
             let mut request = self.client_for_repository(repository).get(url.clone());
-            if let Some(conditional) = conditional {
-                if let Some(etag) = &conditional.etag {
+            if let Some(extras) = extras {
+                if let Some(etag) = &extras.etag {
                     request = request.header(IF_NONE_MATCH, etag);
                 }
-                if let Some(last_modified) = &conditional.last_modified {
+                if let Some(last_modified) = &extras.last_modified {
                     request = request.header(IF_MODIFIED_SINCE, last_modified);
+                }
+                if let Some(offset) = extras.range_from {
+                    request = request.header(RANGE, format!("bytes={offset}-"));
                 }
             }
 
             match request.send().await {
-                Ok(response) if response.status() == StatusCode::OK => {
+                Ok(response)
+                    if response.status() == StatusCode::OK
+                        || response.status() == StatusCode::PARTIAL_CONTENT =>
+                {
                     return RepositoryResult::Found(UpstreamResponse { response, permit });
                 }
                 Ok(response) if response.status() == StatusCode::NOT_MODIFIED => {

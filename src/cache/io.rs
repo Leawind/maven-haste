@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use sha1::{Digest as _, Sha1};
 use sha2::{Sha256, Sha512};
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::cache::CacheFailure;
@@ -44,46 +44,171 @@ pub(crate) async fn fetch_checksum_file(
     }
 }
 
-pub(crate) async fn stream_to_file(
+/// Why streaming an upstream body to disk failed.
+pub(crate) enum StreamFailure {
+    /// The upstream stream broke after `bytes` were already written; a byte
+    /// range request can continue the download from that offset.
+    Interrupted { error: CacheFailure, bytes: u64 },
+    /// The download cannot be continued.
+    Failed(CacheFailure),
+}
+
+/// Streams an upstream body into `destination`, hashing the complete file. A
+/// `206 Partial Content` response whose range starts inside the bytes already
+/// on disk resumes from there; any other success status restarts the file.
+pub(crate) async fn stream_response_to_file(
     response: UpstreamResponse,
     destination: &Path,
-) -> Result<(u64, String, String, String), CacheFailure> {
+) -> Result<(u64, String, String, String), StreamFailure> {
     let (response, _permit) = response.into_parts();
-    let expected_size = response.content_length();
-    let mut file = create_temporary(destination).await?;
-    let mut stream = response.bytes_stream();
-    let mut size = 0_u64;
+    let mut file;
+    let mut size;
     let mut sha1 = Sha1::new();
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let start = range_start(&response).map_err(StreamFailure::Failed)?;
+        (file, size) = open_for_resume(destination, start, &mut sha1, &mut sha256, &mut sha512)
+            .await
+            .map_err(StreamFailure::Failed)?;
+    } else {
+        file = create_truncated(destination)
+            .await
+            .map_err(StreamFailure::Failed)?;
+        size = 0;
+    }
+    let expected_total = response.content_length().map(|length| size + length);
+    let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| {
-            CacheFailure::Internal(format!("failed to read upstream response body: {error}"))
+        let chunk = chunk.map_err(|error| StreamFailure::Interrupted {
+            error: CacheFailure::Internal(format!(
+                "failed to read upstream response body: {error}"
+            )),
+            bytes: size,
         })?;
         file.write_all(&chunk).await.map_err(|error| {
-            CacheFailure::Internal(format!(
+            StreamFailure::Failed(CacheFailure::Internal(format!(
                 "failed to write temporary file {}: {error}",
                 destination.display()
-            ))
+            )))
         })?;
         sha1.update(&chunk);
         sha256.update(&chunk);
         sha512.update(&chunk);
         size = size.saturating_add(chunk.len() as u64);
     }
-    if expected_size.is_some_and(|expected| expected != size) {
-        return Err(CacheFailure::Internal(format!(
-            "upstream response length mismatch: expected {} bytes, received {size}",
-            expected_size.expect("expected size is present")
-        )));
+    match expected_total {
+        Some(expected) if size < expected => {
+            return Err(StreamFailure::Interrupted {
+                error: CacheFailure::Internal(format!(
+                    "upstream response length mismatch: expected {expected} bytes, received {size}"
+                )),
+                bytes: size,
+            });
+        }
+        Some(expected) if size > expected => {
+            return Err(StreamFailure::Failed(CacheFailure::Internal(format!(
+                "upstream response length mismatch: expected {expected} bytes, received {size}"
+            ))));
+        }
+        _ => {}
     }
-    flush_temporary(file, destination).await?;
+    flush_temporary(file, destination)
+        .await
+        .map_err(StreamFailure::Failed)?;
     Ok((
         size,
         to_hex(&sha1.finalize()),
         to_hex(&sha256.finalize()),
         to_hex(&sha512.finalize()),
     ))
+}
+
+/// Parses the first byte position of a `Content-Range` header such as
+/// `bytes 300-1023/1024`.
+fn range_start(response: &reqwest::Response) -> Result<u64, CacheFailure> {
+    let value = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            CacheFailure::Internal("partial response is missing Content-Range".into())
+        })?;
+    value
+        .strip_prefix("bytes ")
+        .and_then(|range| range.split_once('-'))
+        .and_then(|(start, _)| start.parse().ok())
+        .ok_or_else(|| CacheFailure::Internal(format!("unrecognized Content-Range {value:?}")))
+}
+
+/// Opens an interrupted download for continuation: hashes the first `start`
+/// bytes kept on disk into the running digests, truncates any misaligned
+/// tail, and positions the file for appending.
+async fn open_for_resume(
+    destination: &Path,
+    start: u64,
+    sha1: &mut Sha1,
+    sha256: &mut Sha256,
+    sha512: &mut Sha512,
+) -> Result<(fs::File, u64), CacheFailure> {
+    let open_error = |error: std::io::Error| {
+        CacheFailure::Internal(format!(
+            "failed to open partial download {}: {error}",
+            destination.display()
+        ))
+    };
+    let present = fs::metadata(destination).await.map_err(open_error)?.len();
+    if present < start {
+        return Err(CacheFailure::Internal(format!(
+            "cannot resume {} at byte {start}: only {present} bytes are present",
+            destination.display()
+        )));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination)
+        .await
+        .map_err(open_error)?;
+    let mut remaining = start;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    while remaining > 0 {
+        let want = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..want]).await.map_err(open_error)?;
+        if read == 0 {
+            return Err(CacheFailure::Internal(format!(
+                "partial download {} ended before byte {start}",
+                destination.display()
+            )));
+        }
+        let chunk = &buffer[..read];
+        sha1.update(chunk);
+        sha256.update(chunk);
+        sha512.update(chunk);
+        remaining -= read as u64;
+    }
+    file.set_len(start).await.map_err(open_error)?;
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(open_error)?;
+    Ok((file, start))
+}
+
+/// Creates or truncates the destination so a fresh or restarted download
+/// begins from an empty file.
+async fn create_truncated(path: &Path) -> Result<fs::File, CacheFailure> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            CacheFailure::Internal(format!(
+                "failed to create temporary file {}: {error}",
+                path.display()
+            ))
+        })
 }
 
 pub(crate) async fn read_checksum_response(

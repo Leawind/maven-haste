@@ -6,8 +6,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::cache::CacheFailure;
 use crate::cache::io::{
-    cleanup_downloads, cleanup_prepared, hash_file, header_string, internal, remove_file_if_exists,
-    stream_to_file, temporary_path, to_hex, unix_timestamp, write_temporary,
+    StreamFailure, cleanup_downloads, cleanup_prepared, hash_file, header_string, internal,
+    remove_file_if_exists, stream_response_to_file, temporary_path, to_hex, unix_timestamp,
+    write_temporary,
 };
 use crate::cache::types::{
     ChecksumPrefetch, DownloadOutcome, DownloadedMain, FetchedChecksum, PassthroughFile,
@@ -18,6 +19,7 @@ use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
 
 const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
+const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
 
 impl crate::cache::CacheManager {
     pub(crate) async fn download_initial(
@@ -219,7 +221,10 @@ impl crate::cache::CacheManager {
                     // streams, so a slow artifact download no longer waits on
                     // extra checksum round-trips afterwards.
                     let prefetch = self.start_checksum_prefetch(request, &repository, priority);
-                    let downloaded = match self.download_main(&repository, response).await {
+                    let downloaded = match self
+                        .download_main(request, &repository, response, priority)
+                        .await
+                    {
                         Ok(downloaded) => downloaded,
                         Err(error) => {
                             upstream_failure = true;
@@ -260,32 +265,81 @@ impl crate::cache::CacheManager {
         }
     }
 
+    /// Streams the main file to a temporary file, resuming from the bytes
+    /// already written when the upstream connection breaks mid-body.
     async fn download_main(
         &self,
+        request: &MavenPath,
         repository: &str,
         response: UpstreamResponse,
+        priority: RequestPriority,
     ) -> Result<DownloadedMain, CacheFailure> {
-        let etag = header_string(response.headers(), ETAG);
-        let last_modified = header_string(response.headers(), LAST_MODIFIED);
+        let mut etag = header_string(response.headers(), ETAG);
+        let mut last_modified = header_string(response.headers(), LAST_MODIFIED);
         let temporary = temporary_path(self.inner.storage.tmp_dir());
-        match stream_to_file(response, &temporary).await {
-            Ok((size, sha1, sha256, sha512)) => {
-                self.inner.upstream.record_body_success(repository);
-                Ok(DownloadedMain {
-                    temporary,
-                    size,
-                    sha1,
-                    sha256,
-                    sha512,
-                    etag,
-                    last_modified,
-                })
-            }
-            Err(error) => {
-                let _ = remove_file_if_exists(&temporary).await;
-                Err(error)
+        let mut response = response;
+        for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+            match stream_response_to_file(response, &temporary).await {
+                Ok((size, sha1, sha256, sha512)) => {
+                    self.inner.upstream.record_body_success(repository);
+                    return Ok(DownloadedMain {
+                        temporary,
+                        size,
+                        sha1,
+                        sha256,
+                        sha512,
+                        etag,
+                        last_modified,
+                    });
+                }
+                Err(StreamFailure::Interrupted { error, bytes }) => {
+                    tracing::debug!(
+                        upstream = repository,
+                        path = request.relative(),
+                        bytes,
+                        %error,
+                        "upstream download was interrupted"
+                    );
+                    if attempt == MAX_DOWNLOAD_ATTEMPTS {
+                        let _ = remove_file_if_exists(&temporary).await;
+                        return Err(CacheFailure::Internal(format!(
+                            "upstream download failed after {attempt} attempts: {error}"
+                        )));
+                    }
+                    match self
+                        .inner
+                        .upstream
+                        .fetch_range(repository, request.relative(), bytes, priority)
+                        .await
+                    {
+                        FetchResult::Found {
+                            response: resumed, ..
+                        } => {
+                            if let Some(value) = header_string(resumed.headers(), ETAG) {
+                                etag = Some(value);
+                            }
+                            if let Some(value) = header_string(resumed.headers(), LAST_MODIFIED) {
+                                last_modified = Some(value);
+                            }
+                            response = resumed;
+                        }
+                        outcome => {
+                            let _ = remove_file_if_exists(&temporary).await;
+                            return Err(CacheFailure::Internal(format!(
+                                "resuming the download of {} failed: {}",
+                                request.relative(),
+                                resume_failure_reason(&outcome)
+                            )));
+                        }
+                    }
+                }
+                Err(StreamFailure::Failed(error)) => {
+                    let _ = remove_file_if_exists(&temporary).await;
+                    return Err(error);
+                }
             }
         }
+        unreachable!("the resume loop always returns within its attempts")
     }
 
     /// Spawns a background fetch of the checksum files belonging to a main
@@ -451,9 +505,10 @@ impl crate::cache::CacheManager {
                 .fetch_from(repository, request.relative(), priority)
                 .await
             {
-                FetchResult::Found { response, .. } => {
-                    self.download_main(repository, response).await.ok()
-                }
+                FetchResult::Found { response, .. } => self
+                    .download_main(request, repository, response, priority)
+                    .await
+                    .ok(),
                 _ => None,
             };
             let Some(retry) = retry else {
@@ -605,4 +660,16 @@ impl crate::cache::CacheManager {
 enum BundleError {
     Unstable(String),
     Internal(CacheFailure),
+}
+
+/// Describes why a byte-range resume request could not continue a download.
+fn resume_failure_reason(outcome: &FetchResult) -> &'static str {
+    match outcome {
+        FetchResult::Found { .. } => "a response was returned for the range request",
+        FetchResult::NotModified { .. } => {
+            "the repository returned Not Modified for a range request"
+        }
+        FetchResult::NotFound => "the artifact disappeared while resuming",
+        FetchResult::GatewayFailure => "the repository failed the range request",
+    }
 }

@@ -81,6 +81,112 @@ async fn checksums_are_fetched_while_the_main_body_downloads() {
 }
 
 #[tokio::test]
+async fn resumes_interrupted_downloads_with_byte_ranges() {
+    let content = "0123456789abcdef".repeat(64);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let handler_content = content.clone();
+    let handler_head = Bytes::copy_from_slice(&content.as_bytes()[..300]);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+            let calls = Arc::clone(&handler_calls);
+            let content = handler_content.clone();
+            let head = handler_head.clone();
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    return Response::builder()
+                        .header(CONTENT_LENGTH, content.len())
+                        .body(Body::from_stream(interrupted_after(head)))
+                        .unwrap();
+                }
+                let start = requested_range_start(&headers);
+                let remainder = Bytes::from(content.as_bytes()[start..].to_vec());
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(CONTENT_LENGTH, remainder.len())
+                    .header(
+                        CONTENT_RANGE,
+                        format!(
+                            "bytes {start}-{last}/{total}",
+                            last = content.len() - 1,
+                            total = content.len()
+                        ),
+                    )
+                    .body(Body::from(remainder))
+                    .unwrap()
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, content);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let record = database
+        .get("com/example/demo/1.0/demo-1.0.jar")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.file_size, 1024);
+    assert_eq!(
+        record.sha256.as_deref(),
+        Some("4613a38a7f79ada3fc343ea4de1488f8828f0fe602d8cb7bdce958040b204b8b")
+    );
+    assert_eq!(
+        body(request(&app, Method::GET, &format!("{ARTIFACT_PATH}.sha1")).await).await,
+        "e6dd1ad2ee0096d6432c2f83f958fab8776ca9b8\n"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn restarts_the_download_when_upstream_ignores_range_requests() {
+    let content = "0123456789abcdef".repeat(64);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let handler_content = content.clone();
+    let handler_head = Bytes::copy_from_slice(&content.as_bytes()[..300]);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| {
+            let calls = Arc::clone(&handler_calls);
+            let content = handler_content.clone();
+            let head = handler_head.clone();
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Response::builder()
+                        .header(CONTENT_LENGTH, content.len())
+                        .body(Body::from_stream(interrupted_after(head)))
+                        .unwrap();
+                }
+                Response::new(Body::from(content))
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, content);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    task.abort();
+}
+
+#[tokio::test]
 async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);
@@ -1688,6 +1794,33 @@ fn is_checksum_uri(uri: &Uri) -> bool {
     uri.path().ends_with(".sha1")
         || uri.path().ends_with(".sha256")
         || uri.path().ends_with(".sha512")
+}
+
+/// Parses the first byte position of a `Range: bytes=N-` request header.
+fn requested_range_start(headers: &HeaderMap) -> usize {
+    headers
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.split_once('-'))
+        .map(|(start, _)| start.parse().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// A body that delivers `head`, waits long enough for it to reach the
+/// client, and then breaks the stream so the connection ends mid-body.
+fn interrupted_after(
+    head: Bytes,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    use futures_util::StreamExt as _;
+    futures_util::stream::once(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(head)
+    })
+    .chain(futures_util::stream::once(async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Err(std::io::Error::other("connection reset mid-body"))
+    }))
 }
 
 fn delayed_body(chunks: Vec<(Duration, &'static [u8])>) -> Body {
