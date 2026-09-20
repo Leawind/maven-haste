@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+
+- Checksum files are now fetched concurrently with the main artifact download instead of sequentially afterwards, shortening first-download latency.
+- Interrupted upstream downloads now resume from the bytes already written using byte-range requests (up to three attempts per file) before the repository is skipped; upstreams that ignore ranges restart the download from scratch.
+- Added `maven-haste cache stats` to print the cached file count, total size, negative entry count, and the configured size limit.
+- Added a periodic background maintenance pass (`cache.maintenance_interval`, default 1m) that enforces the cache size limit even when nothing new is written and purges expired negative entries.
+- Added a Prometheus metrics endpoint at `GET /api/v1/metrics` exposing cache totals, request and hit counters, bytes served, interrupted responses, and per-repository circuit breaker states in text format 0.0.4.
+- CI now runs formatting, linting, and tests on Linux, Windows, and macOS.
+- Each release publishes a container image to `ghcr.io/leawind/maven-haste` (tagged with the version and `latest`).
+
 ## [0.2.0]
 
 ### Added
