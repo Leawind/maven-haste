@@ -38,6 +38,49 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response<Bo
 }
 
 #[tokio::test]
+async fn checksums_are_fetched_while_the_main_body_downloads() {
+    let main_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream = Router::new().route(
+        "/{*path}",
+        get({
+            let main_in_flight = Arc::clone(&main_in_flight);
+            let overlapped = Arc::clone(&overlapped);
+            move |OriginalUri(uri): OriginalUri| {
+                let main_in_flight = Arc::clone(&main_in_flight);
+                let overlapped = Arc::clone(&overlapped);
+                async move {
+                    if is_checksum_uri(&uri) {
+                        if main_in_flight.load(Ordering::SeqCst) {
+                            overlapped.store(true, Ordering::SeqCst);
+                        }
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
+                    main_in_flight.store(true, Ordering::SeqCst);
+                    Response::new(Body::from_stream(futures_util::stream::once(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        main_in_flight.store(false, Ordering::SeqCst);
+                        Ok::<_, Infallible>(Bytes::from_static(b"artifact-body"))
+                    })))
+                }
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "artifact-body");
+    assert!(
+        overlapped.load(Ordering::SeqCst),
+        "checksum requests did not overlap the main body download"
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);

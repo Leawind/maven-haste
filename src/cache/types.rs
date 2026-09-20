@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 
 use crate::db::ArtifactRecord;
+use crate::upstream::UpstreamClient;
 
 /// Tracks which cached files are currently being served. Eviction and removal
 /// consult the registry so a response never loses its file mid-stream.
@@ -161,6 +162,80 @@ pub(crate) struct DownloadedMain {
     pub(crate) sha512: String,
     pub(crate) etag: Option<String>,
     pub(crate) last_modified: Option<String>,
+}
+
+/// The checksum file extensions fetched alongside a main artifact, in the
+/// order the download path validates them.
+pub(crate) const CHECKSUM_EXTENSIONS: [&str; 3] = ["sha1", "sha256", "sha512"];
+
+/// One checksum file fetched from upstream: `supplied` is `None` when the
+/// repository did not return the file, `Some(Ok(..))` with its raw text when
+/// it did, and `Some(Err(..))` when the response could not be read as one.
+pub(crate) struct FetchedChecksum {
+    pub(crate) extension: &'static str,
+    pub(crate) supplied: Option<Result<String, crate::cache::CacheFailure>>,
+}
+
+/// A background task that fetches the checksum files while the main artifact
+/// downloads. Dropping an unresolved prefetch aborts it.
+pub(crate) struct ChecksumPrefetch {
+    handle: Option<tokio::task::JoinHandle<Vec<FetchedChecksum>>>,
+}
+
+impl ChecksumPrefetch {
+    pub(crate) fn none() -> Self {
+        Self { handle: None }
+    }
+
+    pub(crate) fn spawn(
+        task: impl std::future::Future<Output = Vec<FetchedChecksum>> + Send + 'static,
+    ) -> Self {
+        Self {
+            handle: Some(tokio::spawn(task)),
+        }
+    }
+
+    /// Waits for the prefetched files; `None` when no prefetch ran or it
+    /// failed, so the caller falls back to fetching them directly.
+    pub(crate) async fn resolve(mut self) -> Option<Vec<FetchedChecksum>> {
+        match self.handle.take() {
+            Some(handle) => handle.await.ok(),
+            None => None,
+        }
+    }
+}
+
+impl Drop for ChecksumPrefetch {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Fetches every checksum file of `relative` from one repository
+/// concurrently.
+pub(crate) async fn fetch_all_checksums(
+    upstream: &UpstreamClient,
+    repository: &str,
+    relative: &str,
+    priority: crate::upstream::RequestPriority,
+) -> Vec<FetchedChecksum> {
+    futures_util::future::join_all(CHECKSUM_EXTENSIONS.iter().map(|extension| {
+        let upstream = upstream.clone();
+        let repository = repository.to_owned();
+        let path = format!("{relative}.{extension}");
+        async move {
+            let supplied =
+                crate::cache::io::fetch_checksum_file(&upstream, &repository, &path, priority)
+                    .await;
+            FetchedChecksum {
+                extension,
+                supplied,
+            }
+        }
+    }))
+    .await
 }
 
 #[cfg(test)]

@@ -13,7 +13,36 @@ use crate::cache::CacheFailure;
 use crate::cache::types::{DownloadedMain, PreparedFile};
 use crate::db::ArtifactRecord;
 use crate::error::AppError;
-use crate::upstream::UpstreamResponse;
+use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
+
+/// Upper bound accepted for an upstream checksum file response.
+pub(crate) const MAX_CHECKSUM_BYTES: usize = 64 * 1024;
+
+/// Fetches one checksum file: `None` when the repository did not return the
+/// file, `Some(Ok(..))` with its raw text, `Some(Err(..))` when the response
+/// could not be read as a checksum.
+pub(crate) async fn fetch_checksum_file(
+    upstream: &UpstreamClient,
+    repository: &str,
+    relative: &str,
+    priority: RequestPriority,
+) -> Option<Result<String, CacheFailure>> {
+    let FetchResult::Found {
+        repository: checksum_repository,
+        response,
+        ..
+    } = upstream.fetch_from(repository, relative, priority).await
+    else {
+        return None;
+    };
+    match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
+        Ok(supplied) => {
+            upstream.record_body_success(&checksum_repository);
+            Some(Ok(supplied))
+        }
+        Err(error) => Some(Err(error)),
+    }
+}
 
 pub(crate) async fn stream_to_file(
     response: UpstreamResponse,

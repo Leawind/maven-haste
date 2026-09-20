@@ -6,18 +6,17 @@ use sha2::{Digest as _, Sha256};
 
 use crate::cache::CacheFailure;
 use crate::cache::io::{
-    cleanup_downloads, cleanup_prepared, hash_file, header_string, internal,
-    read_checksum_response, remove_file_if_exists, stream_to_file, temporary_path, to_hex,
-    unix_timestamp, write_temporary,
+    cleanup_downloads, cleanup_prepared, hash_file, header_string, internal, remove_file_if_exists,
+    stream_to_file, temporary_path, to_hex, unix_timestamp, write_temporary,
 };
 use crate::cache::types::{
-    DownloadOutcome, DownloadedMain, PassthroughFile, PreparedFetch, PreparedFile, SharedTemp,
+    ChecksumPrefetch, DownloadOutcome, DownloadedMain, FetchedChecksum, PassthroughFile,
+    PreparedFetch, PreparedFile, SharedTemp, fetch_all_checksums,
 };
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
 
-const MAX_CHECKSUM_BYTES: usize = 64 * 1024;
 const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
 
 impl crate::cache::CacheManager {
@@ -216,6 +215,10 @@ impl crate::cache::CacheManager {
                             .await
                             .map_err(internal)?;
                     }
+                    // The checksum files are fetched while the main body
+                    // streams, so a slow artifact download no longer waits on
+                    // extra checksum round-trips afterwards.
+                    let prefetch = self.start_checksum_prefetch(request, &repository, priority);
                     let downloaded = match self.download_main(&repository, response).await {
                         Ok(downloaded) => downloaded,
                         Err(error) => {
@@ -227,7 +230,7 @@ impl crate::cache::CacheManager {
                         }
                     };
                     match self
-                        .prepare_bundle(request, &repository, downloaded, priority)
+                        .prepare_bundle(request, &repository, downloaded, priority, prefetch)
                         .await
                     {
                         Ok(files) => return Ok(PreparedFetch::Bundle(files)),
@@ -285,15 +288,35 @@ impl crate::cache::CacheManager {
         }
     }
 
+    /// Spawns a background fetch of the checksum files belonging to a main
+    /// artifact, overlapping their round-trips with the main body download.
+    fn start_checksum_prefetch(
+        &self,
+        request: &MavenPath,
+        repository: &str,
+        priority: RequestPriority,
+    ) -> ChecksumPrefetch {
+        if request.is_checksum() {
+            return ChecksumPrefetch::none();
+        }
+        let upstream = self.inner.upstream.clone();
+        let repository = repository.to_owned();
+        let relative = request.relative().to_owned();
+        ChecksumPrefetch::spawn(async move {
+            fetch_all_checksums(&upstream, &repository, &relative, priority).await
+        })
+    }
+
     async fn prepare_bundle(
         &self,
         request: &MavenPath,
         repository: &str,
         downloaded: DownloadedMain,
         priority: RequestPriority,
+        prefetch: ChecksumPrefetch,
     ) -> Result<Vec<PreparedFile>, BundleError> {
         let downloaded = self
-            .select_stable_download(request, repository, downloaded, priority)
+            .select_stable_download(request, repository, downloaded, priority, prefetch)
             .await?;
         let now = unix_timestamp();
         let refresh_attempt = (request.policy() == CachePolicy::Mutable).then_some(now);
@@ -368,16 +391,18 @@ impl crate::cache::CacheManager {
         repository: &str,
         initial: DownloadedMain,
         priority: RequestPriority,
+        prefetch: ChecksumPrefetch,
     ) -> Result<DownloadedMain, BundleError> {
         if request.is_checksum() {
             return Ok(initial);
         }
 
+        let mut prefetched = prefetch.resolve().await;
         let mut rejected = Vec::new();
         let mut candidate = initial;
         for attempt in 1..=MAX_CHECKSUM_VALIDATION_ATTEMPTS {
             let issues = self
-                .checksum_issues(request, repository, &candidate, priority)
+                .checksum_issues(request, repository, &candidate, priority, prefetched.take())
                 .await;
             if issues.is_empty() {
                 cleanup_downloads(&rejected).await;
@@ -448,37 +473,44 @@ impl crate::cache::CacheManager {
         unreachable!("checksum validation loop always returns")
     }
 
+    /// Compares the checksum files of a downloaded artifact against its
+    /// computed hashes. Prefetched results are used as-is; otherwise all
+    /// three files are fetched concurrently.
     async fn checksum_issues(
         &self,
         request: &MavenPath,
         repository: &str,
         downloaded: &DownloadedMain,
         priority: RequestPriority,
+        prefetched: Option<Vec<FetchedChecksum>>,
     ) -> Vec<String> {
+        let files = match prefetched {
+            Some(files) => files,
+            None => {
+                fetch_all_checksums(
+                    &self.inner.upstream,
+                    repository,
+                    request.relative(),
+                    priority,
+                )
+                .await
+            }
+        };
         let mut issues = Vec::new();
         for (extension, expected) in [
             ("sha1", &downloaded.sha1),
             ("sha256", &downloaded.sha256),
             ("sha512", &downloaded.sha512),
         ] {
-            let relative = format!("{}.{extension}", request.relative());
-            let FetchResult::Found {
-                repository: checksum_repository,
-                response,
-                ..
-            } = self
-                .inner
-                .upstream
-                .fetch_from(repository, &relative, priority)
-                .await
-            else {
+            let Some(file) = files.iter().find(|file| file.extension == extension) else {
                 continue;
             };
-            match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
+            let Some(supplied) = &file.supplied else {
+                continue;
+            };
+            let relative = format!("{}.{extension}", request.relative());
+            match supplied {
                 Ok(supplied) => {
-                    self.inner
-                        .upstream
-                        .record_body_success(&checksum_repository);
                     let parsed = supplied
                         .split_whitespace()
                         .next()
