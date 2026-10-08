@@ -8,9 +8,10 @@ use std::sync::atomic::Ordering;
 
 use dashmap::mapref::entry::Entry;
 use tokio::fs;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::io::{internal, is_fresh, unix_timestamp};
+use crate::cache::io::{hash_open_file, internal, is_fresh, recorded_file_path, unix_timestamp};
 use crate::cache::types::DownloadOutcome;
 use crate::cache::{CacheFailure, CacheManager, CacheStatus, CachedArtifact, Flight};
 use crate::db::ArtifactRecord;
@@ -43,7 +44,6 @@ impl CacheManager {
                     self.trigger_refresh(request.clone(), cached.record.clone());
                 }
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
-                cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
                 return Ok(cached);
             }
             let negative = self.fresh_negative_entries(request.relative()).await?;
@@ -57,9 +57,8 @@ impl CacheManager {
                 self.log_not_found(request);
                 return Err(CacheFailure::NotFound);
             }
-        } else if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
+        } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
             self.inner.hits.fetch_add(1, Ordering::Relaxed);
-            cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
             return Ok(cached);
         }
 
@@ -82,13 +81,17 @@ impl CacheManager {
                         CacheFailure::Internal("download completed without a cache record".into())
                     })?;
                 cached.status = CacheStatus::Miss;
-                cached.serve_guard = Some(self.inner.serves.acquire(request.relative()));
                 Ok(cached)
             }
             DownloadOutcome::Passthrough(prepared) => {
                 let path = prepared.temporary.path().to_path_buf();
                 Ok(CachedArtifact {
                     file_path: path,
+                    file: Some(
+                        fs::File::open(prepared.temporary.path())
+                            .await
+                            .map_err(internal)?,
+                    ),
                     record: prepared.record,
                     status: CacheStatus::Miss,
                     temporary: Some(prepared.temporary),
@@ -122,8 +125,8 @@ impl CacheManager {
         }
     }
 
-    /// Builds a cached artifact from a database record whose file is present
-    /// and whose size matches the record.
+    /// Opens and verifies the exact representation before allowing a response
+    /// to use its validators or bytes. The handle survives later publication.
     pub(crate) async fn positive_cache(
         &self,
         request: &MavenPath,
@@ -132,11 +135,15 @@ impl CacheManager {
         let Some(record) = record else {
             return Ok(None);
         };
-        let file_path = request.final_path(&self.inner.storage.root);
-        match fs::metadata(&file_path).await {
-            Ok(metadata) if metadata.is_file() => {
+        let _lifecycle = self.inner.lifecycle.read().await;
+        let file_path = recorded_file_path(&self.inner.storage.root, record)
+            .await
+            .map_err(internal)?;
+        match fs::File::open(&file_path).await {
+            Ok(mut file) => {
+                let metadata = file.metadata().await.map_err(internal)?;
                 let expected = record.file_size.max(0) as u64;
-                if metadata.len() != expected {
+                if !metadata.is_file() || metadata.len() != expected {
                     tracing::warn!(
                         path = request.relative(),
                         database = expected,
@@ -145,15 +152,32 @@ impl CacheManager {
                     );
                     return Ok(None);
                 }
+                let (size, sha1, sha256, _) = hash_open_file(&mut file).await.map_err(internal)?;
+                let trusted = size == expected
+                    && match record.sha256.as_deref() {
+                        Some(expected) => expected == sha256,
+                        None => record
+                            .sha1
+                            .as_deref()
+                            .is_some_and(|expected| expected == sha1),
+                    };
+                if !trusted {
+                    tracing::warn!(
+                        path = request.relative(),
+                        "cached file hash does not match its record; fetching it again"
+                    );
+                    return Ok(None);
+                }
+                file.rewind().await.map_err(internal)?;
                 Ok(Some(CachedArtifact {
                     file_path,
+                    file: Some(file),
                     record: record.clone(),
                     status: CacheStatus::Hit,
                     temporary: None,
-                    serve_guard: None,
+                    serve_guard: Some(self.inner.serves.acquire(request.relative())),
                 }))
             }
-            Ok(_) => Ok(None),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(CacheFailure::Internal(format!(
                 "failed to inspect cached file {}: {error}",
@@ -205,7 +229,8 @@ impl CacheManager {
     /// Starts a background refresh for stale mutable metadata, at most one per
     /// path at a time.
     fn trigger_refresh(&self, request: MavenPath, record: ArtifactRecord) {
-        let key = request.relative().to_owned();
+        let source = request.generated_checksum_source();
+        let key = source.as_ref().unwrap_or(&request).relative().to_owned();
         let Entry::Vacant(entry) = self.inner.refreshes.entry(key.clone()) else {
             return;
         };
@@ -213,13 +238,21 @@ impl CacheManager {
 
         let cache = self.clone();
         tokio::spawn(async move {
-            let result = cache.refresh(&request, &record).await;
+            let result = if let Some(source) = source {
+                match cache.inner.database.get(source.relative()).await {
+                    Ok(Some(source_record)) => cache.refresh(&source, &source_record).await,
+                    Ok(None) => cache.download_main_initial(&source).await.map(|_| ()),
+                    Err(error) => Err(internal(error)),
+                }
+            } else {
+                cache.refresh(&request, &record).await
+            };
             if let Err(error) = result {
                 tracing::warn!(path = request.relative(), %error, "background refresh failed");
                 if let Err(touch_error) = cache
                     .inner
                     .database
-                    .touch_refresh_attempt(request.relative(), unix_timestamp())
+                    .touch_refresh_attempt(&key, unix_timestamp())
                     .await
                 {
                     tracing::error!(

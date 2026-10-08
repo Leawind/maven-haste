@@ -101,6 +101,7 @@ async fn resumes_interrupted_downloads_with_byte_ranges() {
                 if attempt == 0 {
                     return Response::builder()
                         .header(CONTENT_LENGTH, content.len())
+                        .header(ETAG, "\"version-1\"")
                         .body(Body::from_stream(interrupted_after(head)))
                         .unwrap();
                 }
@@ -108,6 +109,7 @@ async fn resumes_interrupted_downloads_with_byte_ranges() {
                 let remainder = Bytes::from(content.as_bytes()[start..].to_vec());
                 Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
+                    .header(ETAG, "\"version-1\"")
                     .header(CONTENT_LENGTH, remainder.len())
                     .header(
                         CONTENT_RANGE,
@@ -168,6 +170,7 @@ async fn restarts_the_download_when_upstream_ignores_range_requests() {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     return Response::builder()
                         .header(CONTENT_LENGTH, content.len())
+                        .header(ETAG, "\"version-1\"")
                         .body(Body::from_stream(interrupted_after(head)))
                         .unwrap();
                 }
@@ -233,7 +236,9 @@ async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     assert!(body(head).await.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    tokio::fs::remove_file(&cached_path).await.unwrap();
+    tokio::fs::remove_file(object_file(&directory, b"artifact-body"))
+        .await
+        .unwrap();
     let repaired = request(&app, Method::GET, ARTIFACT_PATH).await;
     assert_eq!(body(repaired).await, "artifact-body");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -279,7 +284,9 @@ async fn refetches_a_cached_file_whose_size_no_longer_matches_its_record() {
 
     let first = request(&app, Method::GET, ARTIFACT_PATH).await;
     assert_eq!(body(first).await, "artifact-body");
-    tokio::fs::write(&cached_path, "corrupt").await.unwrap();
+    tokio::fs::write(object_file(&directory, b"artifact-body"), "corrupt")
+        .await
+        .unwrap();
 
     let second = request(&app, Method::GET, ARTIFACT_PATH).await;
     assert_eq!(second.status(), StatusCode::OK);
@@ -868,7 +875,7 @@ async fn returns_stale_metadata_while_refreshing_in_background() {
         metadata_ttl: Duration::ZERO,
         ..CacheConfig::default()
     };
-    let (app, _) = test_app_with_cache(
+    let (app, database) = test_app_with_cache(
         &directory,
         vec![repository("central", &url, &[])],
         cache_config,
@@ -889,10 +896,9 @@ async fn returns_stale_metadata_while_refreshing_in_background() {
         assert_eq!(stale.unwrap(), "metadata-v1");
     }
     wait_for(|| calls.load(Ordering::SeqCst) >= 2).await;
-    wait_for_file(
-        &directory
-            .path()
-            .join("repository/com/example/demo/maven-metadata.xml"),
+    wait_for_cached_content(
+        &database,
+        "com/example/demo/maven-metadata.xml",
         b"metadata-v2",
     )
     .await;
@@ -949,12 +955,8 @@ async fn keeps_stale_metadata_when_refresh_is_not_found() {
     );
     wait_for(|| calls.load(Ordering::SeqCst) == 2).await;
     wait_for(|| {
-        std::fs::read_to_string(
-            directory
-                .path()
-                .join("repository/com/example/demo/maven-metadata.xml"),
-        )
-        .is_ok_and(|content| content == "metadata-v1")
+        std::fs::read_to_string(object_file(&directory, b"metadata-v1"))
+            .is_ok_and(|content| content == "metadata-v1")
     })
     .await;
     for _ in 0..100 {
@@ -1322,12 +1324,13 @@ async fn generates_and_serves_missing_checksums() {
         Some("a9993e364706816aba3e25717850c26c9cd0d89d")
     );
 
+    let sha512_content = body(request(&app, Method::GET, &sha512_path).await).await;
     let sha512_relative = sha512_path.strip_prefix("/maven/").unwrap();
     database
         .delete_paths(vec![sha512_relative.into()])
         .await
         .unwrap();
-    tokio::fs::remove_file(directory.path().join("repository").join(sha512_relative))
+    tokio::fs::remove_file(object_file(&directory, sha512_content.as_bytes()))
         .await
         .unwrap();
     assert_eq!(
@@ -1352,7 +1355,7 @@ async fn checksum_first_request_is_generated_from_cached_content() {
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 if is_checksum_uri(&uri) {
-                    Response::new(Body::from("upstream-is-wrong\n"))
+                    error_response(StatusCode::NOT_FOUND, "missing checksum")
                 } else {
                     Response::new(Body::from("abc"))
                 }
@@ -1361,7 +1364,7 @@ async fn checksum_first_request_is_generated_from_cached_content() {
     );
     let (url, task) = spawn_upstream(upstream).await;
     let directory = TempDir::new().unwrap();
-    let (app, _) = test_app(&directory, vec![repository("wrong", &url, &[])]).await;
+    let (app, _) = test_app(&directory, vec![repository("missing", &url, &[])]).await;
     let sha1_path = format!("{ARTIFACT_PATH}.sha1");
 
     assert_eq!(
@@ -1372,12 +1375,12 @@ async fn checksum_first_request_is_generated_from_cached_content() {
         body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
         "abc"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 8);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     task.abort();
 }
 
 #[tokio::test]
-async fn stable_checksum_mismatch_keeps_first_repository() {
+async fn stable_checksum_mismatch_falls_back_to_next_repository() {
     let bad_calls = Arc::new(AtomicUsize::new(0));
     let bad_handler_calls = Arc::clone(&bad_calls);
     let bad = Router::new().route(
@@ -1422,14 +1425,14 @@ async fn stable_checksum_mismatch_keeps_first_repository() {
 
     assert_eq!(
         body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
-        "abc"
+        "xyz"
     );
     assert_eq!(
         body(request(&app, Method::GET, &format!("{ARTIFACT_PATH}.sha1")).await).await,
-        "a9993e364706816aba3e25717850c26c9cd0d89d\n"
+        "66b27417d37e024c46526c2f6d358a754fc552f3\n"
     );
-    assert_eq!(bad_calls.load(Ordering::SeqCst), 8);
-    assert_eq!(good_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bad_calls.load(Ordering::SeqCst), 12);
+    assert_eq!(good_calls.load(Ordering::SeqCst), 4);
     let stats: Value =
         serde_json::from_str(&body(request(&app, Method::GET, "/api/v1/cache/stats").await).await)
             .unwrap();
@@ -1439,13 +1442,13 @@ async fn stable_checksum_mismatch_keeps_first_repository() {
         .iter()
         .find(|upstream| upstream["id"] == "bad")
         .unwrap();
-    assert_eq!(bad_status["failures"], 0);
+    assert_eq!(bad_status["failures"], 1);
     bad_task.abort();
     good_task.abort();
 }
 
 #[tokio::test]
-async fn stable_metadata_with_inconsistent_checksums_returns_success() {
+async fn stable_metadata_with_inconsistent_checksums_returns_gateway() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);
     let upstream = Router::new().route(
@@ -1468,9 +1471,8 @@ async fn stable_metadata_with_inconsistent_checksums_returns_success() {
     let metadata = "/maven/com/example/demo/1.0-SNAPSHOT/maven-metadata.xml";
 
     let response = request(&app, Method::GET, metadata).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body(response).await, "<metadata/>");
-    assert_eq!(calls.load(Ordering::SeqCst), 8);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(calls.load(Ordering::SeqCst), 12);
     task.abort();
 }
 
@@ -1512,7 +1514,7 @@ async fn checksum_retry_uses_subsequent_verified_download() {
 }
 
 #[tokio::test]
-async fn checksum_retry_failure_keeps_first_complete_download() {
+async fn checksum_retry_failure_discards_unverified_download() {
     let main_calls = Arc::new(AtomicUsize::new(0));
     let handler_main_calls = Arc::clone(&main_calls);
     let upstream = Router::new().route(
@@ -1535,8 +1537,8 @@ async fn checksum_retry_failure_keeps_first_complete_download() {
     let (app, _) = test_app(&directory, vec![repository("retry", &url, &[])]).await;
 
     assert_eq!(
-        body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
-        "abc"
+        request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+        StatusCode::BAD_GATEWAY
     );
     assert_eq!(main_calls.load(Ordering::SeqCst), 2);
     task.abort();
@@ -1722,6 +1724,474 @@ async fn concurrent_passthrough_requests_share_one_temporary_file_safely() {
     task.abort();
 }
 
+#[tokio::test]
+async fn refetches_equal_length_corruption_before_serving_bytes() {
+    let (url, task) = spawn_upstream(content_upstream("original")).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    assert_eq!(
+        body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+        "original"
+    );
+    tokio::fs::write(object_file(&directory, b"original"), b"tampered")
+        .await
+        .unwrap();
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "original");
+    task.abort();
+}
+
+#[tokio::test]
+async fn serves_verified_cache_offline_but_rejects_corrupt_conditional_head() {
+    let (url, task) = spawn_upstream(content_upstream("original")).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    let first = request(&app, Method::GET, ARTIFACT_PATH).await;
+    let etag = first.headers()[ETAG].clone();
+    assert_eq!(body(first).await, "original");
+    task.abort();
+    assert_eq!(
+        body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+        "original"
+    );
+    tokio::fs::write(object_file(&directory, b"original"), b"tampered")
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(IF_NONE_MATCH, etag);
+    assert_eq!(
+        request_with_headers(&app, Method::HEAD, ARTIFACT_PATH, headers)
+            .await
+            .status(),
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn restarts_interrupted_download_without_a_strong_validator() {
+    for validator in [None, Some("W/\"old\"")] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+                let counter = counter.clone();
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing");
+                    }
+                    if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let mut response = Response::builder().header(CONTENT_LENGTH, 8);
+                        if let Some(validator) = validator {
+                            response = response.header(ETAG, validator);
+                        }
+                        return response
+                            .body(Body::from_stream(interrupted_after(Bytes::from_static(
+                                b"AAAA",
+                            ))))
+                            .unwrap();
+                    }
+                    assert!(!headers.contains_key(RANGE));
+                    assert!(!headers.contains_key("if-range"));
+                    Response::new(Body::from("BBBBBBBB"))
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+        assert_eq!(
+            body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+            "BBBBBBBB"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn restarts_when_a_partial_response_changes_its_etag() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+            let counter = counter.clone();
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing");
+                }
+                match counter.fetch_add(1, Ordering::SeqCst) {
+                    0 => Response::builder()
+                        .header(CONTENT_LENGTH, 8)
+                        .header(ETAG, "\"old\"")
+                        .body(Body::from_stream(interrupted_after(Bytes::from_static(
+                            b"AAAA",
+                        ))))
+                        .unwrap(),
+                    1 => {
+                        assert_eq!(headers["if-range"], "\"old\"");
+                        assert_eq!(requested_range_start(&headers), 4);
+                        Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header(CONTENT_LENGTH, 4)
+                            .header(CONTENT_RANGE, "bytes 4-7/8")
+                            .header(ETAG, "\"new\"")
+                            .body(Body::from("BBBB"))
+                            .unwrap()
+                    }
+                    _ => {
+                        assert!(!headers.contains_key(RANGE));
+                        Response::builder()
+                            .header(ETAG, "\"new\"")
+                            .body(Body::from("BBBBBBBB"))
+                            .unwrap()
+                    }
+                }
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.headers()[ETAG], "\"new\"");
+    assert_eq!(body(response).await, "BBBBBBBB");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    task.abort();
+}
+
+#[tokio::test]
+async fn rejects_incomplete_or_misaligned_partial_ranges() {
+    for content_range in [
+        "bytes 4-7/12",
+        "bytes 3-6/7",
+        "bytes 4-7/9",
+        "bytes 4-7/*",
+        "bytes 4-18446744073709551615/8",
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let calls = calls.clone();
+                async move {
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing");
+                    }
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Response::builder()
+                            .header(CONTENT_LENGTH, 8)
+                            .header(ETAG, "\"old\"")
+                            .body(Body::from_stream(interrupted_after(Bytes::from_static(
+                                b"AAAA",
+                            ))))
+                            .unwrap();
+                    }
+                    Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header(CONTENT_LENGTH, 4)
+                        .header(CONTENT_RANGE, content_range)
+                        .header(ETAG, "\"old\"")
+                        .body(Body::from("AAAA"))
+                        .unwrap()
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let (app, database) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::BAD_GATEWAY,
+            "{content_range}"
+        );
+        assert!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn only_follows_redirects_to_explicitly_configured_origins() {
+    for configured in [false, true] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let destination = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing");
+                    }
+                    Response::new(Body::from("redirected"))
+                }
+            }),
+        );
+        let (destination_url, destination_task) = spawn_upstream(destination).await;
+        let target = destination_url.clone();
+        let upstream = Router::new().route(
+            "/{*path}",
+            get(move |OriginalUri(uri): OriginalUri| {
+                let target = target
+                    .join(uri.path().trim_start_matches('/'))
+                    .unwrap()
+                    .to_string();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header("location", target)
+                        .body(Body::empty())
+                        .unwrap()
+                }
+            }),
+        );
+        let (url, task) = spawn_upstream(upstream).await;
+        let directory = TempDir::new().unwrap();
+        let mut repositories = vec![repository("central", &url, &[])];
+        if configured {
+            // Excluding routes do not accidentally exercise a direct fallback:
+            // the target is authorized solely for the redirect in this test.
+            repositories.push(repository("destination", &destination_url, &["!**"]));
+        }
+        let (app, _) = test_app(&directory, repositories).await;
+        let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+        if configured {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await, "redirected");
+            assert!(hits.load(Ordering::SeqCst) > 0);
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+        task.abort();
+        destination_task.abort();
+    }
+}
+
+#[tokio::test]
+async fn failed_refresh_preserves_the_old_bundle_and_validators() {
+    let (url, task) = spawn_upstream(changing_metadata_upstream()).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        },
+        UpstreamConfig::default(),
+    )
+    .await;
+    let path = "/maven/com/example/demo/maven-metadata.xml";
+    assert_eq!(
+        body(request(&app, Method::GET, path).await).await,
+        "old-body"
+    );
+    // Block one new object so publication fails after staging the main file.
+    use sha1::{Digest, Sha1};
+    let old_checksum: String = Sha1::digest(b"old-body")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let old_checksum = format!("{old_checksum}\n");
+    let new_checksum: String = Sha1::digest(b"new-body")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let blocked = object_file(&directory, format!("{new_checksum}\n").as_bytes());
+    tokio::fs::create_dir(&blocked).await.unwrap();
+    assert_eq!(
+        body(request(&app, Method::GET, path).await).await,
+        "old-body"
+    );
+    // Staging the new main proves the refresh reached installation, without
+    // assuming that the task was scheduled within a fixed sleep interval.
+    wait_for(|| object_file(&directory, b"new-body").exists()).await;
+    let response = request(&app, Method::GET, path).await;
+    assert_eq!(response.headers()[ETAG], "\"old\"");
+    assert_eq!(body(response).await, "old-body");
+    assert_eq!(
+        body(request(&app, Method::GET, &format!("{path}.sha1")).await).await,
+        old_checksum
+    );
+    assert_eq!(
+        database
+            .get("com/example/demo/maven-metadata.xml")
+            .await
+            .unwrap()
+            .unwrap()
+            .sha256,
+        Some(content_sha256(b"old-body"))
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn an_open_response_keeps_its_bytes_and_etag_during_refresh() {
+    let (url, task) = spawn_upstream(changing_metadata_upstream()).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        },
+        UpstreamConfig::default(),
+    )
+    .await;
+    let path = "/maven/com/example/demo/maven-metadata.xml";
+    assert_eq!(
+        body(request(&app, Method::GET, path).await).await,
+        "old-body"
+    );
+    let pending = request(&app, Method::GET, path).await;
+    assert_eq!(pending.headers()[ETAG], "\"old\"");
+    wait_for_cached_content(
+        &database,
+        "com/example/demo/maven-metadata.xml",
+        b"new-body",
+    )
+    .await;
+    assert_eq!(body(pending).await, "old-body");
+    let latest = request(&app, Method::GET, path).await;
+    assert_eq!(latest.headers()[ETAG], "\"new\"");
+    assert_eq!(body(latest).await, "new-body");
+    task.abort();
+}
+
+#[tokio::test]
+async fn refreshing_a_generated_checksum_publishes_its_main_bundle() {
+    use sha1::{Digest, Sha1};
+    let (url, task) = spawn_upstream(changing_metadata_upstream()).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig {
+            metadata_ttl: Duration::ZERO,
+            ..CacheConfig::default()
+        },
+        UpstreamConfig::default(),
+    )
+    .await;
+    let relative = "com/example/demo/maven-metadata.xml";
+    let path = format!("/maven/{relative}");
+    assert_eq!(
+        body(request(&app, Method::GET, &path).await).await,
+        "old-body"
+    );
+    let old_hash: String = Sha1::digest(b"old-body")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        body(request(&app, Method::GET, &format!("{path}.sha1")).await).await,
+        format!("{old_hash}\n")
+    );
+    wait_for_cached_content(&database, relative, b"new-body").await;
+    let new_hash: String = Sha1::digest(b"new-body")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        body(request(&app, Method::GET, &format!("{path}.sha1")).await).await,
+        format!("{new_hash}\n")
+    );
+    assert_eq!(
+        body(request(&app, Method::GET, &path).await).await,
+        "new-body"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn checksum_fetch_errors_are_not_treated_as_missing_checksums() {
+    let bad = Router::new().route(
+        "/{*path}",
+        get(|OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::FORBIDDEN, "unavailable checksum");
+            }
+            Response::new(Body::from("unverified"))
+        }),
+    );
+    let (bad_url, bad_task) = spawn_upstream(bad).await;
+    let (good_url, good_task) = spawn_upstream(content_upstream("verified-source")).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app(
+        &directory,
+        vec![
+            repository("bad", &bad_url, &[]),
+            repository("good", &good_url, &[]),
+        ],
+    )
+    .await;
+    assert_eq!(
+        body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
+        "verified-source"
+    );
+    assert_eq!(
+        database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .unwrap()
+            .upstream,
+        "good"
+    );
+    bad_task.abort();
+    good_task.abort();
+}
+
+fn content_upstream(content: &'static str) -> Router {
+    Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::NOT_FOUND, "missing");
+            }
+            Response::builder()
+                .header(ETAG, "\"content\"")
+                .body(Body::from(content))
+                .unwrap()
+        }),
+    )
+}
+
+fn changing_metadata_upstream() -> Router {
+    let calls = Arc::new(AtomicUsize::new(0));
+    Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri| {
+            let calls = calls.clone();
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing");
+                }
+                let (content, etag) = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ("old-body", "\"old\"")
+                } else {
+                    ("new-body", "\"new\"")
+                };
+                Response::builder()
+                    .header(ETAG, etag)
+                    .body(Body::from(content))
+                    .unwrap()
+            }
+        }),
+    )
+}
+
 async fn test_app(directory: &TempDir, repositories: Vec<RepositoryConfig>) -> (Router, Database) {
     test_app_with_cache(
         directory,
@@ -1883,15 +2353,34 @@ async fn wait_for(condition: impl Fn() -> bool) {
     panic!("condition was not met before timeout");
 }
 
-async fn wait_for_file(path: &std::path::Path, expected: &[u8]) {
+fn object_file(directory: &TempDir, content: &[u8]) -> std::path::PathBuf {
+    let hash = content_sha256(content);
+    directory
+        .path()
+        .join("repository/.maven-haste/objects")
+        .join(hash)
+}
+
+async fn wait_for_cached_content(database: &Database, path: &str, expected: &[u8]) {
+    let hash = content_sha256(expected);
     for _ in 0..500 {
-        if tokio::fs::read(path)
+        if database
+            .get(path)
             .await
-            .is_ok_and(|content| content == expected)
+            .unwrap()
+            .is_some_and(|record| record.sha256.as_deref() == Some(&hash))
         {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("file {} was not updated before timeout", path.display());
+    panic!("record {path} was not updated before timeout");
+}
+
+fn content_sha256(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(content)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

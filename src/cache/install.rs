@@ -4,8 +4,8 @@ use std::io::ErrorKind;
 use tokio::fs;
 
 use crate::cache::io::{
-    cleanup_prepared, internal, is_timestamp_fresh, relative_file_path, remove_empty_parents,
-    remove_file_if_exists,
+    cleanup_prepared, hash_file, internal, is_timestamp_fresh, lock_objects, object_path,
+    recorded_file_path, relative_file_path, remove_empty_parents, remove_file_if_exists,
 };
 use crate::cache::types::PreparedFile;
 use crate::cache::{CacheFailure, RemovalStats};
@@ -16,14 +16,50 @@ impl crate::cache::CacheManager {
         &self,
         files: Vec<PreparedFile>,
     ) -> Result<(), CacheFailure> {
-        let result = self.install_bundle_inner(&files).await;
-        if result.is_err() {
-            cleanup_prepared(&files).await;
-        }
-        result
+        self.install_bundle_checked(files, None).await.map(|_| ())
     }
 
-    async fn install_bundle_inner(&self, files: &[PreparedFile]) -> Result<(), CacheFailure> {
+    pub(crate) async fn install_bundle_checked(
+        &self,
+        files: Vec<PreparedFile>,
+        source: Option<&ArtifactRecord>,
+    ) -> Result<bool, CacheFailure> {
+        let cache = self.clone();
+        let source = source.cloned();
+        // Once staging starts, finish the publication even if the requesting
+        // HTTP task is canceled. SQLite workers may outlive an awaited future.
+        tokio::spawn(async move {
+            let result = cache.install_bundle_inner(&files, source.as_ref()).await;
+            if result.is_err() {
+                cleanup_prepared(&files).await;
+            }
+            result
+        })
+        .await
+        .map_err(internal)?
+    }
+
+    async fn install_bundle_inner(
+        &self,
+        files: &[PreparedFile],
+        source: Option<&ArtifactRecord>,
+    ) -> Result<bool, CacheFailure> {
+        let lifecycle = self.inner.lifecycle.write().await;
+        let publication_lock = lock_objects(&self.inner.storage.root).await?;
+        if let Some(source) = source {
+            let current = self
+                .inner
+                .database
+                .get(&source.path)
+                .await
+                .map_err(internal)?;
+            if current.is_none_or(|current| current.sha256 != source.sha256) {
+                cleanup_prepared(files).await;
+                return Ok(false);
+            }
+        }
+        let objects = self.inner.storage.root.join(".maven-haste/objects");
+        fs::create_dir_all(&objects).await.map_err(internal)?;
         let mut conflicts = Vec::new();
         if !self.inner.case_sensitive {
             for file in files {
@@ -37,48 +73,30 @@ impl crate::cache::CacheManager {
             }
             conflicts.sort();
             conflicts.dedup();
-            self.inner
-                .database
-                .delete_paths(conflicts.clone())
-                .await
-                .map_err(internal)?;
-            for conflict in conflicts {
-                remove_file_if_exists(&relative_file_path(&self.inner.storage.root, &conflict))
-                    .await
-                    .map_err(|error| {
-                        CacheFailure::Internal(format!(
-                            "failed to remove case-conflicting file {conflict}: {error}"
-                        ))
-                    })?;
-            }
         }
 
         for file in files {
-            let final_path = relative_file_path(&self.inner.storage.root, &file.relative);
-            let parent = final_path
-                .parent()
-                .ok_or_else(|| CacheFailure::Internal("artifact path has no parent".into()))?;
-            fs::create_dir_all(parent).await.map_err(|error| {
-                CacheFailure::Internal(format!(
-                    "failed to create cache directory {}: {error}",
-                    parent.display()
-                ))
+            let hash = file
+                .record
+                .sha256
+                .as_deref()
+                .ok_or_else(|| CacheFailure::Internal("prepared file has no SHA-256".into()))?;
+            let final_path = object_path(&self.inner.storage.root, hash).ok_or_else(|| {
+                CacheFailure::Internal("prepared file has invalid SHA-256".into())
             })?;
-        }
-
-        // Records are written before the files are renamed into place: an
-        // interruption then leaves a record whose file is missing or stale,
-        // which the next request detects and repairs by fetching again. The
-        // reverse order would leave untracked files that nothing can see.
-        self.inner
-            .database
-            .upsert_many(files.iter().map(|file| file.record.clone()).collect())
-            .await
-            .map_err(internal)?;
-        let install_order = (1..files.len()).chain(std::iter::once(0));
-        for index in install_order {
-            let file = &files[index];
-            let final_path = relative_file_path(&self.inner.storage.root, &file.relative);
+            // Existing objects are reusable only if their actual bytes still
+            // match. Never overwrite a valid object held by an old response.
+            if hash_file(&final_path)
+                .await
+                .is_ok_and(|(size, _, actual, _)| {
+                    actual == hash && size == file.record.file_size.max(0) as u64
+                })
+            {
+                remove_file_if_exists(&file.temporary)
+                    .await
+                    .map_err(internal)?;
+                continue;
+            }
             fs::rename(&file.temporary, &final_path)
                 .await
                 .map_err(|error| {
@@ -88,6 +106,26 @@ impl crate::cache::CacheManager {
                     ))
                 })?;
         }
+        // Failed staging or a crash before this transaction leaves the old
+        // bundle intact. Unreferenced objects are collected by maintenance.
+        self.inner
+            .database
+            .publish_bundle(
+                files.iter().map(|file| file.record.clone()).collect(),
+                conflicts.clone(),
+            )
+            .await
+            .map_err(internal)?;
+        for conflict in conflicts {
+            if !self.inner.serves.is_busy(&conflict) {
+                let path = relative_file_path(&self.inner.storage.root, &conflict);
+                if let Err(error) = remove_file_if_exists(&path).await {
+                    tracing::warn!(%error, "failed to retire a legacy case alias");
+                }
+            }
+        }
+        drop(publication_lock);
+        drop(lifecycle);
         let protected = files
             .iter()
             .map(|file| file.relative.as_str())
@@ -95,7 +133,10 @@ impl crate::cache::CacheManager {
         if let Err(error) = self.enforce_capacity(&protected).await {
             tracing::warn!(%error, "cache capacity enforcement did not complete");
         }
-        Ok(())
+        if let Err(error) = self.collect_objects().await {
+            tracing::warn!(%error, "object garbage collection did not complete");
+        }
+        Ok(true)
     }
 
     pub(crate) async fn enforce_capacity(
@@ -133,13 +174,32 @@ impl crate::cache::CacheManager {
         &self,
         records: Vec<ArtifactRecord>,
     ) -> Result<RemovalStats, CacheFailure> {
+        let _lifecycle = self.inner.lifecycle.write().await;
+        let _publication_lock = lock_objects(&self.inner.storage.root).await?;
         let mut removed_paths = Vec::new();
         let mut stats = RemovalStats { files: 0, bytes: 0 };
         for record in records {
+            let Some(record) = self
+                .inner
+                .database
+                .get(&record.path)
+                .await
+                .map_err(internal)?
+            else {
+                continue;
+            };
             if self.path_is_busy(&record.path) {
                 continue;
             }
-            let file_path = relative_file_path(&self.inner.storage.root, &record.path);
+            let file_path = recorded_file_path(&self.inner.storage.root, &record)
+                .await
+                .map_err(internal)?;
+            if file_path.starts_with(self.inner.storage.root.join(".maven-haste/objects")) {
+                stats.files += 1;
+                stats.bytes = stats.bytes.saturating_add(record.file_size.max(0) as u64);
+                removed_paths.push(record.path);
+                continue;
+            }
             match fs::remove_file(&file_path).await {
                 Ok(()) => {
                     stats.files += 1;
@@ -161,7 +221,69 @@ impl crate::cache::CacheManager {
             .delete_paths(removed_paths)
             .await
             .map_err(internal)?;
+        self.collect_objects_locked().await?;
         Ok(stats)
+    }
+
+    pub(crate) async fn collect_objects(&self) -> Result<(), CacheFailure> {
+        let _lifecycle = self.inner.lifecycle.write().await;
+        let _publication_lock = lock_objects(&self.inner.storage.root).await?;
+        self.collect_objects_locked().await
+    }
+
+    async fn collect_objects_locked(&self) -> Result<(), CacheFailure> {
+        // A reader may still own an older record after a newer bundle was
+        // published. Keep retired objects until all verified readers finish.
+        if !self.inner.serves.is_empty() {
+            return Ok(());
+        }
+        let records = self
+            .inner
+            .database
+            .records_by_access()
+            .await
+            .map_err(internal)?;
+        let retained: HashSet<_> = records
+            .iter()
+            .filter_map(|record| record.sha256.clone())
+            .collect();
+        // A legacy Maven-layout file can remain after its record moves to an
+        // object. Retire that duplicate only when the replacement is verified.
+        for record in &records {
+            let legacy = relative_file_path(&self.inner.storage.root, &record.path);
+            if fs::try_exists(&legacy).await.map_err(internal)?
+                && let Some(object) = record
+                    .sha256
+                    .as_deref()
+                    .and_then(|hash| object_path(&self.inner.storage.root, hash))
+                && hash_file(&object).await.is_ok_and(|(size, _, hash, _)| {
+                    Some(hash.as_str()) == record.sha256.as_deref()
+                        && size == record.file_size.max(0) as u64
+                })
+            {
+                remove_file_if_exists(&legacy).await.map_err(internal)?;
+                remove_empty_parents(legacy.parent(), &self.inner.storage.root).await;
+            }
+        }
+        let objects = self.inner.storage.root.join(".maven-haste/objects");
+        let mut entries = match fs::read_dir(&objects).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(internal(error)),
+        };
+        while let Some(entry) = entries.next_entry().await.map_err(internal)? {
+            let name = entry.file_name();
+            let Some(hash) = name.to_str() else { continue };
+            if object_path(&self.inner.storage.root, hash).is_some()
+                && !retained.contains(hash)
+                && entry.file_type().await.map_err(internal)?.is_file()
+            {
+                remove_file_if_exists(&entry.path())
+                    .await
+                    .map_err(internal)?;
+            }
+        }
+        Ok(())
     }
 
     fn path_is_busy(&self, path: &str) -> bool {

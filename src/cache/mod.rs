@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use serde::Serialize;
 use tokio::fs;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 use crate::cache::io::internal;
 use crate::config::{CacheConfig, StorageConfig};
@@ -41,6 +41,7 @@ struct CacheInner {
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
     serves: ServeRegistry,
+    lifecycle: RwLock<()>,
     requests: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -51,6 +52,8 @@ struct CacheInner {
 #[derive(Debug)]
 pub struct CachedArtifact {
     pub file_path: PathBuf,
+    /// The already verified file handle; responses must not reopen its path.
+    pub file: Option<fs::File>,
     pub record: ArtifactRecord,
     pub status: CacheStatus,
     /// Shared temporary file to release after the response body is fully
@@ -145,6 +148,7 @@ impl CacheManager {
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
                 serves: ServeRegistry::default(),
+                lifecycle: RwLock::new(()),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -323,6 +327,141 @@ mod tests {
         assert!(database.get("com/example/mid.jar").await.unwrap().is_some());
         assert!(database.get("com/example/new.jar").await.unwrap().is_some());
         assert_eq!(database.stats().await.unwrap().total_size, 8);
+    }
+
+    #[tokio::test]
+    async fn failed_database_publication_keeps_all_previous_records_and_bytes() {
+        use crate::cache::io::{temporary_path, write_temporary};
+        use crate::cache::types::PreparedFile;
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        let path = "com/example/demo/1.0/demo-1.0.jar";
+        let checksum_path = format!("{path}.sha1");
+        add_record(&cache, &database, path, b"old-body", 1, "test").await;
+        add_record(
+            &cache,
+            &database,
+            &checksum_path,
+            b"old-checksum",
+            1,
+            "test",
+        )
+        .await;
+        let mut files = Vec::new();
+        for (relative, content) in [
+            (path, &b"new-body"[..]),
+            (checksum_path.as_str(), &b"new-checksum"[..]),
+        ] {
+            let mut record = database.get(relative).await.unwrap().unwrap();
+            record.sha1 = Some(to_hex(&Sha1::digest(content)));
+            record.sha256 = Some(to_hex(&Sha256::digest(content)));
+            record.file_size = content.len() as i64;
+            let temporary = temporary_path(cache.inner.storage.tmp_dir());
+            write_temporary(&temporary, content).await.unwrap();
+            files.push(PreparedFile {
+                relative: relative.into(),
+                temporary,
+                record,
+            });
+        }
+        let connection = rusqlite::Connection::open(cache.inner.storage.db_path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_publication BEFORE INSERT ON artifacts WHEN NEW.path LIKE '%.sha1' BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END;").unwrap();
+        assert!(cache.install_bundle(files).await.is_err());
+        for (relative, content) in [
+            (path, &b"old-body"[..]),
+            (checksum_path.as_str(), &b"old-checksum"[..]),
+        ] {
+            let record = database.get(relative).await.unwrap().unwrap();
+            assert_eq!(record.sha256, Some(to_hex(&Sha256::digest(content))));
+            let request = MavenPath::parse(&format!("/maven/{relative}"), "/maven").unwrap();
+            let cached = cache.get(&request).await.unwrap();
+            assert_eq!(fs::read(&cached.file_path).await.unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn object_collection_keeps_readers_and_shared_references() {
+        use crate::cache::io::object_path;
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        for path in ["com/example/first.jar", "org/example/second.jar"] {
+            add_record(&cache, &database, path, b"shared", 1, "test").await;
+        }
+        let shared = object_path(
+            &cache.inner.storage.root,
+            &to_hex(&Sha256::digest(b"shared")),
+        )
+        .unwrap();
+        let orphan = object_path(
+            &cache.inner.storage.root,
+            &to_hex(&Sha256::digest(b"orphan")),
+        )
+        .unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).await.unwrap();
+        fs::write(&shared, b"shared").await.unwrap();
+        fs::write(&orphan, b"orphan").await.unwrap();
+        let serving = cache.inner.serves.acquire("retired/path.jar");
+        cache.run_maintenance().await.unwrap();
+        assert!(orphan.exists());
+        drop(serving);
+        cache.run_maintenance().await.unwrap();
+        assert!(!orphan.exists());
+        cache.remove_prefix("com/example").await.unwrap();
+        assert!(shared.exists());
+        cache.remove_prefix("org/example").await.unwrap();
+        assert!(!shared.exists());
+    }
+
+    #[tokio::test]
+    async fn publication_finishes_when_the_requesting_task_is_canceled() {
+        use crate::cache::io::{lock_objects, temporary_path, write_temporary};
+        use crate::cache::types::PreparedFile;
+        use std::time::Duration;
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        let path = "com/example/demo/1.0/demo-1.0.jar";
+        add_record(&cache, &database, path, b"old-body", 1, "test").await;
+        let mut record = database.get(path).await.unwrap().unwrap();
+        record.sha1 = Some(to_hex(&Sha1::digest(b"new-body")));
+        record.sha256 = Some(to_hex(&Sha256::digest(b"new-body")));
+        let temporary = temporary_path(cache.inner.storage.tmp_dir());
+        write_temporary(&temporary, b"new-body").await.unwrap();
+        // Hold the same OS lock that another server or CLI process uses.
+        let blocker = lock_objects(&cache.inner.storage.root).await.unwrap();
+        let installing = cache.clone();
+        let task = tokio::spawn(async move {
+            installing
+                .install_bundle(vec![PreparedFile {
+                    relative: path.into(),
+                    temporary,
+                    record,
+                }])
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while cache.inner.lifecycle.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(blocker);
+        let expected = to_hex(&Sha256::digest(b"new-body"));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if database.get(path).await.unwrap().unwrap().sha256.as_deref() == Some(&expected) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let request = MavenPath::parse(&format!("/maven/{path}"), "/maven").unwrap();
+        let cached = cache.get(&request).await.unwrap();
+        assert_eq!(fs::read(&cached.file_path).await.unwrap(), b"new-body");
     }
 
     #[tokio::test]

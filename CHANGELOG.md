@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.
+- Require Rust 1.89 or later for standard-library file locks that serialize object publication and collection across server and CLI processes.
+- Reject persistent checksum mismatches and checksum-fetch failures instead of accepting repeated content or a failed validation retry.
+
+### Fixed
+
+- Verify cached bytes before GET, HEAD, and conditional responses, including equal-length corruption; keep the verified file handle for streaming.
+- Preserve old cache bundles and validators after failed refresh publication, and finish publication if the initiating request is canceled.
+- Pin resumed downloads with strong ETags and If-Range; restart changed representations and reject inconsistent Content-Range responses.
+- Limit upstream redirects to explicitly configured repository origins.
+- Refresh generated checksums together with their source artifact, and prevent regeneration from publishing a checksum for an obsolete source.
+
 ## [0.3.0]
 
 ### Added

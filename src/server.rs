@@ -18,7 +18,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use http_body::Body as _;
 use pin_project_lite::pin_project;
-use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
@@ -390,7 +389,7 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
 }
 
 async fn cached_response(
-    cached: CachedArtifact,
+    mut cached: CachedArtifact,
     policy: CachePolicy,
     head: bool,
     request_headers: &HeaderMap,
@@ -458,8 +457,8 @@ async fn cached_response(
     let body = if head {
         Body::empty()
     } else {
-        match File::open(&cached.file_path).await {
-            Ok(mut file) => {
+        match cached.file.take() {
+            Some(mut file) => {
                 if start > 0
                     && let Err(error) = file.seek(std::io::SeekFrom::Start(start)).await
                 {
@@ -471,8 +470,8 @@ async fn cached_response(
                 }
                 Body::from_stream(ReaderStream::new(file.take(length)))
             }
-            Err(error) => {
-                tracing::error!(path = %cached.file_path.display(), %error, "cached file disappeared");
+            None => {
+                tracing::error!(path = %cached.file_path.display(), "cached file handle is missing");
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "cached file is unavailable",
@@ -487,7 +486,7 @@ async fn cached_response(
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_str(
-            mime_guess::from_path(&cached.file_path)
+            mime_guess::from_path(&cached.record.path)
                 .first_or_octet_stream()
                 .as_ref(),
         )

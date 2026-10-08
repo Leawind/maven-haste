@@ -113,7 +113,7 @@ Repositories are tried in configuration order. `rules` is an ordered list of glo
 
 Repository ids are used for logging, statistics, and circuit breaker identification, and must consist only of lowercase ASCII letters, digits, underscores, and hyphens (e.g. `central`, `kikugie-releases`, `gradle-plugin`).
 
-When an upstream lacks a file, fails, or repeatedly returns different content that cannot be verified against its checksums, the service continues to the next upstream where applicable.
+When an upstream lacks a file, fails, or returns content that still cannot be verified against its checksums after retries, the service continues to the next upstream where applicable. Redirects are followed only to origins (scheme, host, and port) explicitly listed in the configured repository URLs.
 
 ## Build Tool Integration
 
@@ -136,9 +136,12 @@ fallbacks. A build may enforce its own repository policy, so inspect and adapt t
 - Set `cache_writes = false` on a repository to stop writing new artifacts, checksums, and negative entries from it. Content cached earlier is still served and nothing is deleted; previously confirmed 404s keep short-circuiting until their negative TTL expires.
 - If a background refresh hits upstream failures, the stale cached content continues to be served.
 - Upstream 404s for mutable files are briefly remembered to reduce repeated requests for non-existent files.
-- When upstream checksums disagree with downloaded content, the service retries to distinguish an unstable download from an incorrect checksum. Stable content is accepted with a warning; repeatedly changing unverified content is discarded and other sources are tried. Cached `.sha1`, `.sha256`, and `.sha512` files are always computed from the bytes actually stored.
+- Every cached response, including `HEAD` and conditional requests, verifies the file's size and stored hash before serving it. Corrupt files are fetched again; if no upstream can repair them, the request fails.
+- When an upstream checksum disagrees with downloaded content or cannot be retrieved due to an upstream error, the service retries and then tries other sources. Repeatedly identical content and failed retries never override a checksum mismatch. Only explicit checksum 404s permit generating missing checksums. Cached `.sha1`, `.sha256`, and `.sha512` files are computed from the bytes actually stored.
 
-Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes. Checksum files are fetched concurrently with the main artifact download, and a download interrupted mid-body resumes from the bytes already written via byte-range requests (up to three attempts) before the repository is skipped.
+New cache files are stored as SHA-256 content objects under `<root>/.maven-haste/objects`. All objects in an artifact bundle are persisted before one SQLite transaction publishes the main file and its checksums. Failed publication keeps the previous bundle available, and open responses retain their verified file handles during refresh. Existing Maven-layout caches remain readable without a database migration. Maintenance retires unused objects and replaced legacy files; objects needed by active responses are retained until those responses finish. Cache verification reads the whole file before streaming, adding local disk I/O to each hit.
+
+Upstream requests are bounded by a global concurrency limit and a per-repository limit; the scheduler prioritizes first-time downloads while periodically leaving room for cache refreshes. Checksum files are fetched concurrently with the main artifact download. Interrupted downloads resume with `Range` and `If-Range` only when a strong ETag pins the representation. Missing or weak validators, changed ETags, or ignored ranges restart the download from byte zero; inconsistent partial ranges are rejected. There are up to three body-transfer attempts before the repository is skipped. Refreshing a generated checksum refreshes its main artifact and the entire checksum bundle.
 
 The cache size limit is enforced after every write and by a periodic background maintenance pass (`cache.maintenance_interval`, default 1m) that also purges expired negative entries.
 

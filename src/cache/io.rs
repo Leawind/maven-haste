@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::cache::CacheFailure;
 use crate::cache::types::{DownloadedMain, PreparedFile};
 use crate::db::ArtifactRecord;
-use crate::error::AppError;
 use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
 
 /// Upper bound accepted for an upstream checksum file response.
@@ -27,14 +26,16 @@ pub(crate) async fn fetch_checksum_file(
     relative: &str,
     priority: RequestPriority,
 ) -> Option<Result<String, CacheFailure>> {
-    let FetchResult::Found {
-        repository: checksum_repository,
-        response,
-        ..
-    } = upstream.fetch_from(repository, relative, priority).await
-    else {
-        return None;
-    };
+    let (checksum_repository, response) =
+        match upstream.fetch_from(repository, relative, priority).await {
+            FetchResult::Found {
+                repository,
+                response,
+                ..
+            } => (repository, response),
+            FetchResult::NotFound => return None,
+            _ => return Some(Err(CacheFailure::Gateway)),
+        };
     match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
         Ok(supplied) => {
             upstream.record_body_success(&checksum_repository);
@@ -59,25 +60,35 @@ pub(crate) enum StreamFailure {
 pub(crate) async fn stream_response_to_file(
     response: UpstreamResponse,
     destination: &Path,
+    resume: Option<(u64, Option<u64>)>,
 ) -> Result<(u64, String, String, String), StreamFailure> {
     let (response, _permit) = response.into_parts();
     let mut file;
     let mut size;
+    let expected_total;
     let mut sha1 = Sha1::new();
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        let start = range_start(&response).map_err(StreamFailure::Failed)?;
+        let (start, total) = response_range(&response).map_err(StreamFailure::Failed)?;
+        expected_total = Some(total);
+        if !resume.is_some_and(|(offset, expected)| {
+            start == offset && expected.is_none_or(|expected| expected == total)
+        }) {
+            return Err(StreamFailure::Failed(CacheFailure::Internal(
+                "unexpected upstream partial range".into(),
+            )));
+        }
         (file, size) = open_for_resume(destination, start, &mut sha1, &mut sha256, &mut sha512)
             .await
             .map_err(StreamFailure::Failed)?;
     } else {
+        expected_total = response.content_length();
         file = create_truncated(destination)
             .await
             .map_err(StreamFailure::Failed)?;
         size = 0;
     }
-    let expected_total = response.content_length().map(|length| size + length);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| StreamFailure::Interrupted {
@@ -126,7 +137,7 @@ pub(crate) async fn stream_response_to_file(
 
 /// Parses the first byte position of a `Content-Range` header such as
 /// `bytes 300-1023/1024`.
-fn range_start(response: &reqwest::Response) -> Result<u64, CacheFailure> {
+fn response_range(response: &reqwest::Response) -> Result<(u64, u64), CacheFailure> {
     let value = response
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
@@ -134,11 +145,24 @@ fn range_start(response: &reqwest::Response) -> Result<u64, CacheFailure> {
         .ok_or_else(|| {
             CacheFailure::Internal("partial response is missing Content-Range".into())
         })?;
-    value
+    let invalid = || CacheFailure::Internal(format!("invalid Content-Range {value:?}"));
+    let (range, total) = value
         .strip_prefix("bytes ")
-        .and_then(|range| range.split_once('-'))
-        .and_then(|(start, _)| start.parse().ok())
-        .ok_or_else(|| CacheFailure::Internal(format!("unrecognized Content-Range {value:?}")))
+        .and_then(|value| value.split_once('/'))
+        .ok_or_else(invalid)?;
+    let (start, end) = range.split_once('-').ok_or_else(invalid)?;
+    let start = start.parse::<u64>().map_err(|_| invalid())?;
+    let end = end.parse::<u64>().map_err(|_| invalid())?;
+    let total = total.parse::<u64>().map_err(|_| invalid())?;
+    if start > end
+        || end.checked_add(1) != Some(total)
+        || response
+            .content_length()
+            .is_some_and(|length| length != total - start)
+    {
+        return Err(invalid());
+    }
+    Ok((start, total))
 }
 
 /// Opens an interrupted download for continuation: hashes the first `start`
@@ -309,6 +333,13 @@ pub(crate) async fn hash_file(
     path: &Path,
 ) -> Result<(u64, String, String, String), std::io::Error> {
     let mut file = fs::File::open(path).await?;
+    hash_open_file(&mut file).await
+}
+
+pub(crate) async fn hash_open_file(
+    file: &mut fs::File,
+) -> Result<(u64, String, String, String), std::io::Error> {
+    file.seek(std::io::SeekFrom::Start(0)).await?;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut size = 0_u64;
     let mut sha1 = Sha1::new();
@@ -331,6 +362,50 @@ pub(crate) async fn hash_file(
         to_hex(&sha256.finalize()),
         to_hex(&sha512.finalize()),
     ))
+}
+
+/// Content-addressed objects let one database transaction publish a whole
+/// artifact bundle without replacing files used by older responses.
+pub(crate) fn object_path(root: &Path, hash: &str) -> Option<PathBuf> {
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| root.join(".maven-haste/objects").join(hash))
+}
+
+pub(crate) async fn recorded_file_path(
+    root: &Path,
+    record: &ArtifactRecord,
+) -> Result<PathBuf, std::io::Error> {
+    if let Some(path) = record
+        .sha256
+        .as_deref()
+        .and_then(|hash| object_path(root, hash))
+    {
+        match fs::metadata(&path).await {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(relative_file_path(root, &record.path))
+}
+
+/// Serialize publication and collection across server and CLI processes.
+/// The OS releases the advisory lock if the owning process terminates.
+pub(crate) async fn lock_objects(root: &Path) -> Result<std::fs::File, CacheFailure> {
+    let path = root.join(".maven-haste/objects.lock");
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        file.lock()?;
+        Ok::<_, std::io::Error>(file)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)
 }
 
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
@@ -423,7 +498,7 @@ pub(crate) fn is_timestamp_fresh(timestamp: i64, ttl: Duration) -> bool {
     Duration::from_secs(age) < ttl
 }
 
-pub(crate) fn internal(error: AppError) -> CacheFailure {
+pub(crate) fn internal(error: impl std::fmt::Display) -> CacheFailure {
     CacheFailure::Internal(error.to_string())
 }
 

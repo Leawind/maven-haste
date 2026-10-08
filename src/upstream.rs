@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH, RANGE};
+use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, RANGE};
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -53,6 +53,10 @@ pub struct UpstreamResponse {
 }
 
 impl UpstreamResponse {
+    pub(crate) fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         self.response.headers()
     }
@@ -95,6 +99,7 @@ struct RequestExtras {
     etag: Option<String>,
     last_modified: Option<String>,
     range_from: Option<u64>,
+    if_range: Option<String>,
 }
 
 #[derive(Clone)]
@@ -275,11 +280,15 @@ impl UpstreamClient {
         config: &UpstreamConfig,
         circuit: &CircuitBreakerConfig,
     ) -> Result<Self, AppError> {
+        let allowed_origins: Vec<_> = repositories
+            .iter()
+            .map(|repository| repository.url.origin())
+            .collect();
         let proxy_client = match &config.proxy {
-            Some(proxy) => Some(build_http_client(config, Some(proxy))?),
+            Some(proxy) => Some(build_http_client(config, Some(proxy), &allowed_origins)?),
             None => None,
         };
-        let direct_client = build_http_client(config, None)?;
+        let direct_client = build_http_client(config, None, &allowed_origins)?;
         let default_client = proxy_client
             .clone()
             .unwrap_or_else(|| direct_client.clone());
@@ -349,6 +358,7 @@ impl UpstreamClient {
                     etag: etag.map(str::to_owned),
                     last_modified: last_modified.map(str::to_owned),
                     range_from: None,
+                    if_range: None,
                 }),
             ));
         }
@@ -388,6 +398,7 @@ impl UpstreamClient {
         repository: &str,
         relative_path: &str,
         offset: u64,
+        validator: &str,
         priority: RequestPriority,
     ) -> FetchResult {
         let Some(repository) = self.routes.repository(repository).cloned() else {
@@ -395,6 +406,7 @@ impl UpstreamClient {
         };
         let extras = RequestExtras {
             range_from: Some(offset),
+            if_range: Some(validator.to_owned()),
             ..RequestExtras::default()
         };
         self.fetch_ordered(relative_path, vec![(repository, Some(extras))], priority)
@@ -526,6 +538,9 @@ impl UpstreamClient {
                 if let Some(offset) = extras.range_from {
                     request = request.header(RANGE, format!("bytes={offset}-"));
                 }
+                if let Some(validator) = &extras.if_range {
+                    request = request.header(IF_RANGE, validator);
+                }
             }
 
             match request.send().await {
@@ -593,11 +608,24 @@ impl UpstreamClient {
     }
 }
 
-fn build_http_client(config: &UpstreamConfig, proxy: Option<&Url>) -> Result<Client, AppError> {
+fn build_http_client(
+    config: &UpstreamConfig,
+    proxy: Option<&Url>,
+    allowed_origins: &[url::Origin],
+) -> Result<Client, AppError> {
+    let allowed_origins = allowed_origins.to_vec();
     let mut builder = Client::builder()
         .connect_timeout(config.connect_timeout)
         .read_timeout(config.read_timeout)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many upstream redirects")
+            } else if allowed_origins.contains(&attempt.url().origin()) {
+                attempt.follow()
+            } else {
+                attempt.error("upstream redirect target is not configured")
+            }
+        }))
         .user_agent(concat!("maven-haste/", env!("CARGO_PKG_VERSION")))
         .no_proxy();
     if let Some(proxy) = proxy {

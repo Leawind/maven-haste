@@ -28,6 +28,10 @@ impl ServeRegistry {
     pub(crate) fn is_busy(&self, path: &str) -> bool {
         self.active.contains_key(path)
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
 }
 
 /// An active-serve mark for one cached file.
@@ -47,11 +51,12 @@ impl std::fmt::Debug for ServeGuard {
 
 impl Drop for ServeGuard {
     fn drop(&mut self) {
-        if let Some(mut count) = self.registry.get_mut(&self.path) {
-            *count -= 1;
-            if *count == 0 {
-                drop(count);
-                self.registry.remove(&self.path);
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
+            self.registry.entry(self.path.clone())
+        {
+            *entry.get_mut() -= 1;
+            if *entry.get() == 0 {
+                entry.remove();
             }
         }
     }

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 
 use crate::cache::io::{
-    hash_file, internal, normalize_cache_prefix, relative_file_path, unix_timestamp,
+    hash_file, internal, normalize_cache_prefix, recorded_file_path, unix_timestamp,
 };
 use crate::cache::{CacheFailure, CacheManager, IntegrityIssue, IntegrityReport, RemovalStats};
 
@@ -23,7 +23,7 @@ impl CacheManager {
             .delete_expired_negative_entries(cutoff)
             .await
             .map_err(internal)?;
-        Ok(())
+        self.collect_objects().await
     }
 
     /// Removes all cached artifacts, checksums, and negative entries under a
@@ -42,6 +42,7 @@ impl CacheManager {
     /// Verifies that every recorded artifact still exists with matching size
     /// and stored hashes, reporting each discrepancy found.
     pub async fn verify(&self) -> Result<IntegrityReport, CacheFailure> {
+        let _lifecycle = self.inner.lifecycle.read().await;
         let records = self
             .inner
             .database
@@ -54,7 +55,9 @@ impl CacheManager {
         };
         for record in records {
             report.checked += 1;
-            let file_path = relative_file_path(&self.inner.storage.root, &record.path);
+            let file_path = recorded_file_path(&self.inner.storage.root, &record)
+                .await
+                .map_err(internal)?;
             match hash_file(&file_path).await {
                 Ok((size, sha1, sha256, _)) => {
                     if size != record.file_size.max(0) as u64 {

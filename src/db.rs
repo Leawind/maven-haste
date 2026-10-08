@@ -144,8 +144,21 @@ impl Database {
     }
 
     pub async fn upsert_many(&self, records: Vec<ArtifactRecord>) -> Result<(), AppError> {
+        self.publish_bundle(records, Vec::new()).await
+    }
+
+    /// Publishes every member of a bundle and retires case aliases atomically.
+    pub(crate) async fn publish_bundle(
+        &self,
+        records: Vec<ArtifactRecord>,
+        conflicts: Vec<String>,
+    ) -> Result<(), AppError> {
         self.with_connection(move |connection| {
             let transaction = connection.transaction()?;
+            for path in conflicts {
+                transaction.delete_artifact(&path)?;
+                transaction.delete_negative_path(&path)?;
+            }
             for record in records {
                 transaction.upsert_artifact(
                     &record.path,

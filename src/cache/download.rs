@@ -1,12 +1,11 @@
 use std::collections::HashSet;
-use std::path::Path;
 
 use reqwest::header::{ETAG, LAST_MODIFIED};
 use sha2::{Digest as _, Sha256};
 
 use crate::cache::CacheFailure;
 use crate::cache::io::{
-    StreamFailure, cleanup_downloads, cleanup_prepared, hash_file, header_string, internal,
+    StreamFailure, cleanup_downloads, cleanup_prepared, hash_open_file, header_string, internal,
     remove_file_if_exists, stream_response_to_file, temporary_path, to_hex, unix_timestamp,
     write_temporary,
 };
@@ -47,8 +46,11 @@ impl crate::cache::CacheManager {
                     .await
                     .map(|()| DownloadOutcome::Installed),
                 DownloadOutcome::Passthrough(source) => {
+                    let mut file = tokio::fs::File::open(source.temporary.path())
+                        .await
+                        .map_err(internal)?;
                     let checksum = self
-                        .build_checksum(request, &source.record.upstream, source.temporary.path())
+                        .build_checksum(request, &source.record.upstream, &mut file)
                         .await?;
                     drop(source);
                     Ok(DownloadOutcome::Passthrough(Box::new(PassthroughFile {
@@ -278,8 +280,11 @@ impl crate::cache::CacheManager {
         let mut last_modified = header_string(response.headers(), LAST_MODIFIED);
         let temporary = temporary_path(self.inner.storage.tmp_dir());
         let mut response = response;
+        let mut total = header_string(response.headers(), reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.parse::<u64>().ok());
+        let mut resume = None;
         for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
-            match stream_response_to_file(response, &temporary).await {
+            match stream_response_to_file(response, &temporary, resume).await {
                 Ok((size, sha1, sha256, sha512)) => {
                     self.inner.upstream.record_body_success(repository);
                     return Ok(DownloadedMain {
@@ -306,20 +311,71 @@ impl crate::cache::CacheManager {
                             "upstream download failed after {attempt} attempts: {error}"
                         )));
                     }
-                    match self
-                        .inner
-                        .upstream
-                        .fetch_range(repository, request.relative(), bytes, priority)
-                        .await
-                    {
+                    // A byte range is safe only when a strong validator pins
+                    // the representation. Otherwise restart from byte zero.
+                    let validator = etag
+                        .as_deref()
+                        .filter(|value| value.starts_with('"') && value.ends_with('"'));
+                    let outcome = match validator {
+                        Some(validator) => {
+                            self.inner
+                                .upstream
+                                .fetch_range(
+                                    repository,
+                                    request.relative(),
+                                    bytes,
+                                    validator,
+                                    priority,
+                                )
+                                .await
+                        }
+                        None => {
+                            self.inner
+                                .upstream
+                                .fetch_from(repository, request.relative(), priority)
+                                .await
+                        }
+                    };
+                    match outcome {
                         FetchResult::Found {
-                            response: resumed, ..
+                            response: mut resumed,
+                            ..
                         } => {
-                            if let Some(value) = header_string(resumed.headers(), ETAG) {
-                                etag = Some(value);
+                            if resumed.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                                && (validator.is_none()
+                                    || header_string(resumed.headers(), ETAG).as_deref()
+                                        != validator)
+                            {
+                                drop(resumed);
+                                let FetchResult::Found {
+                                    response: restarted,
+                                    ..
+                                } = self
+                                    .inner
+                                    .upstream
+                                    .fetch_from(repository, request.relative(), priority)
+                                    .await
+                                else {
+                                    let _ = remove_file_if_exists(&temporary).await;
+                                    return Err(CacheFailure::Gateway);
+                                };
+                                resumed = restarted;
+                                if resumed.status() != reqwest::StatusCode::OK {
+                                    let _ = remove_file_if_exists(&temporary).await;
+                                    return Err(CacheFailure::Gateway);
+                                }
                             }
-                            if let Some(value) = header_string(resumed.headers(), LAST_MODIFIED) {
-                                last_modified = Some(value);
+                            resume = (validator.is_some()
+                                && resumed.status() == reqwest::StatusCode::PARTIAL_CONTENT)
+                                .then_some((bytes, total));
+                            if resumed.status() == reqwest::StatusCode::OK {
+                                etag = header_string(resumed.headers(), ETAG);
+                                last_modified = header_string(resumed.headers(), LAST_MODIFIED);
+                                total = header_string(
+                                    resumed.headers(),
+                                    reqwest::header::CONTENT_LENGTH,
+                                )
+                                .and_then(|value| value.parse().ok());
                             }
                             response = resumed;
                         }
@@ -471,20 +527,6 @@ impl crate::cache::CacheManager {
                 return Ok(candidate);
             }
 
-            if rejected.iter().any(|previous: &DownloadedMain| {
-                previous.sha1 == candidate.sha1 && previous.sha256 == candidate.sha256
-            }) {
-                cleanup_downloads(&rejected).await;
-                tracing::warn!(
-                    upstream = %repository,
-                    path = request.relative(),
-                    issues = %issues.join("; "),
-                    attempt,
-                    "accepting stable upstream content with inconsistent checksums"
-                );
-                return Ok(candidate);
-            }
-
             rejected.push(candidate);
             if attempt == MAX_CHECKSUM_VALIDATION_ATTEMPTS {
                 let hashes = rejected
@@ -494,8 +536,9 @@ impl crate::cache::CacheManager {
                     .join(", ");
                 cleanup_downloads(&rejected).await;
                 return Err(BundleError::Unstable(format!(
-                    "{} produced {attempt} distinct unverified downloads with SHA-256 values {hashes}",
-                    request.relative()
+                    "{} produced {attempt} unverified downloads with SHA-256 values {hashes}: {}",
+                    request.relative(),
+                    issues.join("; ")
                 )));
             }
 
@@ -512,16 +555,12 @@ impl crate::cache::CacheManager {
                 _ => None,
             };
             let Some(retry) = retry else {
-                let accepted = rejected.remove(0);
                 cleanup_downloads(&rejected).await;
-                tracing::warn!(
-                    upstream = %repository,
-                    path = request.relative(),
-                    issues = %issues.join("; "),
-                    attempt,
-                    "accepting complete upstream download after checksum validation retry failed"
-                );
-                return Ok(accepted);
+                return Err(BundleError::Unstable(format!(
+                    "checksum mismatch and retry failed for {}: {}",
+                    request.relative(),
+                    issues.join("; ")
+                )));
             };
             candidate = retry;
         }
@@ -587,14 +626,9 @@ impl crate::cache::CacheManager {
         &self,
         request: &MavenPath,
         upstream: &str,
-        source_path: &Path,
+        source: &mut tokio::fs::File,
     ) -> Result<PreparedFile, CacheFailure> {
-        let (_, sha1, sha256, sha512) = hash_file(source_path).await.map_err(|error| {
-            CacheFailure::Internal(format!(
-                "failed to hash checksum source {}: {error}",
-                source_path.display()
-            ))
-        })?;
+        let (_, sha1, sha256, sha512) = hash_open_file(source).await.map_err(internal)?;
         let expected = match request.file_type.as_str() {
             "sha1" => sha1,
             "sha256" => sha256,
@@ -637,23 +671,40 @@ impl crate::cache::CacheManager {
         request: &MavenPath,
         source: &MavenPath,
     ) -> Result<(), CacheFailure> {
-        let source_record = self
-            .inner
-            .database
-            .get(source.relative())
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| {
-                CacheFailure::Internal(format!(
-                    "cached checksum source {} has no database record",
-                    source.relative()
-                ))
-            })?;
-        let source_path = source.final_path(&self.inner.storage.root);
-        let checksum = self
-            .build_checksum(request, &source_record.upstream, &source_path)
-            .await?;
-        self.install_bundle(vec![checksum]).await
+        for _ in 0..MAX_CHECKSUM_VALIDATION_ATTEMPTS {
+            let source_record = self
+                .inner
+                .database
+                .get(source.relative())
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    CacheFailure::Internal(format!(
+                        "cached checksum source {} has no database record",
+                        source.relative()
+                    ))
+                })?;
+            let mut cached = self
+                .positive_cache(source, Some(&source_record))
+                .await?
+                .ok_or_else(|| {
+                    CacheFailure::Internal("checksum source is unavailable or corrupt".into())
+                })?;
+            let checksum = self
+                .build_checksum(
+                    request,
+                    &source_record.upstream,
+                    cached.file.as_mut().expect("verified source has a file"),
+                )
+                .await?;
+            if self
+                .install_bundle_checked(vec![checksum], Some(&source_record))
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        Err(CacheFailure::Gateway)
     }
 }
 
