@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file.
 - Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.
 - Require Rust 1.89 or later for standard-library file locks that serialize object publication and collection across server and CLI processes.
 - Reject persistent checksum mismatches and checksum-fetch failures instead of accepting repeated content or a failed validation retry.
+- Keep GitHub Actions manually triggered while checking Deno formatting in both workflows and linting all Cargo targets before publication.
 
 ### Fixed
 
@@ -17,6 +18,7 @@ All notable changes to this project are documented in this file.
 - Pin resumed downloads with strong ETags and If-Range; restart changed representations and reject inconsistent Content-Range responses.
 - Limit upstream redirects to explicitly configured repository origins.
 - Refresh generated checksums together with their source artifact, and prevent regeneration from publishing a checksum for an obsolete source.
+- Refuse to overwrite release tags pointing at different commits; retries may reuse lightweight or annotated tags already pointing at the current commit.
 
 ## [0.3.0]
 

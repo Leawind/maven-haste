@@ -19,9 +19,14 @@ jobs:
 
             - uses: Swatinem/rust-cache@v2
 
+            - uses: denoland/setup-deno@v2
+              with:
+                  deno-version: v2.x
+
             - run: cargo fmt --check
-            - run: cargo clippy -- -D warnings
+            - run: cargo clippy --all-targets -- -D warnings
             - run: cargo test
+            - run: deno fmt --check
 
     build-binaries:
         name: Build ${{ matrix.name }} binary
@@ -101,13 +106,25 @@ jobs:
 
             - name: Push release tag
               env:
-                  GH_TOKEN: ${{ github.token }}
                   TAG: v${{ steps.resolve.outputs.version }}
               run: |
+                  set -euo pipefail
                   git config user.name "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  git tag -f "$TAG"
-                  git push --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" "$TAG"
+                  expected="$(git rev-parse HEAD)"
+                  remote_tag="$(git ls-remote --tags origin "refs/tags/$TAG")"
+                  if [ -n "$remote_tag" ]; then
+                      git fetch --no-tags origin "refs/tags/$TAG"
+                      actual="$(git rev-parse 'FETCH_HEAD^{commit}')"
+                      if [ "$actual" != "$expected" ]; then
+                          echo "::error::Release tag $TAG already points to a different commit."
+                          exit 1
+                      fi
+                      echo "Reusing release tag $TAG at the current commit."
+                  else
+                      git tag "$TAG" "$expected"
+                      git push origin "$TAG"
+                  fi
 
             - uses: actions/download-artifact@v4
               with:

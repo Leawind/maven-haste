@@ -1,6 +1,7 @@
 name: Test
 
 on:
+    # Keep runs manual to control GitHub Actions resource usage.
     workflow_dispatch:
 
 permissions:
@@ -24,6 +25,11 @@ jobs:
 
             - uses: Swatinem/rust-cache@v2
 
+            - uses: denoland/setup-deno@v2
+              with:
+                  deno-version: v2.x
+
             - run: cargo fmt --check
             - run: cargo clippy --all-targets -- -D warnings
             - run: cargo test
+            - run: deno fmt --check
