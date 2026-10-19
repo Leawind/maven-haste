@@ -580,6 +580,12 @@ pub struct UpstreamConfig {
     /// Optional global upstream proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<Url>,
+    /// Try the upstream repositories directly when the configured proxy cannot
+    /// be reached; defaults to `true`. Repositories with `use_proxy = true`
+    /// keep using the proxy, and the proxy is retried after
+    /// `circuit_breaker.recovery_timeout`.
+    #[serde(default = "default_true")]
+    pub proxy_fallback: bool,
 }
 
 impl Default for UpstreamConfig {
@@ -591,6 +597,7 @@ impl Default for UpstreamConfig {
             default_repository_max_concurrency: 10,
             foreground_priority_burst: 8,
             proxy: None,
+            proxy_fallback: true,
         }
     }
 }

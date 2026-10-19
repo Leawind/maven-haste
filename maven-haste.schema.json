@@ -234,6 +234,11 @@
                         "null"
                     ]
                 },
+                "proxy_fallback": {
+                    "default": true,
+                    "description": "Try the upstream repositories directly when the configured proxy cannot\nbe reached; defaults to `true`. Repositories with `use_proxy = true`\nkeep using the proxy, and the proxy is retried after\n`circuit_breaker.recovery_timeout`.",
+                    "type": "boolean"
+                },
                 "read_timeout": {
                     "default": "1m",
                     "description": "Maximum idle time while reading each upstream response body; this is\nnot a limit on the total download time of a large file.",
@@ -304,6 +309,7 @@
                 "default_repository_max_concurrency": 10,
                 "foreground_priority_burst": 8,
                 "max_concurrency": 32,
+                "proxy_fallback": true,
                 "read_timeout": "1m"
             }
         }

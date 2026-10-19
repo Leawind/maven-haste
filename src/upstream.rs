@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,14 +17,29 @@ use crate::routing::RouteEngine;
 
 const MAX_ATTEMPTS: usize = 3;
 
+/// Circuit-breaker key for the configured upstream proxy. The leading `$` is
+/// outside the repository id alphabet, so it can never collide with one.
+const PROXY_CIRCUIT: &str = "$proxy";
+
 #[derive(Clone)]
 pub struct UpstreamClient {
-    default_client: Client,
+    /// Configured proxy URL, kept for logging.
+    proxy: Option<Url>,
     proxy_client: Option<Client>,
     direct_client: Client,
+    proxy_fallback: bool,
+    proxy_circuit: Arc<CircuitBreaker>,
+    proxy_unreachable: Arc<AtomicBool>,
     routes: RouteEngine,
     circuits: Arc<CircuitBreaker>,
     scheduler: RequestScheduler,
+}
+
+/// Connection path for one upstream request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Egress {
+    Proxy,
+    Direct,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,14 +305,17 @@ impl UpstreamClient {
             None => None,
         };
         let direct_client = build_http_client(config, None, &allowed_origins)?;
-        let default_client = proxy_client
-            .clone()
-            .unwrap_or_else(|| direct_client.clone());
         let scheduler = RequestScheduler::new(&repositories, config);
         Ok(Self {
-            default_client,
+            proxy: config.proxy.clone(),
             proxy_client,
             direct_client,
+            proxy_fallback: config.proxy_fallback,
+            proxy_circuit: Arc::new(CircuitBreaker::new(
+                circuit.failure_threshold,
+                circuit.recovery_timeout,
+            )),
+            proxy_unreachable: Arc::new(AtomicBool::new(false)),
             routes: RouteEngine::new(repositories),
             circuits: Arc::new(CircuitBreaker::new(
                 circuit.failure_threshold,
@@ -306,17 +325,125 @@ impl UpstreamClient {
         })
     }
 
-    fn client_for_repository(&self, repository: &RepositoryConfig) -> &Client {
-        if repository.use_proxy.is_none() {
-            return &self.default_client;
-        }
-        match proxy_choice(repository.use_proxy, self.proxy_client.is_some()) {
-            ProxyChoice::Proxy => self
+    fn client(&self, egress: Egress) -> &Client {
+        match egress {
+            Egress::Proxy => self
                 .proxy_client
                 .as_ref()
-                .expect("upstream proxy is required when use_proxy is true"),
-            ProxyChoice::Direct => &self.direct_client,
+                .expect("a proxy egress requires a configured proxy client"),
+            Egress::Direct => &self.direct_client,
         }
+    }
+
+    /// Connection paths to try for one upstream request. The direct fallback
+    /// is offered when a proxy is configured, the repository does not require
+    /// it, the fallback is enabled, and the proxy circuit is closed or
+    /// probing again.
+    fn egresses(&self, repository: &RepositoryConfig) -> (Egress, Option<Egress>) {
+        match proxy_choice(repository.use_proxy, self.proxy_client.is_some()) {
+            ProxyChoice::Direct => (Egress::Direct, None),
+            ProxyChoice::Proxy if repository.use_proxy == Some(true) || !self.proxy_fallback => {
+                (Egress::Proxy, None)
+            }
+            ProxyChoice::Proxy => {
+                if self.proxy_circuit.allow(PROXY_CIRCUIT) {
+                    (Egress::Proxy, Some(Egress::Direct))
+                } else {
+                    (Egress::Direct, None)
+                }
+            }
+        }
+    }
+
+    /// Sends one upstream request, retrying directly when the configured proxy
+    /// cannot be reached and this repository allows the fallback.
+    async fn send_request(
+        &self,
+        repository: &RepositoryConfig,
+        url: &Url,
+        extras: Option<&RequestExtras>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let (egress, fallback) = self.egresses(repository);
+        match self.send_via(egress, url, extras).await {
+            Ok(response) => Ok(response),
+            Err(error)
+                if egress == Egress::Proxy && fallback.is_some() && proxy_unreachable(&error) =>
+            {
+                self.note_proxy_failure(&error);
+                let fallback = fallback.expect("the fallback was checked above");
+                self.send_via(fallback, url, extras).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn send_via(
+        &self,
+        egress: Egress,
+        url: &Url,
+        extras: Option<&RequestExtras>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let mut request = self.client(egress).get(url.clone());
+        if let Some(extras) = extras {
+            if let Some(etag) = &extras.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(last_modified) = &extras.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, last_modified);
+            }
+            if let Some(offset) = extras.range_from {
+                request = request.header(RANGE, format!("bytes={offset}-"));
+            }
+            if let Some(validator) = &extras.if_range {
+                request = request.header(IF_RANGE, validator);
+            }
+        }
+        match request.send().await {
+            Ok(response) => {
+                if egress == Egress::Proxy {
+                    self.note_proxy_success();
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Records a proxy connection failure. After
+    /// `circuit_breaker.failure_threshold` consecutive failures the proxy
+    /// circuit opens and requests go straight to the direct fallback until
+    /// `circuit_breaker.recovery_timeout` has elapsed and a probe succeeds.
+    fn note_proxy_failure(&self, error: &reqwest::Error) {
+        self.proxy_circuit.record_failure(PROXY_CIRCUIT);
+        if !self.proxy_circuit.is_open(PROXY_CIRCUIT) {
+            tracing::debug!(
+                proxy = %self.proxy_display(),
+                error = %describe_error(error),
+                "upstream proxy request failed; retrying directly"
+            );
+            return;
+        }
+        if !self.proxy_unreachable.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                proxy = %self.proxy_display(),
+                error = %describe_error(error),
+                "upstream proxy is unreachable; using direct connections until it recovers"
+            );
+        }
+    }
+
+    fn note_proxy_success(&self) {
+        self.proxy_circuit.record_success(PROXY_CIRCUIT);
+        if self.proxy_unreachable.swap(false, Ordering::Relaxed) {
+            tracing::info!(
+                proxy = %self.proxy_display(),
+                "upstream proxy is reachable again; routing requests through it"
+            );
+        }
+    }
+
+    fn proxy_display(&self) -> &str {
+        self.proxy.as_ref().map_or("-", Url::as_str)
     }
 
     pub async fn fetch(
@@ -527,23 +654,7 @@ impl UpstreamClient {
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
             let permit = self.scheduler.acquire(&repository.id, priority).await;
-            let mut request = self.client_for_repository(repository).get(url.clone());
-            if let Some(extras) = extras {
-                if let Some(etag) = &extras.etag {
-                    request = request.header(IF_NONE_MATCH, etag);
-                }
-                if let Some(last_modified) = &extras.last_modified {
-                    request = request.header(IF_MODIFIED_SINCE, last_modified);
-                }
-                if let Some(offset) = extras.range_from {
-                    request = request.header(RANGE, format!("bytes={offset}-"));
-                }
-                if let Some(validator) = &extras.if_range {
-                    request = request.header(IF_RANGE, validator);
-                }
-            }
-
-            match request.send().await {
+            match self.send_request(repository, &url, extras).await {
                 Ok(response)
                     if response.status() == StatusCode::OK
                         || response.status() == StatusCode::PARTIAL_CONTENT =>
@@ -589,6 +700,7 @@ impl UpstreamClient {
                     };
                 }
                 Err(error) => {
+                    let error = describe_error(&error);
                     if attempt + 1 < MAX_ATTEMPTS {
                         tracing::debug!(upstream = %repository.id, attempt = attempt + 1, %error, "retryable upstream request failure");
                     } else {
@@ -670,6 +782,26 @@ fn retry_delay(attempt: usize) -> Duration {
     }
 }
 
+/// Whether an error means the proxy itself could not be reached: refused,
+/// unresolved, or timed out before a response arrived.
+fn proxy_unreachable(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout()
+}
+
+/// Renders an error with its source chain. `reqwest::Error` displays only
+/// "error sending request for url (...)", which hides the transport cause
+/// (refused connection, DNS failure, TLS error) that is actually actionable.
+fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, timeout};
@@ -721,6 +853,107 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    fn proxied_repository(use_proxy: Option<bool>) -> RepositoryConfig {
+        RepositoryConfig {
+            id: "a".into(),
+            url: Url::parse("https://a.example/").unwrap(),
+            use_proxy,
+            max_concurrency: None,
+            rules: Vec::new(),
+            cache_writes: true,
+        }
+    }
+
+    fn proxied_client(proxy: Option<&str>, proxy_fallback: bool) -> UpstreamClient {
+        UpstreamClient::new(
+            vec![proxied_repository(None)],
+            &UpstreamConfig {
+                proxy: proxy.map(|proxy| Url::parse(proxy).unwrap()),
+                proxy_fallback,
+                ..UpstreamConfig::default()
+            },
+            &CircuitBreakerConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connects_directly_without_a_configured_proxy() {
+        let client = proxied_client(None, true);
+        assert_eq!(
+            client.egresses(&proxied_repository(None)),
+            (Egress::Direct, None)
+        );
+    }
+
+    #[test]
+    fn offers_a_direct_fallback_when_the_proxy_is_configured() {
+        let client = proxied_client(Some("http://127.0.0.1:9/"), true);
+        assert_eq!(
+            client.egresses(&proxied_repository(None)),
+            (Egress::Proxy, Some(Egress::Direct))
+        );
+    }
+
+    #[test]
+    fn keeps_requiring_the_proxy_when_the_fallback_is_disabled() {
+        let client = proxied_client(Some("http://127.0.0.1:9/"), false);
+        assert_eq!(
+            client.egresses(&proxied_repository(None)),
+            (Egress::Proxy, None)
+        );
+    }
+
+    #[test]
+    fn keeps_requiring_the_proxy_when_the_repository_demands_it() {
+        let client = proxied_client(Some("http://127.0.0.1:9/"), true);
+        assert_eq!(
+            client.egresses(&proxied_repository(Some(true))),
+            (Egress::Proxy, None)
+        );
+    }
+
+    #[test]
+    fn connects_directly_when_the_repository_disables_the_proxy() {
+        let client = proxied_client(Some("http://127.0.0.1:9/"), true);
+        assert_eq!(
+            client.egresses(&proxied_repository(Some(false))),
+            (Egress::Direct, None)
+        );
+    }
+
+    #[test]
+    fn skips_the_proxy_while_its_circuit_is_open() {
+        let client = proxied_client(Some("http://127.0.0.1:9/"), true);
+        let repository = proxied_repository(None);
+        for _ in 0..CircuitBreakerConfig::default().failure_threshold {
+            client.proxy_circuit.record_failure(PROXY_CIRCUIT);
+        }
+        assert_eq!(
+            client.egresses(&repository),
+            (Egress::Direct, None),
+            "an open proxy circuit must not be tried again before it recovers"
+        );
+    }
+
+    #[tokio::test]
+    async fn describes_the_transport_cause_hidden_by_reqwest() {
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("port 1 has no listener to answer the request");
+        let described = describe_error(&error);
+        assert!(
+            described.starts_with("error sending request"),
+            "unexpected rendering: {described}"
+        );
+        assert!(
+            described.to_lowercase().contains("connect"),
+            "the transport cause is missing from the message: {described}"
+        );
     }
 
     #[test]

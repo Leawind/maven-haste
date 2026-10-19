@@ -115,6 +115,10 @@ Repository ids are used for logging, statistics, and circuit breaker identificat
 
 When an upstream lacks a file, fails, or returns content that still cannot be verified against its checksums after retries, the service continues to the next upstream where applicable. Redirects are followed only to origins (scheme, host, and port) explicitly listed in the configured repository URLs.
 
+### Upstream Proxy
+
+Set `[upstream].proxy` to route every request through an HTTP proxy. A repository's `use_proxy` overrides that choice: `true` always uses the proxy, `false` always connects directly. When the proxy cannot be reached (connection refused, DNS failure, or connect timeout), maven-haste retries the request directly instead of failing. After `circuit_breaker.failure_threshold` consecutive proxy failures the proxy is skipped for `circuit_breaker.recovery_timeout` and then probed again, so a dead proxy does not stall every download. Set `proxy_fallback = false` to keep the proxy mandatory.
+
 ## Build Tool Integration
 
 Maven Haste does not modify build-tool or project files. Copy and edit the relevant example for your environment:

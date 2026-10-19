@@ -79,6 +79,14 @@ impl CircuitBreaker {
         }
     }
 
+    /// Whether the circuit is open, that is, requests are skipped until the
+    /// recovery timeout elapses.
+    pub fn is_open(&self, repository: &str) -> bool {
+        self.states
+            .get(repository)
+            .is_some_and(|state| matches!(state.mode, CircuitMode::Open { .. }))
+    }
+
     pub fn status(&self, repository: &str) -> CircuitStatus {
         let Some(state) = self.states.get(repository) else {
             return CircuitStatus {
@@ -173,6 +181,19 @@ mod tests {
         breaker.record_success("central");
         assert_eq!(breaker.status("central").state, "open");
         assert!(!breaker.allow("central"));
+    }
+
+    #[test]
+    fn reports_open_only_while_the_circuit_skips_requests() {
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(20));
+        assert!(!breaker.is_open("central"));
+        breaker.record_failure("central");
+        assert!(breaker.is_open("central"));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(breaker.allow("central"));
+        assert!(!breaker.is_open("central"));
+        breaker.record_success("central");
+        assert!(!breaker.is_open("central"));
     }
 
     #[test]

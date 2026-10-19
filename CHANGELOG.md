@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added `upstream.proxy_fallback` (default `true`): when the configured proxy cannot be reached, requests retry directly instead of failing, and the proxy is skipped for `circuit_breaker.recovery_timeout` after `circuit_breaker.failure_threshold` consecutive failures. Repositories with `use_proxy = true` and `proxy_fallback = false` keep requiring the proxy.
+
 ### Changed
 
 - Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.
@@ -19,6 +23,7 @@ All notable changes to this project are documented in this file.
 - Limit upstream redirects to explicitly configured repository origins.
 - Refresh generated checksums together with their source artifact, and prevent regeneration from publishing a checksum for an obsolete source.
 - Refuse to overwrite release tags pointing at different commits; retries may reuse lightweight or annotated tags already pointing at the current commit.
+- Log the full transport error chain for failed upstream requests instead of only reqwest's `error sending request` headline, so proxy, DNS, and TLS failures are identifiable.
 
 ## [0.3.0]
 

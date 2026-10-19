@@ -2192,6 +2192,151 @@ fn changing_metadata_upstream() -> Router {
     )
 }
 
+#[tokio::test]
+async fn routes_upstream_requests_through_the_configured_proxy() {
+    let proxy = Router::new().fallback(|OriginalUri(uri): OriginalUri| async move {
+        if is_checksum_uri(&uri) {
+            return error_response(StatusCode::NOT_FOUND, "missing checksum");
+        }
+        Response::new(Body::from("proxy-body"))
+    });
+    let (proxy_url, proxy_task) = spawn_upstream(proxy).await;
+    // An unreachable upstream proves the content came through the proxy.
+    let unreachable_upstream = Url::parse("http://127.0.0.1:1/").unwrap();
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &unreachable_upstream, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: Some(proxy_url),
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "proxy-body");
+    proxy_task.abort();
+}
+
+#[tokio::test]
+async fn falls_back_to_direct_when_the_proxy_is_unreachable() {
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(|OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::NOT_FOUND, "missing checksum");
+            }
+            Response::new(Body::from("direct-body"))
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: Some(Url::parse("http://127.0.0.1:1/").unwrap()),
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "direct-body");
+    task.abort();
+}
+
+#[tokio::test]
+async fn reports_a_gateway_failure_when_the_proxy_is_unreachable_and_fallback_is_disabled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/{*path}",
+        get({
+            let calls = Arc::clone(&calls);
+            move |OriginalUri(uri): OriginalUri| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if is_checksum_uri(&uri) {
+                        return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                    }
+                    Response::new(Body::from("direct-body"))
+                }
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: Some(Url::parse("http://127.0.0.1:1/").unwrap()),
+            proxy_fallback: false,
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the upstream was contacted even though the proxy must be used"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn does_not_bypass_a_reachable_proxy() {
+    let proxy =
+        Router::new().fallback(|| async { error_response(StatusCode::NOT_FOUND, "missing") });
+    let (proxy_url, proxy_task) = spawn_upstream(proxy).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/{*path}",
+        get({
+            let calls = Arc::clone(&calls);
+            move || {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(Body::from("direct-body"))
+                }
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: Some(proxy_url),
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a reachable proxy must not fall back to direct connections"
+    );
+    task.abort();
+    proxy_task.abort();
+}
+
 async fn test_app(directory: &TempDir, repositories: Vec<RepositoryConfig>) -> (Router, Database) {
     test_app_with_cache(
         directory,
