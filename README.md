@@ -44,7 +44,7 @@ maven-haste ships as a single command-line tool.
 Generate a config template in the current working directory (never overwrites existing files)
 
 ```bash
-maven-haste config init [PATH]
+maven-haste config init [--format json|yaml|toml] [PATH]
 ```
 
 Start using the config in the current working directory; `maven-haste.json`, `maven-haste.toml`, `maven-haste.yaml`, or `maven-haste.yml` is discovered automatically
@@ -75,7 +75,7 @@ maven-haste cache stats
 
 > [!TIP]
 >
-> Run `maven-haste config init [PATH]` to create a minimal configuration with only the required keys; the format (TOML, YAML, or JSON) follows the extension of `PATH`, defaulting to `maven-haste.toml`. Field descriptions live in the JSON schema listed below.
+> Run `maven-haste config init [PATH]` to create a minimal configuration with only the required keys; the format (TOML, YAML, or JSON) follows the extension of `PATH`, defaulting to YAML (`./maven-haste.yaml`), or pass `--format json|yaml|toml` to choose it explicitly. Field descriptions live in the JSON schema listed below.
 
 Recommended steps:
 
@@ -89,7 +89,7 @@ Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.to
 
 ### Schema-Assisted Editing
 
-A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). `config init` generates a minimal config in the format of the target path's extension, and its `$schema` key is already active and pinned to the current release, so editors or AI tools pick the schema up with no editing and no IDE settings:
+A JSON schema describing the whole configuration lives in [maven-haste.schema.json](maven-haste.schema.json) and is also printed by `maven-haste config schema` (use `-o <PATH>` to write it to a file). `config init` generates a minimal config in the requested format — the target path's extension, `--format`, or YAML by default — and its `$schema` key is already active and pinned to the current release, so editors or AI tools pick the schema up with no editing and no IDE settings:
 
 ```toml
 "$schema" = "https://raw.githubusercontent.com/Leawind/maven-haste/vX.Y.Z/maven-haste.schema.json"

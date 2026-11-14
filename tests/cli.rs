@@ -60,9 +60,9 @@ fn invalid_rust_log_is_reported_instead_of_ignored() {
 }
 
 #[test]
-fn config_init_creates_a_minimal_example_without_overwriting() {
+fn config_init_creates_a_minimal_yaml_example_without_overwriting() {
     let directory = TempDir::new().unwrap();
-    let expected = example_config();
+    let expected = example_config("yaml");
     let first = Command::new(binary())
         .args(["config", "init"])
         .current_dir(directory.path())
@@ -70,7 +70,7 @@ fn config_init_creates_a_minimal_example_without_overwriting() {
         .unwrap();
 
     assert!(first.status.success());
-    let config_path = directory.path().join("maven-haste.toml");
+    let config_path = directory.path().join("maven-haste.yaml");
     assert_eq!(std::fs::read_to_string(&config_path).unwrap(), expected);
     assert!(
         Command::new(binary())
@@ -91,14 +91,83 @@ fn config_init_creates_a_minimal_example_without_overwriting() {
 }
 
 #[test]
-fn config_example_prints_a_minimal_toml_configuration() {
+fn config_init_creates_the_requested_format_without_a_path() {
+    let directory = TempDir::new().unwrap();
+    for (format, name) in [
+        ("json", "maven-haste.json"),
+        ("yaml", "maven-haste.yaml"),
+        ("toml", "maven-haste.toml"),
+    ] {
+        let output = Command::new(binary())
+            .args(["config", "init", "--format", format])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "init --format {format}");
+
+        let config_path = directory.path().join(name);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            example_config(format),
+            "{format}"
+        );
+        assert!(
+            Command::new(binary())
+                .args(["config", "check", "--config"])
+                .arg(&config_path)
+                .status()
+                .unwrap()
+                .success(),
+            "check {format}"
+        );
+        std::fs::remove_file(&config_path).unwrap();
+    }
+}
+
+#[test]
+fn config_init_rejects_a_format_that_conflicts_with_the_path_extension() {
+    let directory = TempDir::new().unwrap();
+    let output = Command::new(binary())
+        .args(["config", "init", "maven-haste.toml", "--format", "json"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--format json does not match the extension"),
+        "{stderr}"
+    );
+    assert!(
+        !directory.path().join("maven-haste.toml").exists(),
+        "no file must be created on a conflicting request"
+    );
+}
+
+#[test]
+fn config_example_defaults_to_yaml_and_honors_the_format_flag() {
     let output = Command::new(binary())
         .args(["config", "example"])
         .output()
         .unwrap();
-
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), example_config());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        example_config("yaml")
+    );
+
+    for format in ["json", "yaml", "toml"] {
+        let output = Command::new(binary())
+            .args(["config", "example", "--format", format])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "example --format {format}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            example_config(format),
+            "{format}"
+        );
+    }
 }
 
 #[test]
@@ -120,7 +189,7 @@ fn config_init_pins_the_schema_reference_to_the_current_version() {
         .unwrap_or_default()
         .to_owned();
 
-    let config = std::fs::read_to_string(directory.path().join("maven-haste.toml")).unwrap();
+    let config = std::fs::read_to_string(directory.path().join("maven-haste.yaml")).unwrap();
     let expected = format!(
         "https://raw.githubusercontent.com/Leawind/maven-haste/v{version}/maven-haste.schema.json"
     );
@@ -289,8 +358,13 @@ fn config_schema_prints_a_valid_json_schema() {
     );
 }
 
-fn example_config() -> String {
-    maven_haste::config::example_config(maven_haste::config::ConfigFormat::Toml)
+fn example_config(format: &str) -> String {
+    let format = match format {
+        "json" => maven_haste::config::ConfigFormat::Json,
+        "yaml" => maven_haste::config::ConfigFormat::Yaml,
+        _ => maven_haste::config::ConfigFormat::Toml,
+    };
+    maven_haste::config::example_config(format)
 }
 
 #[test]

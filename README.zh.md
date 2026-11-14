@@ -44,7 +44,7 @@ maven-haste 以单个命令行工具的形式发布。
 在当前工作目录生成配置模板（不会覆盖已有文件）
 
 ```bash
-maven-haste config init [PATH]
+maven-haste config init [--format json|yaml|toml] [PATH]
 ```
 
 使用当前工作目录下的配置启动；`maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`、`maven-haste.yml` 会被自动发现
@@ -75,7 +75,7 @@ maven-haste cache stats
 
 > [!TIP]
 >
-> 运行 `maven-haste config init [PATH]` 生成只含必需键的最小配置；语言（TOML/YAML/JSON）随 `PATH` 的扩展名决定，默认生成 `maven-haste.toml`。各配置项的字段说明见下方列出的 JSON Schema。
+> 运行 `maven-haste config init [PATH]` 生成只含必需键的最小配置；语言（TOML/YAML/JSON）随 `PATH` 的扩展名决定，默认生成 YAML（`./maven-haste.yaml`），也可以用 `--format json|yaml|toml` 显式指定。各配置项的字段说明见下方列出的 JSON Schema。
 
 推荐步骤：
 
@@ -89,7 +89,7 @@ maven-haste cache stats
 
 ### 借助 Schema 编辑
 
-描述整个配置的 JSON Schema 位于 [maven-haste.schema.json](maven-haste.schema.json)，也可用 `maven-haste config schema` 输出（`-o <PATH>` 写入文件）。`config init` 按目标路径扩展名生成对应语言（TOML/YAML/JSON）的最小配置，其 `$schema` 键已默认启用且 URL 固定指向当前发布版本，因此编辑器或 AI 工具无需任何编辑与 IDE 设置即可获得补全、字段说明、默认值和校验提示：
+描述整个配置的 JSON Schema 位于 [maven-haste.schema.json](maven-haste.schema.json)，也可用 `maven-haste config schema` 输出（`-o <PATH>` 写入文件）。`config init` 按指定语言（`PATH` 的扩展名、`--format` 参数，默认 YAML）生成最小配置，其 `$schema` 键已默认启用且 URL 固定指向当前发布版本，因此编辑器或 AI 工具无需任何编辑与 IDE 设置即可获得补全、字段说明、默认值和校验提示：
 
 ```toml
 "$schema" = "https://raw.githubusercontent.com/Leawind/maven-haste/vX.Y.Z/maven-haste.schema.json"

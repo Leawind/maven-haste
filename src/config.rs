@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use clap::ValueEnum;
 use directories::BaseDirs;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -20,16 +21,32 @@ const CONFIG_FILE_NAMES: &[&str] = &[
     "maven-haste.yml",
 ];
 
-/// File name used by `config init` when no path is given; the minimal example
-/// is written as TOML.
-pub const CONFIG_EXAMPLE_FILE_NAME: &str = "maven-haste.toml";
-
 /// Configuration formats supported by file extension.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConfigFormat {
     Toml,
     Yaml,
     Json,
+}
+
+impl ConfigFormat {
+    /// Lowercase format name used in errors and CLI output.
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfigFormat::Toml => "toml",
+            ConfigFormat::Yaml => "yaml",
+            ConfigFormat::Json => "json",
+        }
+    }
+
+    /// File name `config init` writes when no path is given.
+    pub fn default_file_name(self) -> &'static str {
+        match self {
+            ConfigFormat::Toml => "maven-haste.toml",
+            ConfigFormat::Yaml => "maven-haste.yaml",
+            ConfigFormat::Json => "maven-haste.json",
+        }
+    }
 }
 
 /// Supported file extensions, listed in errors when a path cannot be matched.
@@ -118,10 +135,11 @@ pub fn example_config(format: ConfigFormat) -> String {
     format!("{trimmed}\n")
 }
 
+/// File name `config init` writes when neither a path nor a format is given.
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
     let current_dir = env::current_dir()
         .map_err(|error| ConfigError::new(format!("failed to read current directory: {error}")))?;
-    Ok(current_dir.join(CONFIG_EXAMPLE_FILE_NAME))
+    Ok(current_dir.join(ConfigFormat::Yaml.default_file_name()))
 }
 
 /// Canonicalizes a configuration path so the reported path is stable.

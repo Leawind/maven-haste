@@ -1,6 +1,6 @@
 use crate::cli::Cli;
-use crate::config::Config;
-use crate::error::AppError;
+use crate::config::{Config, ConfigFormat};
+use crate::error::{AppError, ConfigError};
 use clap::Subcommand;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,9 +9,13 @@ use std::path::{Path, PathBuf};
 pub enum ConfigCommand {
     /// Create a minimal example configuration without overwriting an existing file
     Init {
-        /// Destination path; defaults to ./maven-haste.toml
+        /// Destination path; defaults to ./maven-haste.yaml
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+
+        /// Format of the generated file; defaults to YAML, or the extension of PATH when given
+        #[arg(short, long, value_enum)]
+        format: Option<ConfigFormat>,
     },
 
     /// Validate the configuration and storage access, then exit
@@ -20,8 +24,12 @@ pub enum ConfigCommand {
     /// Print the fully resolved effective configuration
     Show,
 
-    /// Print the minimal example configuration in TOML
-    Example,
+    /// Print the minimal example configuration in the requested format
+    Example {
+        /// Format of the printed example
+        #[arg(short, long, value_enum, default_value = "yaml")]
+        format: ConfigFormat,
+    },
 
     /// Write the JSON schema describing the configuration
     Schema {
@@ -34,9 +42,9 @@ pub enum ConfigCommand {
 impl ConfigCommand {
     pub async fn execute(&self, cli: &Cli) -> Result<(), AppError> {
         match self {
-            ConfigCommand::Init { path } => {
-                let path = path.as_deref().or(cli.config.as_deref());
-                let path = initialize_config(path)?;
+            ConfigCommand::Init { path, format } => {
+                let destination = path.as_deref().or(cli.config.as_deref());
+                let path = initialize_config(destination, *format)?;
                 println!("created minimal example configuration: {}", path.display());
                 println!("next: maven-haste config check --config {}", path.display());
                 println!("then: maven-haste run --config {}", path.display());
@@ -79,11 +87,8 @@ impl ConfigCommand {
                 print!("{}", toml::to_string_pretty(&loaded.config)?);
                 Ok(())
             }
-            ConfigCommand::Example => {
-                print!(
-                    "{}",
-                    crate::config::example_config(crate::config::ConfigFormat::Toml)
-                );
+            ConfigCommand::Example { format } => {
+                print!("{}", crate::config::example_config(*format));
                 Ok(())
             }
             ConfigCommand::Schema { output } => {
@@ -116,17 +121,42 @@ impl ConfigCommand {
     }
 }
 
-fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
+/// Resolves the destination and format for `config init`. A path decides its
+/// format by extension; `--format` alone picks the default file name for that
+/// format; both together must agree.
+fn initialize_config(
+    destination: Option<&Path>,
+    requested: Option<ConfigFormat>,
+) -> Result<PathBuf, AppError> {
     let default_path = crate::config::default_config_path()?;
-    let path = match destination {
-        Some(path) if path.is_absolute() => path.to_owned(),
-        Some(path) => default_path
-            .parent()
-            .expect("current directory configuration path has a parent")
-            .join(path),
-        None => default_path,
+    let (path, format) = match (destination, requested) {
+        (Some(path), Some(requested)) => {
+            let path = resolve_destination(&default_path, path);
+            let actual = crate::config::format_for_path(&path)?;
+            if actual != requested {
+                return Err(AppError::Config(ConfigError::new(format!(
+                    "--format {} does not match the extension of {}, which is {}",
+                    requested.name(),
+                    path.display(),
+                    actual.name()
+                ))));
+            }
+            (path, actual)
+        }
+        (Some(path), None) => {
+            let path = resolve_destination(&default_path, path);
+            let format = crate::config::format_for_path(&path)?;
+            (path, format)
+        }
+        (None, Some(requested)) => {
+            let path = default_path
+                .parent()
+                .expect("current directory configuration path has a parent")
+                .join(requested.default_file_name());
+            (path, requested)
+        }
+        (None, None) => (default_path, ConfigFormat::Yaml),
     };
-    let format = crate::config::format_for_path(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             AppError::Runtime(format!(
@@ -154,4 +184,15 @@ fn initialize_config(destination: Option<&Path>) -> Result<PathBuf, AppError> {
             ))
         })?;
     Ok(path)
+}
+
+fn resolve_destination(default_path: &Path, destination: &Path) -> PathBuf {
+    if destination.is_absolute() {
+        destination.to_owned()
+    } else {
+        default_path
+            .parent()
+            .expect("current directory configuration path has a parent")
+            .join(destination)
+    }
 }
