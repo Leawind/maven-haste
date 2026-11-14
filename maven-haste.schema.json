@@ -227,16 +227,24 @@
                     "type": "integer"
                 },
                 "proxy": {
-                    "description": "Optional global upstream proxy.",
-                    "format": "uri",
-                    "type": [
-                        "string",
-                        "null"
+                    "description": "Ordered upstream proxies. Requests try each proxy in the listed order\nand move to the next one when a proxy cannot be reached. Accepts a\nsingle URL or a list of URLs.",
+                    "oneOf": [
+                        {
+                            "format": "uri",
+                            "type": "string"
+                        },
+                        {
+                            "items": {
+                                "format": "uri",
+                                "type": "string"
+                            },
+                            "type": "array"
+                        }
                     ]
                 },
                 "proxy_fallback": {
                     "default": true,
-                    "description": "Try the upstream repositories directly when the configured proxy cannot\nbe reached; defaults to `true`. Repositories with `use_proxy = true`\nkeep using the proxy, and the proxy is retried after\n`circuit_breaker.recovery_timeout`.",
+                    "description": "Try the upstream repositories directly when none of the configured\nproxies can be reached; defaults to `true`. Repositories with\n`use_proxy = true` keep using the proxies, and a proxy is retried\nafter `circuit_breaker.recovery_timeout`.",
                     "type": "boolean"
                 },
                 "read_timeout": {

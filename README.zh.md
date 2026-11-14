@@ -117,7 +117,7 @@ URL 指向当前发布版本的 tag 而非 `main`，因此按发行版保持有�
 
 ### 上游代理
 
-在 `[upstream]` 中设置 `proxy` 可以让所有请求走 HTTP 代理。仓库上的 `use_proxy` 会覆盖该选择：`true` 始终使用代理，`false` 始终直连。代理不可达（连接被拒、DNS 失败或连接超时）时，maven-haste 会改为直连重试，而不是直接失败。连续 `circuit_breaker.failure_threshold` 次代理失败后，代理会被跳过 `circuit_breaker.recovery_timeout`，随后再探测一次，因此代理挂掉不会拖慢每一次下载。设置 `proxy_fallback = false` 可以保持必须使用代理。
+在 `[upstream]` 中设置 `proxy` 可以让所有请求走一个或多个 HTTP 代理；接受单个 URL 或有序列表，代理按列出顺序依次尝试。仓库上的 `use_proxy` 会覆盖该选择：`true` 始终使用代理，`false` 始终直连。某个代理不可达（连接被拒、DNS 失败或连接超时）时，maven-haste 会把请求交给下一个代理，最后才回退为直连，而不是直接失败。连续 `circuit_breaker.failure_threshold` 次失败后，该代理会被跳过 `circuit_breaker.recovery_timeout`，随后再探测一次，因此代理挂掉不会拖慢每一次下载。设置 `proxy_fallback = false` 可以保持必须使用代理。
 
 ## 接入构建工具
 

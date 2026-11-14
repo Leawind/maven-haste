@@ -117,7 +117,7 @@ When an upstream lacks a file, fails, or returns content that still cannot be ve
 
 ### Upstream Proxy
 
-Set `[upstream].proxy` to route every request through an HTTP proxy. A repository's `use_proxy` overrides that choice: `true` always uses the proxy, `false` always connects directly. When the proxy cannot be reached (connection refused, DNS failure, or connect timeout), maven-haste retries the request directly instead of failing. After `circuit_breaker.failure_threshold` consecutive proxy failures the proxy is skipped for `circuit_breaker.recovery_timeout` and then probed again, so a dead proxy does not stall every download. Set `proxy_fallback = false` to keep the proxy mandatory.
+Set `[upstream].proxy` to route every request through one or more HTTP proxies; a single URL or an ordered list both work, and the proxies are tried in the listed order. A repository's `use_proxy` overrides that choice: `true` always uses the proxies, `false` always connects directly. When a proxy cannot be reached (connection refused, DNS failure, or connect timeout), maven-haste hands the request to the next proxy instead of failing, and finally to a direct connection. After `circuit_breaker.failure_threshold` consecutive failures a proxy is skipped for `circuit_breaker.recovery_timeout` and then probed again, so a dead proxy does not stall every download. Set `proxy_fallback = false` to keep the proxies mandatory.
 
 ## Build Tool Integration
 

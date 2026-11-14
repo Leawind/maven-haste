@@ -259,6 +259,55 @@ pub fn socket_addr_schema(_: &mut SchemaGenerator) -> Schema {
     })
 }
 
+/// Builds the JSON schema for the ordered upstream proxy list: one proxy URL
+/// or a list of proxy URLs.
+pub fn proxy_list_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "description": "A proxy URL, or an ordered list of proxy URLs; requests try them in order and move to the next proxy when one cannot be reached.",
+        "oneOf": [
+            {
+                "type": "string",
+                "format": "uri"
+            },
+            {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "format": "uri"
+                }
+            }
+        ]
+    })
+}
+
+/// Accepts either a single proxy URL or an ordered list of proxy URLs.
+fn deserialize_proxy_list<'de, D>(deserializer: D) -> Result<Vec<Url>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ProxyList {
+        One(Url),
+        Many(Vec<Url>),
+    }
+    Ok(match ProxyList::deserialize(deserializer)? {
+        ProxyList::One(proxy) => vec![proxy],
+        ProxyList::Many(proxies) => proxies,
+    })
+}
+
+/// Writes one proxy as a bare URL and several proxies as an ordered list.
+fn serialize_proxy_list<S>(proxies: &[Url], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match proxies {
+        [single] => single.serialize(serializer),
+        proxies => proxies.serialize(serializer),
+    }
+}
+
 #[derive(Debug)]
 pub struct LoadedConfig {
     pub path: PathBuf,
@@ -595,13 +644,21 @@ pub struct UpstreamConfig {
     /// while both are waiting.
     #[schemars(range(min = 1))]
     pub foreground_priority_burst: usize,
-    /// Optional global upstream proxy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy: Option<Url>,
-    /// Try the upstream repositories directly when the configured proxy cannot
-    /// be reached; defaults to `true`. Repositories with `use_proxy = true`
-    /// keep using the proxy, and the proxy is retried after
-    /// `circuit_breaker.recovery_timeout`.
+    /// Ordered upstream proxies. Requests try each proxy in the listed order
+    /// and move to the next one when a proxy cannot be reached. Accepts a
+    /// single URL or a list of URLs.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_proxy_list",
+        serialize_with = "serialize_proxy_list"
+    )]
+    #[schemars(schema_with = "crate::config::proxy_list_schema")]
+    pub proxy: Vec<Url>,
+    /// Try the upstream repositories directly when none of the configured
+    /// proxies can be reached; defaults to `true`. Repositories with
+    /// `use_proxy = true` keep using the proxies, and a proxy is retried
+    /// after `circuit_breaker.recovery_timeout`.
     #[serde(default = "default_true")]
     pub proxy_fallback: bool,
 }
@@ -614,7 +671,7 @@ impl Default for UpstreamConfig {
             max_concurrency: 32,
             default_repository_max_concurrency: 10,
             foreground_priority_burst: 8,
-            proxy: None,
+            proxy: Vec::new(),
             proxy_fallback: true,
         }
     }
@@ -891,12 +948,16 @@ fn validate_upstream(config: &Config) -> Result<(), ConfigError> {
             "upstream.read_timeout must be greater than zero",
         ));
     }
-    if let Some(proxy) = &config.upstream.proxy {
+    for proxy in &config.upstream.proxy {
         if !matches!(proxy.scheme(), "http" | "https") {
-            return Err(ConfigError::new("upstream.proxy must use http or https"));
+            return Err(ConfigError::new(format!(
+                "upstream.proxy {proxy} must use http or https"
+            )));
         }
         if proxy.host_str().is_none() {
-            return Err(ConfigError::new("upstream.proxy must include a host"));
+            return Err(ConfigError::new(format!(
+                "upstream.proxy {proxy} must include a host"
+            )));
         }
     }
     for (name, value) in [
@@ -973,7 +1034,7 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
                 repository.id, repository.url
             )));
         }
-        if repository.use_proxy == Some(true) && config.upstream.proxy.is_none() {
+        if repository.use_proxy == Some(true) && config.upstream.proxy.is_empty() {
             return Err(ConfigError::new(format!(
                 "repository {:?} has use_proxy = true but [upstream].proxy is not configured",
                 repository.id
@@ -1636,7 +1697,7 @@ url = "https://repo.example/"
 
         let cli1 = &cli(&path);
         let loaded = Config::load(cli1).unwrap();
-        assert!(loaded.config.upstream.proxy.is_none());
+        assert!(loaded.config.upstream.proxy.is_empty());
         assert_eq!(loaded.config.repositories[0].use_proxy, None);
     }
 
@@ -1661,10 +1722,76 @@ url = "https://repo.example/"
         let cli1 = &cli(&path);
         let loaded = Config::load(cli1).unwrap();
         assert_eq!(
-            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
-            Some("http://127.0.0.1:7890/")
+            loaded.config.upstream.proxy,
+            vec![Url::parse("http://127.0.0.1:7890").unwrap()]
         );
         assert_eq!(loaded.config.repositories[0].use_proxy, None);
+    }
+
+    #[test]
+    fn parses_multiple_proxies_in_order() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = ["http://127.0.0.1:7890", "http://127.0.0.1:7891"]
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
+        assert_eq!(
+            loaded.config.upstream.proxy,
+            vec![
+                Url::parse("http://127.0.0.1:7890").unwrap(),
+                Url::parse("http://127.0.0.1:7891").unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn serializes_one_proxy_as_a_string_and_several_as_a_list() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+        let cli1 = &cli(&path);
+        let mut config = Config::load(cli1).unwrap().config;
+
+        config.upstream.proxy = vec![Url::parse("http://127.0.0.1:7890").unwrap()];
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let document: toml::Value = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            document["upstream"]["proxy"].as_str(),
+            Some("http://127.0.0.1:7890/")
+        );
+
+        config.upstream.proxy = vec![
+            Url::parse("http://127.0.0.1:7890").unwrap(),
+            Url::parse("http://127.0.0.1:7891").unwrap(),
+        ];
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let document: toml::Value = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            document["upstream"]["proxy"].as_array().map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]
@@ -1689,8 +1816,8 @@ use_proxy = true
         let cli1 = &cli(&path);
         let loaded = Config::load(cli1).unwrap();
         assert_eq!(
-            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
-            Some("http://user:password@127.0.0.1:7890/")
+            loaded.config.upstream.proxy,
+            vec![Url::parse("http://user:password@127.0.0.1:7890").unwrap()]
         );
         assert_eq!(loaded.config.repositories[0].use_proxy, Some(true));
     }
@@ -1717,8 +1844,8 @@ use_proxy = false
         let cli1 = &cli(&path);
         let loaded = Config::load(cli1).unwrap();
         assert_eq!(
-            loaded.config.upstream.proxy.as_ref().map(Url::as_str),
-            Some("http://127.0.0.1:7890/")
+            loaded.config.upstream.proxy,
+            vec![Url::parse("http://127.0.0.1:7890").unwrap()]
         );
         assert_eq!(loaded.config.repositories[0].use_proxy, Some(false));
     }
@@ -1768,9 +1895,7 @@ url = "https://repo.example/"
         let cli1 = &cli(&path);
         let error = Config::load(cli1).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("upstream.proxy must use http or https"),
+            error.to_string().contains("must use http or https"),
             "unexpected error: {error}"
         );
     }

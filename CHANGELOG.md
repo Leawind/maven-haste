@@ -6,7 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- Added `upstream.proxy_fallback` (default `true`): when the configured proxy cannot be reached, requests retry directly instead of failing, and the proxy is skipped for `circuit_breaker.recovery_timeout` after `circuit_breaker.failure_threshold` consecutive failures. Repositories with `use_proxy = true` and `proxy_fallback = false` keep requiring the proxy.
+- `[upstream].proxy` now accepts an ordered list of proxy URLs (a single URL still works). Requests try the proxies in the listed order and hand the request to the next one when a proxy cannot be reached; each proxy has its own circuit breaker and is skipped for `circuit_breaker.recovery_timeout` after `circuit_breaker.failure_threshold` consecutive failures, then probed again.
+- Added `upstream.proxy_fallback` (default `true`): when every configured proxy cannot be reached, requests retry directly instead of failing. Repositories with `use_proxy = true` and `proxy_fallback = false` keep requiring the proxies.
 - `config init` and `config example` accept `--format json|yaml|toml`. Init defaults to YAML (`./maven-haste.yaml`) when neither a path nor a format is given; a path still decides its format by extension, and a `--format` that conflicts with the path's extension is rejected.
 
 ### Changed

@@ -2209,7 +2209,7 @@ async fn routes_upstream_requests_through_the_configured_proxy() {
         vec![repository("central", &unreachable_upstream, &[])],
         CacheConfig::default(),
         UpstreamConfig {
-            proxy: Some(proxy_url),
+            proxy: vec![proxy_url],
             ..UpstreamConfig::default()
         },
     )
@@ -2219,6 +2219,64 @@ async fn routes_upstream_requests_through_the_configured_proxy() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body(response).await, "proxy-body");
     proxy_task.abort();
+}
+
+#[tokio::test]
+async fn tries_proxies_in_the_configured_order() {
+    let first_proxy =
+        Router::new().fallback(|| async { error_response(StatusCode::NOT_FOUND, "missing") });
+    let (first_proxy_url, first_task) = spawn_upstream(first_proxy).await;
+    let second_proxy =
+        Router::new().fallback(|| async { error_response(StatusCode::NOT_FOUND, "missing") });
+    let (second_proxy_url, second_task) = spawn_upstream(second_proxy).await;
+    // An unreachable upstream proves the content came through a proxy.
+    let unreachable_upstream = Url::parse("http://127.0.0.1:1/").unwrap();
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &unreachable_upstream, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: vec![first_proxy_url, second_proxy_url],
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    first_task.abort();
+    second_task.abort();
+}
+
+#[tokio::test]
+async fn fails_over_to_the_next_proxy_when_one_is_unreachable() {
+    let unreachable_proxy = Url::parse("http://127.0.0.1:1/").unwrap();
+    let second_proxy = Router::new().fallback(|OriginalUri(uri): OriginalUri| async move {
+        if is_checksum_uri(&uri) {
+            return error_response(StatusCode::NOT_FOUND, "missing checksum");
+        }
+        Response::new(Body::from("second-proxy-body"))
+    });
+    let (second_proxy_url, second_task) = spawn_upstream(second_proxy).await;
+    // An unreachable upstream proves the content came through the proxy.
+    let unreachable_upstream = Url::parse("http://127.0.0.1:1/").unwrap();
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &unreachable_upstream, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            proxy: vec![unreachable_proxy, second_proxy_url],
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "second-proxy-body");
+    second_task.abort();
 }
 
 #[tokio::test]
@@ -2239,7 +2297,7 @@ async fn falls_back_to_direct_when_the_proxy_is_unreachable() {
         vec![repository("central", &url, &[])],
         CacheConfig::default(),
         UpstreamConfig {
-            proxy: Some(Url::parse("http://127.0.0.1:1/").unwrap()),
+            proxy: vec![Url::parse("http://127.0.0.1:1/").unwrap()],
             ..UpstreamConfig::default()
         },
     )
@@ -2277,7 +2335,7 @@ async fn reports_a_gateway_failure_when_the_proxy_is_unreachable_and_fallback_is
         vec![repository("central", &url, &[])],
         CacheConfig::default(),
         UpstreamConfig {
-            proxy: Some(Url::parse("http://127.0.0.1:1/").unwrap()),
+            proxy: vec![Url::parse("http://127.0.0.1:1/").unwrap()],
             proxy_fallback: false,
             ..UpstreamConfig::default()
         },
@@ -2320,7 +2378,7 @@ async fn does_not_bypass_a_reachable_proxy() {
         vec![repository("central", &url, &[])],
         CacheConfig::default(),
         UpstreamConfig {
-            proxy: Some(proxy_url),
+            proxy: vec![proxy_url],
             ..UpstreamConfig::default()
         },
     )
