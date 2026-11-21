@@ -1822,6 +1822,77 @@ async fn serves_artifacts_larger_than_the_cache_limit_without_caching_them() {
 }
 
 #[tokio::test]
+async fn sends_repository_headers_and_basic_auth_to_upstream() {
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(
+            |OriginalUri(uri): OriginalUri, headers: HeaderMap| async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                let key = headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok());
+                let basic = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("Basic "));
+                if key == Some("key") && basic {
+                    Response::new(Body::from("authorized"))
+                } else {
+                    error_response(StatusCode::UNAUTHORIZED, "unauthorized")
+                }
+            },
+        ),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let mut repository = repository("central", &url, &[]);
+    repository.headers.insert("X-Api-Key".into(), "key".into());
+    repository.username = Some("user".into());
+    repository.password = Some("pass".into());
+    let (app, _) = test_app(&directory, vec![repository]).await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "authorized");
+    task.abort();
+}
+
+#[tokio::test]
+async fn sends_a_repository_bearer_token_to_upstream() {
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(
+            |OriginalUri(uri): OriginalUri, headers: HeaderMap| async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                if headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer test-token")
+                {
+                    Response::new(Body::from("authorized"))
+                } else {
+                    error_response(StatusCode::UNAUTHORIZED, "unauthorized")
+                }
+            },
+        ),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let mut repository = repository("central", &url, &[]);
+    repository.bearer_token = Some("test-token".into());
+    let (app, _) = test_app(&directory, vec![repository]).await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "authorized");
+    task.abort();
+}
+
+#[tokio::test]
 async fn concurrent_passthrough_requests_share_one_temporary_file_safely() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);
@@ -2609,6 +2680,10 @@ fn repository_with_cache(
         max_concurrency: None,
         rules: rules.iter().map(|rule| (*rule).into()).collect(),
         cache_writes,
+        headers: Default::default(),
+        username: None,
+        password: None,
+        bearer_token: None,
     }
 }
 

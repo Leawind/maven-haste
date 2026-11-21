@@ -109,6 +109,10 @@ mod tests {
             max_concurrency: None,
             rules: rules.iter().map(|rule| (*rule).into()).collect(),
             cache_writes: true,
+            headers: Default::default(),
+            username: None,
+            password: None,
+            bearer_token: None,
         }
     }
 

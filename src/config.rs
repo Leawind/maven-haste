@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -683,6 +683,11 @@ pub struct UpstreamConfig {
     /// after `circuit_breaker.recovery_timeout`.
     #[serde(default = "default_true")]
     pub proxy_fallback: bool,
+    /// Optional PEM or DER file with additional root certificates for
+    /// upstream TLS connections. Relative paths are resolved against the
+    /// configuration file's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_bundle: Option<PathBuf>,
 }
 
 impl Default for UpstreamConfig {
@@ -695,6 +700,7 @@ impl Default for UpstreamConfig {
             foreground_priority_burst: 8,
             proxy: Vec::new(),
             proxy_fallback: true,
+            ca_bundle: None,
         }
     }
 }
@@ -753,6 +759,20 @@ pub struct RepositoryConfig {
     /// previously cached content is still served and nothing is deleted.
     #[serde(default = "default_true")]
     pub cache_writes: bool,
+    /// Extra request headers sent to this repository, for example an API key
+    /// or a vendor-specific header. Values support `${ENV_VAR}` expansion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Optional HTTP Basic authentication username. Supports `${ENV_VAR}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Optional HTTP Basic authentication password. Supports `${ENV_VAR}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Optional bearer token sent as `Authorization: Bearer`. Supports
+    /// `${ENV_VAR}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -772,6 +792,20 @@ impl Config {
                 }
             }
         }
+        for repository in &mut redacted.repositories {
+            if repository.username.is_some() {
+                repository.username = Some("***".into());
+            }
+            if repository.password.is_some() {
+                repository.password = Some("***".into());
+            }
+            if repository.bearer_token.is_some() {
+                repository.bearer_token = Some("***".into());
+            }
+            for value in repository.headers.values_mut() {
+                *value = "***".into();
+            }
+        }
         redacted
     }
 
@@ -779,6 +813,7 @@ impl Config {
         fn resolve_paths(
             storage: &mut StorageConfig,
             logging: &mut LoggingConfig,
+            upstream: &mut UpstreamConfig,
             config_dir: &Path,
         ) {
             storage.root = resolve_path(config_dir, &storage.root);
@@ -795,6 +830,10 @@ impl Config {
                 Some(path) => resolve_path(config_dir, &path),
                 None => internal.join("logs"),
             });
+            upstream.ca_bundle = upstream
+                .ca_bundle
+                .take()
+                .map(|path| resolve_path(config_dir, &path));
 
             fn normalize_path(path: &Path) -> PathBuf {
                 use std::path::Component;
@@ -831,13 +870,29 @@ impl Config {
         let mut config: Config = parse_config(&source, &path)?;
         let warnings = unknown_field_warnings(&source, format_for_path(&path)?);
 
+        expand_repository_environment(&mut config.repositories)?;
         validate_raw_storage_paths(&config.storage)?;
         validate_raw_logging_paths(&config.logging)?;
+        if config
+            .upstream
+            .ca_bundle
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ConfigError::new(
+                "upstream.ca_bundle must not be empty when specified",
+            ));
+        }
 
         let config_dir = path
             .parent()
             .expect("an absolute configuration path always has a parent");
-        resolve_paths(&mut config.storage, &mut config.logging, config_dir);
+        resolve_paths(
+            &mut config.storage,
+            &mut config.logging,
+            &mut config.upstream,
+            config_dir,
+        );
         normalize(&mut config);
         if let Some(bind) = cli.bind {
             config.server.bind = bind;
@@ -850,6 +905,55 @@ impl Config {
             warnings,
         })
     }
+}
+
+/// Expands `${ENV_VAR}` references in repository credentials and headers.
+/// Resolved secrets stay in memory and are redacted whenever the
+/// configuration is printed.
+fn expand_repository_environment(repositories: &mut [RepositoryConfig]) -> Result<(), ConfigError> {
+    for repository in repositories {
+        let prefix = format!("repositories[{:?}]", repository.id);
+        for (name, value) in [
+            ("username", &mut repository.username),
+            ("password", &mut repository.password),
+            ("bearer_token", &mut repository.bearer_token),
+        ] {
+            if let Some(value) = value {
+                *value = expand_environment(value, &format!("{prefix}.{name}"))?;
+            }
+        }
+        for (header, value) in &mut repository.headers {
+            *value = expand_environment(value, &format!("{prefix}.headers.{header}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn expand_environment(value: &str, field: &str) -> Result<String, ConfigError> {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or_else(|| {
+            ConfigError::new(format!("{field} has an unterminated environment reference"))
+        })?;
+        let name = &after[..end];
+        if name.is_empty() {
+            return Err(ConfigError::new(format!(
+                "{field} has an empty environment reference"
+            )));
+        }
+        let resolved = std::env::var(name).map_err(|error| {
+            ConfigError::new(format!(
+                "{field} references environment variable {name}: {error}"
+            ))
+        })?;
+        expanded.push_str(&resolved);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    Ok(expanded)
 }
 
 fn normalize(config: &mut Config) {
@@ -975,6 +1079,20 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
 }
 
 fn validate_upstream(config: &Config) -> Result<(), ConfigError> {
+    if let Some(path) = &config.upstream.ca_bundle {
+        let metadata = std::fs::metadata(path).map_err(|error| {
+            ConfigError::new(format!(
+                "upstream.ca_bundle {} is not readable: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.is_file() {
+            return Err(ConfigError::new(format!(
+                "upstream.ca_bundle {} is not a file",
+                path.display()
+            )));
+        }
+    }
     if config.upstream.connect_timeout.is_zero() {
         return Err(ConfigError::new(
             "upstream.connect_timeout must be greater than zero",
@@ -1101,11 +1219,95 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
                 repository.id
             )));
         }
+        validate_repository_access(repository)?;
         for rule in &repository.rules {
             validate_rule(&repository.id, rule)?;
         }
     }
 
+    Ok(())
+}
+
+fn validate_repository_access(repository: &RepositoryConfig) -> Result<(), ConfigError> {
+    let basic = repository.username.is_some() || repository.password.is_some();
+    if repository.password.is_some() && repository.username.is_none() {
+        return Err(ConfigError::new(format!(
+            "repository {:?} has password but no username",
+            repository.id
+        )));
+    }
+    if repository
+        .username
+        .as_deref()
+        .is_some_and(|username| username.is_empty())
+    {
+        return Err(ConfigError::new(format!(
+            "repository {:?} username must not be empty",
+            repository.id
+        )));
+    }
+    if repository
+        .bearer_token
+        .as_deref()
+        .is_some_and(|token| token.is_empty())
+    {
+        return Err(ConfigError::new(format!(
+            "repository {:?} bearer_token must not be empty",
+            repository.id
+        )));
+    }
+    if basic && repository.bearer_token.is_some() {
+        return Err(ConfigError::new(format!(
+            "repository {:?} cannot combine basic credentials with a bearer token",
+            repository.id
+        )));
+    }
+
+    const RESERVED_HEADERS: &[&str] = &[
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "range",
+        "if-range",
+        "if-none-match",
+        "if-modified-since",
+        "proxy-authorization",
+    ];
+    let mut names = HashSet::new();
+    for (name, value) in &repository.headers {
+        let lower = name.to_ascii_lowercase();
+        if !names.insert(lower.clone()) {
+            return Err(ConfigError::new(format!(
+                "repository {:?} defines header {name:?} more than once",
+                repository.id
+            )));
+        }
+        if RESERVED_HEADERS.contains(&lower.as_str()) || (lower == "authorization" && basic) {
+            return Err(ConfigError::new(format!(
+                "repository {:?} cannot override request header {name:?}",
+                repository.id
+            )));
+        }
+        if lower == "authorization" && repository.bearer_token.is_some() {
+            return Err(ConfigError::new(format!(
+                "repository {:?} cannot combine an Authorization header with bearer_token",
+                repository.id
+            )));
+        }
+        reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+            ConfigError::new(format!(
+                "repository {:?} has invalid header name {name:?}: {error}",
+                repository.id
+            ))
+        })?;
+        reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+            ConfigError::new(format!(
+                "repository {:?} has invalid value for header {name:?}: {error}",
+                repository.id
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -1874,13 +2076,17 @@ proxy = "http://user:password@127.0.0.1:7890"
 [[repositories]]
 id = "central"
 url = "https://repo.example/"
+username = "user"
+password = "s3cret"
+headers = { "X-Api-Key" = "key-value" }
 "#,
         );
         let loaded = Config::load(&cli(&path)).unwrap();
 
         let serialized = toml::to_string_pretty(&loaded.config.redacted()).unwrap();
 
-        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("s3cret"));
+        assert!(!serialized.contains("key-value"));
         assert!(serialized.contains("***:***@127.0.0.1:7890"));
         assert_eq!(
             redact_url(&Url::parse("http://user:secret@host.example:8080/").unwrap()),
@@ -1890,6 +2096,97 @@ url = "https://repo.example/"
             redact_url(&Url::parse("http://host.example:8080/").unwrap()),
             "http://host.example:8080/"
         );
+    }
+
+    #[test]
+    fn parses_repository_headers_and_credentials() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+username = "user"
+password = "pass"
+headers = { "X-Api-Key" = "key" }
+"#,
+        );
+
+        let loaded = Config::load(&cli(&path)).unwrap();
+        let repository = &loaded.config.repositories[0];
+
+        assert_eq!(repository.username.as_deref(), Some("user"));
+        assert_eq!(repository.password.as_deref(), Some("pass"));
+        assert_eq!(
+            repository.headers.get("X-Api-Key").map(String::as_str),
+            Some("key")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_repository_access_configuration() {
+        let directory = TempDir::new().unwrap();
+        for body in [
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+password = "pass"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+username = "user"
+bearer_token = "token"
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+headers = { "Range" = "bytes=0-1" }
+"#,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+headers = { "Authorization" = "Basic abc" }
+username = "user"
+"#,
+        ] {
+            let path = write_config(&directory, body);
+            assert!(
+                Config::load(&cli(&path)).is_err(),
+                "accepted invalid configuration:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn expands_environment_references_in_repository_values() {
+        let path = std::env::var("PATH").expect("the test environment has a PATH");
+        assert_eq!(
+            expand_environment("before-${PATH}-after", "test").unwrap(),
+            format!("before-{path}-after")
+        );
+        assert!(expand_environment("${MAVEN_HASTE_UNDEFINED_TEST_VARIABLE}", "test").is_err());
+        assert!(expand_environment("${unterminated", "test").is_err());
     }
 
     #[test]

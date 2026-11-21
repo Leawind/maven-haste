@@ -282,6 +282,10 @@ mod tests {
                 max_concurrency: None,
                 rules: Vec::new(),
                 cache_writes,
+                headers: Default::default(),
+                username: None,
+                password: None,
+                bearer_token: None,
             }],
         };
         let database = Database::open(storage.db_path()).await.unwrap();

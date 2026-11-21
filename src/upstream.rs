@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, RANGE};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, RANGE,
+};
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -40,6 +43,7 @@ pub struct UpstreamClient {
     routes: RouteEngine,
     circuits: Arc<CircuitBreaker>,
     scheduler: RequestScheduler,
+    repository_headers: Arc<HashMap<String, HeaderMap>>,
 }
 
 /// Connection path for one upstream request. `Proxy(index)` selects an entry
@@ -308,13 +312,24 @@ impl UpstreamClient {
             .iter()
             .map(|repository| repository.url.origin())
             .collect();
+        let certificates = config
+            .ca_bundle
+            .as_deref()
+            .map(load_root_certificates)
+            .transpose()?
+            .unwrap_or_default();
         let proxies = config
             .proxy
             .iter()
             .map(|proxy| {
                 Ok(ProxyEgress {
                     url: proxy.clone(),
-                    client: build_http_client(config, Some(proxy), &allowed_origins)?,
+                    client: build_http_client(
+                        config,
+                        Some(proxy),
+                        &allowed_origins,
+                        &certificates,
+                    )?,
                     circuit: CircuitBreaker::new(
                         circuit.failure_threshold,
                         circuit.recovery_timeout,
@@ -323,8 +338,9 @@ impl UpstreamClient {
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
-        let direct_client = build_http_client(config, None, &allowed_origins)?;
+        let direct_client = build_http_client(config, None, &allowed_origins, &certificates)?;
         let scheduler = RequestScheduler::new(&repositories, config);
+        let repository_headers = build_repository_headers(&repositories)?;
         Ok(Self {
             proxies: proxies.into(),
             direct_client,
@@ -335,6 +351,7 @@ impl UpstreamClient {
                 circuit.recovery_timeout,
             )),
             scheduler,
+            repository_headers: Arc::new(repository_headers),
         })
     }
 
@@ -378,7 +395,7 @@ impl UpstreamClient {
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut last_error = None;
         for egress in self.egresses(repository) {
-            let failure = match self.send_via(egress, url, extras).await {
+            let failure = match self.send_via(repository, egress, url, extras).await {
                 Ok(response) => return Ok(response),
                 Err(error) => error,
             };
@@ -396,11 +413,21 @@ impl UpstreamClient {
 
     async fn send_via(
         &self,
+        repository: &RepositoryConfig,
         egress: Egress,
         url: &Url,
         extras: Option<&RequestExtras>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut request = self.client(egress).get(url.clone());
+        if let Some(headers) = self.repository_headers.get(&repository.id) {
+            request = request.headers(headers.clone());
+        }
+        if let Some(username) = &repository.username {
+            request = request.basic_auth(username, repository.password.as_deref());
+        }
+        if let Some(token) = &repository.bearer_token {
+            request = request.bearer_auth(token);
+        }
         if let Some(extras) = extras {
             if let Some(etag) = &extras.etag {
                 request = request.header(IF_NONE_MATCH, etag);
@@ -742,6 +769,7 @@ fn build_http_client(
     config: &UpstreamConfig,
     proxy: Option<&Url>,
     allowed_origins: &[url::Origin],
+    certificates: &[reqwest::Certificate],
 ) -> Result<Client, AppError> {
     let allowed_origins = allowed_origins.to_vec();
     let mut builder = Client::builder()
@@ -758,6 +786,9 @@ fn build_http_client(
         }))
         .user_agent(concat!("maven-haste/", env!("CARGO_PKG_VERSION")))
         .no_proxy();
+    for certificate in certificates {
+        builder = builder.add_root_certificate(certificate.clone());
+    }
     if let Some(proxy) = proxy {
         let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|error| {
             AppError::Runtime(format!("failed to initialize upstream proxy: {error}"))
@@ -769,6 +800,57 @@ fn build_http_client(
             "failed to initialize upstream HTTP client: {error}"
         ))
     })
+}
+
+fn load_root_certificates(path: &Path) -> Result<Vec<reqwest::Certificate>, AppError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to read upstream CA bundle {}: {error}",
+            path.display()
+        ))
+    })?;
+    match reqwest::Certificate::from_pem_bundle(&bytes) {
+        Ok(certificates) if !certificates.is_empty() => Ok(certificates),
+        Ok(_) => Err(AppError::Runtime(format!(
+            "upstream CA bundle {} contains no certificates",
+            path.display()
+        ))),
+        Err(pem_error) => reqwest::Certificate::from_der(&bytes)
+            .map(|certificate| vec![certificate])
+            .map_err(|der_error| {
+                AppError::Runtime(format!(
+                    "failed to parse upstream CA bundle {}: {pem_error}; DER: {der_error}",
+                    path.display()
+                ))
+            }),
+    }
+}
+
+fn build_repository_headers(
+    repositories: &[RepositoryConfig],
+) -> Result<HashMap<String, HeaderMap>, AppError> {
+    repositories
+        .iter()
+        .map(|repository| {
+            let mut headers = HeaderMap::new();
+            for (name, value) in &repository.headers {
+                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                    AppError::Runtime(format!(
+                        "repository {:?} has an invalid header name {name:?}: {error}",
+                        repository.id
+                    ))
+                })?;
+                let value = HeaderValue::from_str(value).map_err(|error| {
+                    AppError::Runtime(format!(
+                        "repository {:?} has an invalid value for header {name}: {error}",
+                        repository.id
+                    ))
+                })?;
+                headers.insert(name, value);
+            }
+            Ok((repository.id.clone(), headers))
+        })
+        .collect()
 }
 
 fn repository_id(repository: &RepositoryConfig) -> String {
@@ -835,6 +917,10 @@ mod tests {
                 max_concurrency: None,
                 rules: Vec::new(),
                 cache_writes: true,
+                headers: Default::default(),
+                username: None,
+                password: None,
+                bearer_token: None,
             },
             RepositoryConfig {
                 id: "b".into(),
@@ -843,6 +929,10 @@ mod tests {
                 max_concurrency: None,
                 rules: Vec::new(),
                 cache_writes: true,
+                headers: Default::default(),
+                username: None,
+                password: None,
+                bearer_token: None,
             },
         ];
         RequestScheduler::new(
@@ -881,6 +971,10 @@ mod tests {
             max_concurrency: None,
             rules: Vec::new(),
             cache_writes: true,
+            headers: Default::default(),
+            username: None,
+            password: None,
+            bearer_token: None,
         }
     }
 
@@ -1016,6 +1110,25 @@ mod tests {
             described.to_lowercase().contains("connect"),
             "the transport cause is missing from the message: {described}"
         );
+    }
+
+    #[test]
+    fn rejects_an_invalid_ca_bundle() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("ca.pem");
+        std::fs::write(&path, b"not a certificate").unwrap();
+        let error = match UpstreamClient::new(
+            vec![proxied_repository(None)],
+            &UpstreamConfig {
+                ca_bundle: Some(path),
+                ..UpstreamConfig::default()
+            },
+            &CircuitBreakerConfig::default(),
+        ) {
+            Ok(_) => panic!("an invalid CA bundle must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("CA bundle"));
     }
 
     #[test]
