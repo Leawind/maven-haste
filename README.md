@@ -105,6 +105,7 @@ Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.to
 - A file that cannot be parsed or validated, or whose new upstream client cannot be built, is reported and the previous configuration stays active.
 - Reloads never interrupt an active download; new requests see the reloaded settings.
 - `${ENV_VAR}` references are expanded again on reload, so after changing an environment variable, save or touch the file to trigger it.
+- `GET /api/v1/config/reload` reports the attempts since start-up: success and failure counters, the last successful reload, and the last failure with its error.
 
 Only `run` watches the file; `config` and `cache` commands read the configuration once and exit.
 
@@ -133,6 +134,8 @@ maven-haste accepts and ignores the `$schema` key in any format, so annotated co
 Repositories are tried in configuration order. `rules` is an ordered list of glob patterns matched against the Maven relative request path: the first matching rule determines whether the repository participates, `!` means exclude, `*` matches within one path segment, and `**` matches across `/`. Repositories without `rules` act as a global fallback.
 
 Repository ids are used for logging, statistics, and circuit breaker identification, and must consist only of lowercase ASCII letters, digits, underscores, and hyphens (e.g. `central`, `kikugie-releases`, `gradle-plugin`).
+
+A repository can serve from several upstream URLs: set either `url` or `urls`, and requests try the listed URLs in order, moving to the next one when a URL is unreachable, rejects the request, or reports the artifact missing. Each URL has its own circuit breaker, and confirmed 404s are remembered per URL, so a URL that lacks an artifact does not shadow the rest. Metrics name a repository's URLs `id[0]`, `id[1]`, and so on.
 
 When an upstream lacks a file, fails, or returns content that still cannot be verified against its checksums after retries, the service continues to the next upstream where applicable. Redirects are followed only to origins (scheme, host, and port) explicitly listed in the configured repository URLs.
 
@@ -196,8 +199,9 @@ The cache size limit is enforced after every write and by a periodic background 
 The local Maven endpoint is set by `[server].base_path`, defaulting to `/maven`. The root path and `/api` are reserved for the service itself and cannot be used as the Maven endpoint.
 
 - `GET /api/v1/health`: checks SQLite, cache directory, and temp directory; returns `200 OK` when healthy, otherwise service unavailable.
-- `GET /api/v1/cache/stats`: returns cached file count, logical and object sizes, recorded requests, hit rate, negative cache count, and per-upstream circuit breaker status.
-- `GET /api/v1/metrics`: Prometheus text-format metrics covering cache totals, object counts, request and hit counters, bytes served, interrupted responses, response and upstream latency histograms, and per-upstream circuit breaker states. Each metric family has one `HELP` and one `TYPE` line; counters use the counter type.
+- `GET /api/v1/cache/stats`: returns cached file count, logical and object sizes, recorded requests, hit rate, negative cache count, per-repository hit and miss counters, and per-upstream circuit breaker status.
+- `GET /api/v1/config/reload`: returns the configuration hot reloads since start-up as JSON, with success and failure counters, the last successful reload, and the last failure including its error.
+- `GET /api/v1/metrics`: Prometheus text-format metrics covering cache totals, object counts, request and hit counters, bytes served, interrupted responses, per-repository hit and miss counters, response and per-upstream-URL latency histograms, and per-upstream circuit breaker states. Each metric family has one `HELP` and one `TYPE` line; counters use the counter type.
 
 These endpoints are suitable for liveness/readiness checks and scraping in containers or process managers. Cache stats and metrics are intended for low-frequency monitoring, not per-request polling.
 
