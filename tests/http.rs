@@ -243,6 +243,13 @@ async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     assert_eq!(body(repaired).await, "artifact-body");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
+    // Access counters are buffered; reading statistics flushes them.
+    assert_eq!(
+        request(&app, Method::GET, "/api/v1/cache/stats")
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let record = database
         .get("com/example/demo/1.0/demo-1.0.jar")
         .await

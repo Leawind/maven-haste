@@ -280,6 +280,21 @@ impl Database {
         .await
     }
 
+    /// Adds a batch of request counters to the paths that still have records.
+    pub async fn record_hits(&self, hits: Vec<(String, u64, i64)>) -> Result<(), AppError> {
+        if hits.is_empty() {
+            return Ok(());
+        }
+        self.with_connection(move |connection| {
+            let transaction = connection.transaction()?;
+            for (path, count, timestamp) in hits {
+                transaction.record_hits(&path, count as i64, timestamp)?;
+            }
+            transaction.commit()
+        })
+        .await
+    }
+
     pub async fn records_by_access(&self) -> Result<Vec<ArtifactRecord>, AppError> {
         self.with_connection(|connection| {
             let mut records = Vec::new();

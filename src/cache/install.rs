@@ -4,8 +4,9 @@ use std::io::ErrorKind;
 use tokio::fs;
 
 use crate::cache::io::{
-    cleanup_prepared, hash_file, internal, is_timestamp_fresh, lock_objects, object_path,
-    recorded_file_path, relative_file_path, remove_empty_parents, remove_file_if_exists,
+    DigestAlgorithm, cleanup_prepared, hash_file_with, internal, is_timestamp_fresh, lock_objects,
+    object_path, recorded_file_path, relative_file_path, remove_empty_parents,
+    remove_file_if_exists,
 };
 use crate::cache::types::PreparedFile;
 use crate::cache::{CacheFailure, RemovalStats};
@@ -86,9 +87,9 @@ impl crate::cache::CacheManager {
             })?;
             // Existing objects are reusable only if their actual bytes still
             // match. Never overwrite a valid object held by an old response.
-            if hash_file(&final_path)
+            if hash_file_with(&final_path, DigestAlgorithm::Sha256)
                 .await
-                .is_ok_and(|(size, _, actual, _)| {
+                .is_ok_and(|(size, actual)| {
                     actual == hash && size == file.record.file_size.max(0) as u64
                 })
             {
@@ -256,10 +257,12 @@ impl crate::cache::CacheManager {
                     .sha256
                     .as_deref()
                     .and_then(|hash| object_path(&self.inner.storage.root, hash))
-                && hash_file(&object).await.is_ok_and(|(size, _, hash, _)| {
-                    Some(hash.as_str()) == record.sha256.as_deref()
-                        && size == record.file_size.max(0) as u64
-                })
+                && hash_file_with(&object, DigestAlgorithm::Sha256)
+                    .await
+                    .is_ok_and(|(size, hash)| {
+                        Some(hash.as_str()) == record.sha256.as_deref()
+                            && size == record.file_size.max(0) as u64
+                    })
             {
                 remove_file_if_exists(&legacy).await.map_err(internal)?;
                 remove_empty_parents(legacy.parent(), &self.inner.storage.root).await;

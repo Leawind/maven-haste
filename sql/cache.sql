@@ -132,6 +132,16 @@ UPDATE artifacts SET last_refresh_attempt = :timestamp WHERE path = :path
 UPDATE artifacts SET request_count = request_count + 1, last_accessed = :timestamp WHERE path = :path
 /
 
+-- name: record_hits!
+--
+-- Adds a batch of request counts and refreshes the access timestamps.
+--
+-- param: path: &str
+-- param: count: i64
+-- param: timestamp: i64
+UPDATE artifacts SET request_count = request_count + :count, last_accessed = :timestamp WHERE path = :path
+/
+
 -- name: records_by_access?
 --
 -- Returns all artifact records ordered by least recently accessed.

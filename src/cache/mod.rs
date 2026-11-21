@@ -5,10 +5,10 @@ mod maintain;
 mod serve;
 mod types;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -31,6 +31,16 @@ type Flight = OnceCell<Result<DownloadOutcome, CacheFailure>>;
 /// another process, so collection leaves them for a later pass.
 const OBJECT_GRACE: Duration = Duration::from_secs(60 * 60);
 
+/// Access counters are batched in memory and written to SQLite after this many
+/// hits, keeping the cache-hit path off the database write lock.
+const HIT_FLUSH_THRESHOLD: usize = 128;
+
+#[derive(Default)]
+struct PendingHit {
+    count: u64,
+    last_accessed: i64,
+}
+
 #[derive(Clone)]
 pub struct CacheManager {
     inner: Arc<CacheInner>,
@@ -48,6 +58,8 @@ struct CacheInner {
     serves: ServeRegistry,
     served_objects: ServeRegistry,
     object_grace: Duration,
+    pending_hits: Mutex<HashMap<String, PendingHit>>,
+    pending_hit_ops: AtomicUsize,
     lifecycle: RwLock<()>,
     requests: AtomicU64,
     hits: AtomicU64,
@@ -182,6 +194,8 @@ impl CacheManager {
                 serves: ServeRegistry::default(),
                 served_objects: ServeRegistry::default(),
                 object_grace,
+                pending_hits: Mutex::new(HashMap::new()),
+                pending_hit_ops: AtomicUsize::new(0),
                 lifecycle: RwLock::new(()),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
@@ -217,6 +231,7 @@ impl CacheManager {
     }
 
     pub async fn stats(&self) -> Result<CacheStats, CacheFailure> {
+        self.flush_hits().await;
         let database = self.inner.database.stats().await.map_err(internal)?;
         let requests = self.inner.requests.load(Ordering::Relaxed);
         let hits = self.inner.hits.load(Ordering::Relaxed);
@@ -237,6 +252,29 @@ impl CacheManager {
             max_size: self.inner.config.max_size,
             upstreams: self.inner.upstream.statuses(),
         })
+    }
+
+    /// Writes pending access counters to the database. Called after enough
+    /// hits accumulate and before statistics are read.
+    pub(crate) async fn flush_hits(&self) {
+        let hits = {
+            let mut pending = self
+                .inner
+                .pending_hits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.inner.pending_hit_ops.store(0, Ordering::Relaxed);
+            if pending.is_empty() {
+                return;
+            }
+            pending
+                .drain()
+                .map(|(path, hit)| (path, hit.count, hit.last_accessed))
+                .collect::<Vec<_>>()
+        };
+        if let Err(error) = self.inner.database.record_hits(hits).await {
+            tracing::warn!(%error, "failed to record cached-access statistics");
+        }
     }
 }
 
@@ -623,6 +661,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batches_access_updates_until_flush() {
+        let directory = TempDir::new().unwrap();
+        let (cache, database) = test_cache(&directory, None).await;
+        add_record(
+            &cache,
+            &database,
+            "com/example/demo/1.0/demo-1.0.jar",
+            b"cached",
+            1,
+            "test",
+        )
+        .await;
+        let request =
+            MavenPath::parse("/maven/com/example/demo/1.0/demo-1.0.jar", "/maven").unwrap();
+
+        cache.get(&request).await.unwrap();
+        cache.get(&request).await.unwrap();
+
+        assert_eq!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .unwrap()
+                .request_count,
+            0,
+            "access counters are buffered"
+        );
+        cache.flush_hits().await;
+        assert_eq!(
+            database
+                .get("com/example/demo/1.0/demo-1.0.jar")
+                .await
+                .unwrap()
+                .unwrap()
+                .request_count,
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn serves_cached_entries_when_repository_writes_are_disabled() {
         let directory = TempDir::new().unwrap();
         let (cache, database) =
@@ -671,6 +750,7 @@ mod tests {
             MavenPath::parse("/maven/com/example/demo/1.0/demo-1.0.jar", "/maven").unwrap();
         cache.get(&request).await.unwrap();
         cache.get(&request).await.unwrap();
+        cache.flush_hits().await;
 
         let record = database
             .get("com/example/demo/1.0/demo-1.0.jar")

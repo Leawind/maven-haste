@@ -5,9 +5,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::cache::CacheFailure;
 use crate::cache::io::{
-    StreamFailure, cleanup_downloads, cleanup_prepared, hash_open_file, header_string, internal,
-    remove_file_if_exists, stream_response_to_file, temporary_path, to_hex, unix_timestamp,
-    write_temporary,
+    DigestAlgorithm, StreamFailure, cleanup_downloads, cleanup_prepared, hash_open_file_with,
+    header_string, internal, remove_file_if_exists, stream_response_to_file, temporary_path,
+    to_hex, unix_timestamp, write_temporary,
 };
 use crate::cache::types::{
     ChecksumPrefetch, DownloadOutcome, DownloadedMain, FetchedChecksum, PassthroughFile,
@@ -652,17 +652,19 @@ impl crate::cache::CacheManager {
         upstream: &str,
         source: &mut tokio::fs::File,
     ) -> Result<PreparedFile, CacheFailure> {
-        let (_, sha1, sha256, sha512) = hash_open_file(source).await.map_err(internal)?;
-        let expected = match request.file_type.as_str() {
-            "sha1" => sha1,
-            "sha256" => sha256,
-            "sha512" => sha512,
+        let algorithm = match request.file_type.as_str() {
+            "sha1" => DigestAlgorithm::Sha1,
+            "sha256" => DigestAlgorithm::Sha256,
+            "sha512" => DigestAlgorithm::Sha512,
             extension => {
                 return Err(CacheFailure::Internal(format!(
                     "cannot generate unsupported checksum type {extension}"
                 )));
             }
         };
+        let (_, expected) = hash_open_file_with(source, algorithm)
+            .await
+            .map_err(internal)?;
         let content = format!("{expected}\n");
         let temporary = temporary_path(self.inner.storage.tmp_dir());
         write_temporary(&temporary, content.as_bytes()).await?;

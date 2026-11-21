@@ -329,6 +329,50 @@ pub(crate) async fn cleanup_downloads(downloads: &[DownloadedMain]) {
     }
 }
 
+/// Stored digest used to verify a cached file. Only the strongest digest on
+/// record is computed during a cache hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DigestAlgorithm {
+    Sha1,
+    Sha256,
+    Sha512,
+}
+
+pub(crate) async fn hash_file_with(
+    path: &Path,
+    algorithm: DigestAlgorithm,
+) -> Result<(u64, String), std::io::Error> {
+    let mut file = fs::File::open(path).await?;
+    hash_open_file_with(&mut file, algorithm).await
+}
+
+pub(crate) async fn hash_open_file_with(
+    file: &mut fs::File,
+    algorithm: DigestAlgorithm,
+) -> Result<(u64, String), std::io::Error> {
+    match algorithm {
+        DigestAlgorithm::Sha1 => hash_with::<Sha1>(file).await,
+        DigestAlgorithm::Sha256 => hash_with::<Sha256>(file).await,
+        DigestAlgorithm::Sha512 => hash_with::<Sha512>(file).await,
+    }
+}
+
+async fn hash_with<D: sha2::Digest>(file: &mut fs::File) -> Result<(u64, String), std::io::Error> {
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    let mut digest = D::new();
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        digest.update(&buffer[..read]);
+    }
+    Ok((size, to_hex(&digest.finalize())))
+}
+
 pub(crate) async fn hash_file(
     path: &Path,
 ) -> Result<(u64, String, String, String), std::io::Error> {

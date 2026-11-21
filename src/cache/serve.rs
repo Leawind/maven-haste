@@ -11,9 +11,13 @@ use tokio::fs;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::OnceCell;
 
-use crate::cache::io::{hash_open_file, internal, is_fresh, recorded_file_path, unix_timestamp};
+use crate::cache::io::{
+    DigestAlgorithm, hash_open_file_with, internal, is_fresh, recorded_file_path, unix_timestamp,
+};
 use crate::cache::types::DownloadOutcome;
-use crate::cache::{CacheFailure, CacheManager, CacheStatus, CachedArtifact, Flight};
+use crate::cache::{
+    CacheFailure, CacheManager, CacheStatus, CachedArtifact, Flight, HIT_FLUSH_THRESHOLD,
+};
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 
@@ -106,17 +110,23 @@ impl CacheManager {
     }
 
     async fn record_hit(&self, request: &MavenPath) {
-        if let Err(error) = self
-            .inner
-            .database
-            .record_hit(request.relative(), unix_timestamp())
-            .await
-        {
-            tracing::warn!(
-                %error,
-                path = request.relative(),
-                "failed to record the request hit"
-            );
+        let should_flush = {
+            let mut pending = self
+                .inner
+                .pending_hits
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let hit = pending.entry(request.relative().to_owned()).or_default();
+            hit.count = hit.count.saturating_add(1);
+            hit.last_accessed = unix_timestamp();
+            self.inner
+                .pending_hit_ops
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1)
+                >= HIT_FLUSH_THRESHOLD
+        };
+        if should_flush {
+            self.flush_hits().await;
         }
     }
 
@@ -156,15 +166,21 @@ impl CacheManager {
                     );
                     return Ok(None);
                 }
-                let (size, sha1, sha256, _) = hash_open_file(&mut file).await.map_err(internal)?;
-                let trusted = size == expected
-                    && match record.sha256.as_deref() {
-                        Some(expected) => expected == sha256,
-                        None => record
-                            .sha1
-                            .as_deref()
-                            .is_some_and(|expected| expected == sha1),
-                    };
+                let trusted = match record.sha256.as_deref() {
+                    Some(expected_hash) => hash_open_file_with(&mut file, DigestAlgorithm::Sha256)
+                        .await
+                        .map_err(internal)
+                        .is_ok_and(|(size, hash)| size == expected && hash == expected_hash),
+                    None => match record.sha1.as_deref() {
+                        Some(expected_hash) => {
+                            hash_open_file_with(&mut file, DigestAlgorithm::Sha1)
+                                .await
+                                .map_err(internal)
+                                .is_ok_and(|(size, hash)| size == expected && hash == expected_hash)
+                        }
+                        None => true,
+                    },
+                };
                 if !trusted {
                     tracing::warn!(
                         path = request.relative(),
