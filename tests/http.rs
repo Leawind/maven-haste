@@ -1041,6 +1041,98 @@ async fn conditional_refresh_accepts_not_modified() {
 }
 
 #[tokio::test]
+async fn refreshing_a_generated_checksum_records_the_checksum_attempt() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                if is_checksum_uri(&uri) {
+                    return error_response(StatusCode::NOT_FOUND, "missing checksum");
+                }
+                calls.fetch_add(1, Ordering::SeqCst);
+                if headers.get(IF_NONE_MATCH).is_some() {
+                    return error_response(StatusCode::NOT_MODIFIED, "");
+                }
+                let mut response = Response::new(Body::from("unchanged"));
+                response
+                    .headers_mut()
+                    .insert(ETAG, HeaderValue::from_static("\"metadata-tag\""));
+                response
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let cache_config = CacheConfig {
+        metadata_ttl: Duration::from_secs(1),
+        ..CacheConfig::default()
+    };
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        cache_config,
+        UpstreamConfig::default(),
+    )
+    .await;
+    let checksum = "/maven/com/example/demo/maven-metadata.xml.sha1";
+    let record_path = "com/example/demo/maven-metadata.xml.sha1";
+
+    assert_eq!(
+        body(request(&app, Method::GET, checksum).await)
+            .await
+            .lines()
+            .count(),
+        1
+    );
+    let initial = database
+        .get(record_path)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_refresh_attempt
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    assert_eq!(
+        request(&app, Method::GET, checksum).await.status(),
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let updated = database
+                .get(record_path)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_refresh_attempt
+                .unwrap();
+            if updated > initial {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the checksum record must record the source refresh attempt");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        request(&app, Method::GET, checksum).await.status(),
+        StatusCode::OK
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "a refreshed checksum must not request the source again immediately"
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn caches_not_found_only_for_mutable_files() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);

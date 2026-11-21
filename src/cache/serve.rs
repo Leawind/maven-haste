@@ -268,6 +268,23 @@ impl CacheManager {
                     );
                 }
             }
+            // A generated checksum is refreshed through its source file. When
+            // that refresh completes without a new bundle (304, 404, or an
+            // error), the checksum record must still record the attempt;
+            // otherwise every later request would trigger another refresh.
+            if key != request.relative()
+                && let Err(error) = cache
+                    .inner
+                    .database
+                    .touch_refresh_attempt(request.relative(), unix_timestamp())
+                    .await
+            {
+                tracing::error!(
+                    path = request.relative(),
+                    error = %error,
+                    "failed to record the checksum refresh attempt"
+                );
+            }
             cache.inner.refreshes.remove(&key);
         });
     }
