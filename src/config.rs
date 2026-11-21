@@ -622,6 +622,10 @@ pub struct CacheConfig {
     #[serde(with = "humantime_serde")]
     #[schemars(schema_with = "crate::config::duration_schema")]
     pub negative_ttl: Duration,
+    /// Also remember confirmed 404s for immutable artifacts, not only mutable
+    /// metadata and snapshot aliases. Defaults to `false`.
+    #[serde(default)]
+    pub negative_cache_permanent: bool,
     /// Interval between background maintenance passes that enforce the cache
     /// size limit and purge expired negative entries.
     #[serde(with = "humantime_serde")]
@@ -635,6 +639,7 @@ impl Default for CacheConfig {
             max_size: None,
             metadata_ttl: Duration::from_secs(5 * 60),
             negative_ttl: Duration::from_secs(5 * 60),
+            negative_cache_permanent: false,
             maintenance_interval: Duration::from_secs(60),
         }
     }

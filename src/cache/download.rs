@@ -191,7 +191,9 @@ impl crate::cache::CacheManager {
         };
         let mut excluded = HashSet::new();
         let mut upstream_failure = false;
-        let mut negative = if request.policy() == CachePolicy::Mutable {
+        let negative_enabled =
+            request.policy() == CachePolicy::Mutable || self.inner.config.negative_cache_permanent;
+        let mut negative = if negative_enabled {
             self.fresh_negative_entries(request.relative()).await?
         } else {
             HashSet::new()
@@ -217,7 +219,7 @@ impl crate::cache::CacheManager {
                     .await
             };
 
-            if request.policy() == CachePolicy::Mutable && !outcome.not_found.is_empty() {
+            if negative_enabled && !outcome.not_found.is_empty() {
                 self.inner
                     .database
                     .upsert_negative_entries(
@@ -236,7 +238,7 @@ impl crate::cache::CacheManager {
                     repository_id,
                     response,
                 } => {
-                    if request.policy() == CachePolicy::Mutable {
+                    if negative_enabled {
                         self.inner
                             .database
                             .delete_negative_entry(request.relative(), &repository_id)
@@ -275,7 +277,7 @@ impl crate::cache::CacheManager {
                     }
                 }
                 FetchResult::NotModified { repository_id } => {
-                    if request.policy() == CachePolicy::Mutable {
+                    if negative_enabled {
                         self.inner
                             .database
                             .delete_negative_entry(request.relative(), &repository_id)

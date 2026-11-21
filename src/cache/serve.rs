@@ -55,6 +55,12 @@ impl CacheManager {
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(cached);
             }
+        } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
+            self.inner.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
+        }
+
+        if self.negative_caching_enabled(request.policy()) {
             let negative = self.fresh_negative_entries(request.relative()).await?;
             if self
                 .inner
@@ -66,9 +72,6 @@ impl CacheManager {
                 self.log_not_found(request);
                 return Err(CacheFailure::NotFound);
             }
-        } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
-            self.inner.hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached);
         }
 
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +117,10 @@ impl CacheManager {
         }
     }
 
+    fn negative_caching_enabled(&self, policy: CachePolicy) -> bool {
+        policy == CachePolicy::Mutable || self.inner.config.negative_cache_permanent
+    }
+
     /// Resolves a client HEAD request. Cached artifacts go through `get`;
     /// uncached artifacts are probed with an upstream HEAD so a HEAD request
     /// never downloads a body merely to report its headers.
@@ -132,12 +139,13 @@ impl CacheManager {
         }
 
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        let negative = if request.policy() == CachePolicy::Mutable {
+        let negative_enabled = self.negative_caching_enabled(request.policy());
+        let negative = if negative_enabled {
             self.fresh_negative_entries(request.relative()).await?
         } else {
             HashSet::new()
         };
-        if request.policy() == CachePolicy::Mutable
+        if negative_enabled
             && self
                 .inner
                 .upstream
@@ -158,7 +166,7 @@ impl CacheManager {
             .upstream
             .head(request.relative(), &HashSet::new(), &negative)
             .await;
-        if request.policy() == CachePolicy::Mutable && !outcome.not_found.is_empty() {
+        if negative_enabled && !outcome.not_found.is_empty() {
             self.inner
                 .database
                 .upsert_negative_entries(
@@ -175,7 +183,7 @@ impl CacheManager {
                 repository_id,
                 response,
             } => {
-                if request.policy() == CachePolicy::Mutable {
+                if negative_enabled {
                     self.inner
                         .database
                         .delete_negative_entry(request.relative(), &repository_id)

@@ -1325,6 +1325,51 @@ async fn caches_not_found_only_for_mutable_files() {
 }
 
 #[tokio::test]
+async fn optionally_caches_not_found_for_permanent_files() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(move || {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                error_response(StatusCode::NOT_FOUND, "missing")
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig {
+            negative_cache_permanent: true,
+            ..CacheConfig::default()
+        },
+        UpstreamConfig::default(),
+    )
+    .await;
+
+    for _ in 0..2 {
+        assert_eq!(
+            request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        database
+            .negative_entries("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn newly_configured_upstream_is_tried_despite_existing_negative_entry() {
     let missing_calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&missing_calls);

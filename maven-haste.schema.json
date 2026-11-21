@@ -30,6 +30,11 @@
           ],
           "type": "string"
         },
+        "negative_cache_permanent": {
+          "default": false,
+          "description": "Also remember confirmed 404s for immutable artifacts, not only mutable\nmetadata and snapshot aliases. Defaults to `false`.",
+          "type": "boolean"
+        },
         "negative_ttl": {
           "default": "5m",
           "description": "How long a confirmed 404 is remembered for one path in one upstream\nrepository.",
@@ -316,6 +321,7 @@
         "maintenance_interval": "1m",
         "max_size": null,
         "metadata_ttl": "5m",
+        "negative_cache_permanent": false,
         "negative_ttl": "5m"
       }
     },
