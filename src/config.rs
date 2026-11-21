@@ -297,6 +297,19 @@ where
     })
 }
 
+/// Renders a URL without credential material, for logs and diagnostics.
+pub fn redact_url(url: &Url) -> String {
+    if url.username().is_empty() && url.password().is_none() {
+        return url.to_string();
+    }
+    let mut redacted = url.clone();
+    let _ = redacted.set_username("***");
+    if redacted.password().is_some() {
+        let _ = redacted.set_password(Some("***"));
+    }
+    redacted.to_string()
+}
+
 /// Writes one proxy as a bare URL and several proxies as an ordered list.
 fn serialize_proxy_list<S>(proxies: &[Url], serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -747,6 +760,21 @@ fn default_true() -> bool {
 }
 
 impl Config {
+    /// Returns a copy safe to print or log: every secret-bearing URL loses
+    /// its credential material.
+    pub fn redacted(&self) -> Self {
+        let mut redacted = self.clone();
+        for proxy in &mut redacted.upstream.proxy {
+            if !proxy.username().is_empty() || proxy.password().is_some() {
+                let _ = proxy.set_username("***");
+                if proxy.password().is_some() {
+                    let _ = proxy.set_password(Some("***"));
+                }
+            }
+        }
+        redacted
+    }
+
     pub fn load(cli: &Cli) -> Result<LoadedConfig, ConfigError> {
         fn resolve_paths(
             storage: &mut StorageConfig,
@@ -1829,6 +1857,39 @@ use_proxy = true
             vec![Url::parse("http://user:password@127.0.0.1:7890").unwrap()]
         );
         assert_eq!(loaded.config.repositories[0].use_proxy, Some(true));
+    }
+
+    #[test]
+    fn redacts_proxy_credentials_in_printed_configuration() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+proxy = "http://user:password@127.0.0.1:7890"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+        let loaded = Config::load(&cli(&path)).unwrap();
+
+        let serialized = toml::to_string_pretty(&loaded.config.redacted()).unwrap();
+
+        assert!(!serialized.contains("password"));
+        assert!(serialized.contains("***:***@127.0.0.1:7890"));
+        assert_eq!(
+            redact_url(&Url::parse("http://user:secret@host.example:8080/").unwrap()),
+            "http://***:***@host.example:8080/"
+        );
+        assert_eq!(
+            redact_url(&Url::parse("http://host.example:8080/").unwrap()),
+            "http://host.example:8080/"
+        );
     }
 
     #[test]

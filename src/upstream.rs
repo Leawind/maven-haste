@@ -435,7 +435,7 @@ impl UpstreamClient {
         proxy.circuit.record_failure(PROXY_CIRCUIT);
         if !proxy.circuit.is_open(PROXY_CIRCUIT) {
             tracing::debug!(
-                proxy = %proxy.url,
+                proxy = %crate::config::redact_url(&proxy.url),
                 error = %describe_error(error),
                 "upstream proxy request failed; trying the next connection path"
             );
@@ -443,7 +443,7 @@ impl UpstreamClient {
         }
         if !proxy.unreachable.swap(true, Ordering::Relaxed) {
             tracing::warn!(
-                proxy = %proxy.url,
+                proxy = %crate::config::redact_url(&proxy.url),
                 error = %describe_error(error),
                 "upstream proxy is unreachable; skipping it until it recovers"
             );
@@ -455,7 +455,7 @@ impl UpstreamClient {
         proxy.circuit.record_success(PROXY_CIRCUIT);
         if proxy.unreachable.swap(false, Ordering::Relaxed) {
             tracing::info!(
-                proxy = %proxy.url,
+                proxy = %crate::config::redact_url(&proxy.url),
                 "upstream proxy is reachable again; routing requests through it"
             );
         }

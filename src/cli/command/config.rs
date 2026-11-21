@@ -84,7 +84,7 @@ impl ConfigCommand {
                     eprintln!("warning: {warning}");
                 }
 
-                print!("{}", toml::to_string_pretty(&loaded.config)?);
+                print!("{}", toml::to_string_pretty(&loaded.config.redacted())?);
                 Ok(())
             }
             ConfigCommand::Example { format } => {
