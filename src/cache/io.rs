@@ -394,6 +394,9 @@ pub(crate) async fn recorded_file_path(
 pub(crate) async fn lock_objects(root: &Path) -> Result<std::fs::File, CacheFailure> {
     let path = root.join(".maven-haste/objects.lock");
     tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -508,4 +511,20 @@ pub(crate) fn unix_timestamp() -> i64 {
         .unwrap_or_default()
         .as_secs();
     i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn creates_the_internal_directory_before_locking_objects() {
+        let directory = TempDir::new().unwrap();
+
+        let _lock = lock_objects(directory.path()).await.unwrap();
+
+        assert!(directory.path().join(".maven-haste/objects.lock").is_file());
+    }
 }

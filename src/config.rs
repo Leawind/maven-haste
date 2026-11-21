@@ -580,6 +580,15 @@ impl StorageConfig {
             db_path: Some(internal.join("cache.db")),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_paths(root: PathBuf, tmp_dir: PathBuf, db_path: PathBuf) -> Self {
+        Self {
+            root,
+            tmp_dir: Some(tmp_dir),
+            db_path: Some(db_path),
+        }
+    }
 }
 
 /// Optional cache settings; omit this table to use the defaults below.
