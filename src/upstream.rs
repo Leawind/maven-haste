@@ -807,7 +807,7 @@ impl UpstreamClient {
             let permit = self.scheduler.acquire(&repository.id, priority).await;
             let started = Instant::now();
             let response = self.send_request(repository, &url, extras, method).await;
-            crate::metrics::UPSTREAM_DURATION.observe(started.elapsed());
+            crate::metrics::UPSTREAM_DURATION.observe(circuit, started.elapsed());
             match response {
                 Ok(response)
                     if response.status() == StatusCode::OK

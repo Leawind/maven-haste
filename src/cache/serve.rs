@@ -55,10 +55,12 @@ impl CacheManager {
                     self.trigger_refresh(request.clone(), cached.record.clone());
                 }
                 self.inner.hits.fetch_add(1, Ordering::Relaxed);
+                self.count_repository_request(&cached.record.upstream, true);
                 return Ok(cached);
             }
         } else if let Some(cached) = self.positive_cache(request, record.as_ref()).await? {
             self.inner.hits.fetch_add(1, Ordering::Relaxed);
+            self.count_repository_request(&cached.record.upstream, true);
             return Ok(cached);
         }
 
@@ -97,10 +99,12 @@ impl CacheManager {
                         CacheFailure::Internal("download completed without a cache record".into())
                     })?;
                 cached.status = CacheStatus::Miss;
+                self.count_repository_request(&cached.record.upstream, false);
                 Ok(cached)
             }
             DownloadOutcome::Passthrough(prepared) => {
                 let path = prepared.temporary.path().to_path_buf();
+                self.count_repository_request(&prepared.record.upstream, false);
                 Ok(CachedArtifact {
                     file_path: path,
                     file: Some(
@@ -202,6 +206,7 @@ impl CacheManager {
                 };
                 drop(response);
                 runtime.upstream.record_body_success(&origin.circuit);
+                self.count_repository_request(&origin.repository, false);
                 Ok(HeadOutcome::Upstream(head))
             }
             FetchResult::NotModified { .. } => Ok(HeadOutcome::Gateway),

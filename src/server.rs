@@ -30,6 +30,7 @@ use crate::request_path::{CachePolicy, MavenPath};
 
 pub const HEALTH_PATH: &str = "/api/v1/health";
 const CACHE_STATS_PATH: &str = "/api/v1/cache/stats";
+const CONFIG_RELOAD_PATH: &str = "/api/v1/config/reload";
 const METRICS_PATH: &str = "/api/v1/metrics";
 
 static BYTES_SERVED: AtomicU64 = AtomicU64::new(0);
@@ -38,6 +39,7 @@ static INTERRUPTED_REQUESTS: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 struct AppState {
     cache: CacheManager,
+    reload: crate::reload::ReloadTracker,
     base_path: String,
 }
 
@@ -45,9 +47,10 @@ pub async fn serve(
     listener: TcpListener,
     base_path: String,
     cache: CacheManager,
+    reload: crate::reload::ReloadTracker,
 ) -> Result<(), AppError> {
     let started = Instant::now();
-    let app = router(base_path, cache.clone());
+    let app = router(base_path, cache.clone(), reload);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -87,7 +90,11 @@ pub async fn bind(bind: std::net::SocketAddr) -> Result<TcpListener, AppError> {
         .map_err(|error| AppError::Runtime(format!("failed to bind {bind}: {error}")))
 }
 
-pub fn router(base_path: String, cache: CacheManager) -> Router {
+pub fn router(
+    base_path: String,
+    cache: CacheManager,
+    reload: crate::reload::ReloadTracker,
+) -> Router {
     let route = if base_path == "/" {
         "/{*path}".to_owned()
     } else {
@@ -96,9 +103,14 @@ pub fn router(base_path: String, cache: CacheManager) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(CACHE_STATS_PATH, get(cache_stats))
+        .route(CONFIG_RELOAD_PATH, get(config_reload))
         .route(METRICS_PATH, get(metrics))
         .route(&route, get(artifact).head(artifact))
-        .with_state(AppState { cache, base_path })
+        .with_state(AppState {
+            cache,
+            reload,
+            base_path,
+        })
 }
 
 async fn health(State(state): State<AppState>) -> Response<Body> {
@@ -109,6 +121,10 @@ async fn health(State(state): State<AppState>) -> Response<Body> {
             error_response(StatusCode::SERVICE_UNAVAILABLE, "unhealthy")
         }
     }
+}
+
+async fn config_reload(State(state): State<AppState>) -> Response<Body> {
+    Json(state.reload.status()).into_response()
 }
 
 async fn metrics(State(state): State<AppState>) -> Response<Body> {
@@ -122,6 +138,7 @@ async fn metrics(State(state): State<AppState>) -> Response<Body> {
                 interrupted,
                 &crate::metrics::RESPONSE_DURATION.snapshot(),
                 &crate::metrics::UPSTREAM_DURATION.snapshot(),
+                &state.reload.status(),
             );
             Response::builder()
                 .header(

@@ -1,7 +1,10 @@
 //! Prometheus text exposition of cache and upstream statistics.
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use dashmap::DashMap;
 
 use crate::cache::CacheStats;
 
@@ -13,8 +16,9 @@ const DURATION_BUCKETS: [f64; 12] = [
 /// Latency histogram of responses served to clients.
 pub static RESPONSE_DURATION: Histogram = Histogram::new();
 
-/// Latency histogram of upstream requests, from connect to response headers.
-pub static UPSTREAM_DURATION: Histogram = Histogram::new();
+/// Latency histogram of upstream requests, from connect to response headers,
+/// one series per repository upstream URL.
+pub static UPSTREAM_DURATION: LazyLock<LabeledHistogram> = LazyLock::new(LabeledHistogram::new);
 
 pub struct Histogram {
     buckets: [AtomicU64; DURATION_BUCKETS.len()],
@@ -71,6 +75,43 @@ impl Histogram {
     }
 }
 
+/// One [`Histogram`] per key, for example per repository upstream URL.
+pub struct LabeledHistogram {
+    histograms: DashMap<String, Histogram>,
+}
+
+impl Default for LabeledHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LabeledHistogram {
+    pub fn new() -> Self {
+        Self {
+            histograms: DashMap::new(),
+        }
+    }
+
+    pub fn observe(&self, key: &str, duration: Duration) {
+        self.histograms
+            .entry(key.to_owned())
+            .or_default()
+            .observe(duration);
+    }
+
+    /// Entries sorted by key so repeated renders are stable.
+    pub fn snapshot(&self) -> Vec<(String, HistogramSnapshot)> {
+        let mut series: Vec<_> = self
+            .histograms
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().snapshot()))
+            .collect();
+        series.sort_by(|left, right| left.0.cmp(&right.0));
+        series
+    }
+}
+
 /// Renders the statistics in Prometheus text format 0.0.4. Every metric family
 /// writes exactly one HELP and TYPE line before its samples, as the format
 /// requires.
@@ -79,7 +120,8 @@ pub fn render(
     bytes_served: u64,
     interrupted_requests: u64,
     response_duration: &HistogramSnapshot,
-    upstream_duration: &HistogramSnapshot,
+    upstream_duration: &[(String, HistogramSnapshot)],
+    reload_status: &crate::reload::ReloadStatus,
 ) -> String {
     let mut output = String::new();
     push_family(
@@ -195,13 +237,48 @@ pub fn render(
         &[(Vec::new(), stats.hit_rate)],
     );
 
+    let repository_hit_samples = stats
+        .repositories
+        .iter()
+        .map(|repository| {
+            (
+                vec![("repository", repository.repository.as_str())],
+                repository.hits as f64,
+            )
+        })
+        .collect::<Vec<_>>();
+    push_family(
+        &mut output,
+        "maven_haste_repository_cache_hits_total",
+        "Requests served from this repository's cached content.",
+        MetricType::Counter,
+        &repository_hit_samples,
+    );
+    let repository_miss_samples = stats
+        .repositories
+        .iter()
+        .map(|repository| {
+            (
+                vec![("repository", repository.repository.as_str())],
+                repository.misses as f64,
+            )
+        })
+        .collect::<Vec<_>>();
+    push_family(
+        &mut output,
+        "maven_haste_repository_cache_misses_total",
+        "Requests downloaded from this repository.",
+        MetricType::Counter,
+        &repository_miss_samples,
+    );
+
     push_histogram(
         &mut output,
         "maven_haste_response_duration_seconds",
         "Time spent serving one client request.",
         response_duration,
     );
-    push_histogram(
+    push_labeled_histogram(
         &mut output,
         "maven_haste_upstream_request_duration_seconds",
         "Time from starting an upstream request until its headers arrive.",
@@ -245,6 +322,41 @@ pub fn render(
         MetricType::Gauge,
         &failure_samples,
     );
+
+    push_family(
+        &mut output,
+        "maven_haste_config_reloads_total",
+        "Configuration reload attempts since start-up.",
+        MetricType::Counter,
+        &[
+            (
+                vec![("status", "ok")],
+                reload_status.successful_reloads as f64,
+            ),
+            (
+                vec![("status", "failed")],
+                reload_status.failed_reloads as f64,
+            ),
+        ],
+    );
+    if let Some(success) = &reload_status.last_success {
+        push_family(
+            &mut output,
+            "maven_haste_config_last_reload_success_timestamp_seconds",
+            "Unix timestamp of the last successful configuration reload.",
+            MetricType::Gauge,
+            &[(Vec::new(), success.at as f64)],
+        );
+    }
+    if let Some(failure) = &reload_status.last_failure {
+        push_family(
+            &mut output,
+            "maven_haste_config_last_reload_failure_timestamp_seconds",
+            "Unix timestamp of the last failed configuration reload.",
+            MetricType::Gauge,
+            &[(Vec::new(), failure.at as f64)],
+        );
+    }
     output
 }
 
@@ -306,6 +418,25 @@ fn push_sample(output: &mut String, name: &str, labels: &[(&str, &str)], value: 
 }
 
 fn push_histogram(output: &mut String, name: &str, help: &str, snapshot: &HistogramSnapshot) {
+    push_histogram_header(output, name, help);
+    push_histogram_samples(output, name, &[], snapshot);
+}
+
+/// One histogram family whose every sample carries the same extra label, for
+/// example the repository of the upstream URL that was requested.
+fn push_labeled_histogram(
+    output: &mut String,
+    name: &str,
+    help: &str,
+    series: &[(String, HistogramSnapshot)],
+) {
+    push_histogram_header(output, name, help);
+    for (key, snapshot) in series {
+        push_histogram_samples(output, name, &[("repository", key.as_str())], snapshot);
+    }
+}
+
+fn push_histogram_header(output: &mut String, name: &str, help: &str) {
     output.push_str("# HELP ");
     output.push_str(name);
     output.push(' ');
@@ -314,25 +445,43 @@ fn push_histogram(output: &mut String, name: &str, help: &str, snapshot: &Histog
     output.push_str("# TYPE ");
     output.push_str(name);
     output.push_str(" histogram\n");
+}
+
+fn push_histogram_samples(
+    output: &mut String,
+    name: &str,
+    labels: &[(&str, &str)],
+    snapshot: &HistogramSnapshot,
+) {
     let mut cumulative = 0_u64;
     for (index, upper) in DURATION_BUCKETS.iter().enumerate() {
         cumulative = cumulative.saturating_add(snapshot.buckets.get(index).copied().unwrap_or(0));
         let le = format_metric_value(*upper);
+        let mut labels = labels.to_vec();
+        labels.push(("le", le.as_str()));
         push_sample(
             output,
             &format!("{name}_bucket"),
-            &[("le", le.as_str())],
+            &labels,
             cumulative as f64,
         );
     }
+    let mut labels = labels.to_vec();
+    labels.push(("le", "+Inf"));
     push_sample(
         output,
         &format!("{name}_bucket"),
-        &[("le", "+Inf")],
+        &labels,
         snapshot.count as f64,
     );
-    push_sample(output, &format!("{name}_sum"), &[], snapshot.sum);
-    push_sample(output, &format!("{name}_count"), &[], snapshot.count as f64);
+    labels.pop();
+    push_sample(output, &format!("{name}_sum"), &labels, snapshot.sum);
+    push_sample(
+        output,
+        &format!("{name}_count"),
+        &labels,
+        snapshot.count as f64,
+    );
 }
 
 /// Escapes the two characters the text format requires: backslash and the
@@ -355,6 +504,8 @@ fn format_metric_value(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::RepositoryStats;
+    use crate::reload::ReloadStatus;
     use crate::upstream::UpstreamStatus;
 
     fn stats() -> CacheStats {
@@ -372,6 +523,11 @@ mod tests {
             negative_hits: 1,
             hit_rate: 0.7,
             max_size: Some(4096),
+            repositories: vec![RepositoryStats {
+                repository: "central".into(),
+                hits: 5,
+                misses: 3,
+            }],
             upstreams: vec![
                 UpstreamStatus {
                     id: "central".into(),
@@ -400,13 +556,20 @@ mod tests {
             512,
             1,
             &response_duration.snapshot(),
-            &upstream_duration.snapshot(),
+            &[("central[0]".into(), upstream_duration.snapshot())],
+            &ReloadStatus::default(),
         );
         assert!(text.contains("maven_haste_cache_files 3\n"));
         assert!(text.contains("maven_haste_cache_bytes 1024\n"));
         assert!(text.contains("maven_haste_cache_max_bytes 4096\n"));
         assert!(text.contains("maven_haste_bytes_served_total 512\n"));
         assert!(text.contains("maven_haste_interrupted_requests_total 1\n"));
+        assert!(
+            text.contains("maven_haste_repository_cache_hits_total{repository=\"central\"} 5\n")
+        );
+        assert!(
+            text.contains("maven_haste_repository_cache_misses_total{repository=\"central\"} 3\n")
+        );
         assert!(text.contains(
             "maven_haste_upstream_circuit_state{repository=\"central\",state=\"open\"} 1\n"
         ));
@@ -414,7 +577,41 @@ mod tests {
             "maven_haste_upstream_circuit_state{repository=\"central\",state=\"closed\"} 0\n"
         ));
         assert!(text.contains("maven_haste_upstream_failures{repository=\"central\"} 3\n"));
+        assert!(text.contains(
+            "maven_haste_upstream_request_duration_seconds_count{repository=\"central[0]\"} 1\n"
+        ));
+        assert!(text.contains("maven_haste_config_reloads_total{status=\"ok\"} 0\n"));
+        assert!(text.contains("maven_haste_config_reloads_total{status=\"failed\"} 0\n"));
         assert!(text.contains("# TYPE maven_haste_requests_total counter\n"));
+    }
+
+    #[test]
+    fn reports_the_last_reload_timestamps_only_once_they_exist() {
+        let mut reload_status = ReloadStatus::default();
+        let text = render(
+            &stats(),
+            0,
+            0,
+            &HistogramSnapshot::default(),
+            &[],
+            &reload_status,
+        );
+        assert!(!text.contains("maven_haste_config_last_reload_success_timestamp_seconds"));
+        reload_status.last_success = Some(crate::reload::ReloadSuccess {
+            at: 1700000000,
+            repositories: 2,
+        });
+        let text = render(
+            &stats(),
+            0,
+            0,
+            &HistogramSnapshot::default(),
+            &[],
+            &reload_status,
+        );
+        assert!(
+            text.contains("maven_haste_config_last_reload_success_timestamp_seconds 1700000000\n")
+        );
     }
 
     #[test]
@@ -424,12 +621,17 @@ mod tests {
             0,
             0,
             &HistogramSnapshot::default(),
-            &HistogramSnapshot::default(),
+            &[],
+            &ReloadStatus::default(),
         );
         for family in [
             "maven_haste_upstream_circuit_state",
             "maven_haste_upstream_failures",
             "maven_haste_response_duration_seconds",
+            "maven_haste_upstream_request_duration_seconds",
+            "maven_haste_repository_cache_hits_total",
+            "maven_haste_repository_cache_misses_total",
+            "maven_haste_config_reloads_total",
         ] {
             assert_eq!(
                 text.matches(&format!("# TYPE {family} ")).count(),
@@ -454,12 +656,14 @@ mod tests {
         let text = render(
             &CacheStats {
                 upstreams: Vec::new(),
+                repositories: Vec::new(),
                 ..stats()
             },
             0,
             0,
             &snapshot,
-            &HistogramSnapshot::default(),
+            &[],
+            &ReloadStatus::default(),
         );
         assert!(text.contains("maven_haste_response_duration_seconds_bucket{le=\"0.025\"} 1\n"));
         assert!(text.contains("maven_haste_response_duration_seconds_bucket{le=\"2.5\"} 2\n"));

@@ -6,7 +6,7 @@ pub mod db;
 pub mod error;
 pub mod logging;
 pub mod metrics;
-mod reload;
+pub mod reload;
 pub mod request_path;
 pub mod routing;
 pub mod server;

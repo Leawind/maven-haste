@@ -4,8 +4,10 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tokio::task::JoinHandle;
 
 use crate::cache::CacheManager;
@@ -17,6 +19,74 @@ use crate::upstream::UpstreamClient;
 /// a replacement that preserves the timestamp but changes the length is still
 /// picked up.
 pub(crate) type Signature = Option<(SystemTime, u64)>;
+
+/// The outcome of the configuration reload attempts since start-up. Shared
+/// between the reload watcher and the endpoints that report it.
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct ReloadStatus {
+    pub successful_reloads: u64,
+    pub failed_reloads: u64,
+    pub last_success: Option<ReloadSuccess>,
+    pub last_failure: Option<ReloadFailure>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReloadSuccess {
+    /// Unix timestamp of the reload, in seconds.
+    pub at: i64,
+    pub repositories: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReloadFailure {
+    /// Unix timestamp of the reload attempt, in seconds.
+    pub at: i64,
+    pub error: String,
+}
+
+/// Records the outcome of every reload attempt. Cheap to clone; every holder
+/// sees the same state.
+#[derive(Clone, Default)]
+pub struct ReloadTracker {
+    state: Arc<Mutex<ReloadStatus>>,
+}
+
+impl ReloadTracker {
+    pub fn record_success(&self, repositories: usize) {
+        let mut state = self.lock();
+        state.successful_reloads += 1;
+        state.last_success = Some(ReloadSuccess {
+            at: unix_timestamp(),
+            repositories,
+        });
+    }
+
+    pub fn record_failure(&self, error: &str) {
+        let mut state = self.lock();
+        state.failed_reloads += 1;
+        state.last_failure = Some(ReloadFailure {
+            at: unix_timestamp(),
+            error: error.to_owned(),
+        });
+    }
+
+    pub fn status(&self) -> ReloadStatus {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ReloadStatus> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// Resolves the signature used to detect changes to the watched file.
 pub(crate) async fn signature(path: &Path) -> Signature {
@@ -36,6 +106,7 @@ pub(crate) fn spawn(
     cache: CacheManager,
     mut current: Config,
     mut observed: Signature,
+    tracker: ReloadTracker,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -67,6 +138,7 @@ pub(crate) fn spawn(
                         );
                     }
                     current = loaded.config;
+                    tracker.record_success(current.repositories.len());
                     tracing::info!(
                         path = %loaded.path.display(),
                         repositories = current.repositories.len(),
@@ -75,6 +147,7 @@ pub(crate) fn spawn(
                     );
                 }
                 Err(error) => {
+                    tracker.record_failure(&error.to_string());
                     tracing::warn!(
                         path = %path.display(),
                         %error,
@@ -150,6 +223,24 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::config::ConfigFormat;
     use crate::db::Database;
+
+    #[test]
+    fn reports_the_reload_attempts_it_recorded() {
+        let tracker = ReloadTracker::default();
+        assert_eq!(tracker.status().successful_reloads, 0);
+        assert!(tracker.status().last_success.is_none());
+
+        tracker.record_success(2);
+        tracker.record_failure("failed to parse configuration");
+        let status = tracker.status();
+        assert_eq!(status.successful_reloads, 1);
+        assert_eq!(status.failed_reloads, 1);
+        assert_eq!(status.last_success.as_ref().unwrap().repositories, 2);
+        assert_eq!(
+            status.last_failure.as_ref().unwrap().error,
+            "failed to parse configuration"
+        );
+    }
 
     const BASELINE_TOML: &str = r#"
 [storage]

@@ -544,12 +544,30 @@ async fn reports_health_and_cache_statistics() {
     assert_eq!(stats["hits"].as_u64(), Some(1));
     assert_eq!(stats["misses"].as_u64(), Some(1));
     assert_eq!(stats["hit_rate"].as_f64(), Some(0.5));
+    assert!(
+        stats["repositories"]
+            .as_array()
+            .is_some_and(|repositories| {
+                repositories.iter().any(|repository| {
+                    repository["repository"].as_str() == Some("central")
+                        && repository["hits"].as_u64() == Some(1)
+                        && repository["misses"].as_u64() == Some(1)
+                })
+            })
+    );
     assert!(stats["upstreams"].as_array().is_some_and(|upstreams| {
         upstreams.iter().any(|upstream| {
             upstream["id"].as_str() == Some("central")
                 && upstream["circuit"].as_str() == Some("closed")
         })
     }));
+
+    let reload_status = request(&app, Method::GET, "/api/v1/config/reload").await;
+    assert_eq!(reload_status.status(), StatusCode::OK);
+    let reload_status: Value = serde_json::from_str(&body(reload_status).await).unwrap();
+    assert_eq!(reload_status["successful_reloads"].as_u64(), Some(0));
+    assert_eq!(reload_status["failed_reloads"].as_u64(), Some(0));
+    assert!(reload_status["last_success"].is_null());
 
     let metrics = request(&app, Method::GET, "/api/v1/metrics").await;
     assert_eq!(metrics.status(), StatusCode::OK);
@@ -578,6 +596,20 @@ async fn reports_health_and_cache_statistics() {
         "{metrics}"
     );
     assert!(
+        metrics.contains("maven_haste_repository_cache_hits_total{repository=\"central\"} 1\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_repository_cache_misses_total{repository=\"central\"} 1\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains(
+            "maven_haste_upstream_request_duration_seconds_count{repository=\"central\"}"
+        ),
+        "{metrics}"
+    );
+    assert!(
         metrics.contains(
             "maven_haste_upstream_circuit_state{repository=\"central\",state=\"closed\"} 1\n"
         ),
@@ -600,6 +632,10 @@ async fn reports_health_and_cache_statistics() {
     );
     assert!(
         metrics.contains("maven_haste_response_duration_seconds_bucket{le=\"+Inf\"}"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_config_reloads_total{status=\"ok\"} 0\n"),
         "{metrics}"
     );
     task.abort();
@@ -657,7 +693,11 @@ async fn newer_case_variant_replaces_old_database_identity() {
         false,
         caching_disabled,
     );
-    let app = router("/maven".into(), cache);
+    let app = router(
+        "/maven".into(),
+        cache,
+        maven_haste::reload::ReloadTracker::default(),
+    );
 
     let upper = "/maven/Com/Example/demo/1.0/demo-1.0.jar";
     let lower = "/maven/com/example/demo/1.0/demo-1.0.jar";
@@ -3035,7 +3075,14 @@ async fn test_app_with_cache(
         environment.case_sensitive,
         caching_disabled,
     );
-    (router("/maven".into(), cache), database)
+    (
+        router(
+            "/maven".into(),
+            cache,
+            maven_haste::reload::ReloadTracker::default(),
+        ),
+        database,
+    )
 }
 
 fn repository(id: &str, url: &Url, rules: &[&str]) -> RepositoryConfig {

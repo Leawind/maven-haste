@@ -64,6 +64,7 @@ struct CacheInner {
     misses: AtomicU64,
     stale_hits: AtomicU64,
     negative_hits: AtomicU64,
+    repository_metrics: DashMap<String, RepositoryCounters>,
 }
 
 /// Settings that a configuration reload can replace as one unit. A fetch
@@ -144,7 +145,23 @@ pub struct CacheStats {
     pub negative_hits: u64,
     pub hit_rate: f64,
     pub max_size: Option<u64>,
+    pub repositories: Vec<RepositoryStats>,
     pub upstreams: Vec<crate::upstream::UpstreamStatus>,
+}
+
+/// Requests served for one repository since start-up, counted per repository
+/// id and reported by the statistics endpoint and the metrics.
+#[derive(Clone, Debug, Serialize)]
+pub struct RepositoryStats {
+    pub repository: String,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+#[derive(Default)]
+struct RepositoryCounters {
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -233,6 +250,7 @@ impl CacheManager {
                 misses: AtomicU64::new(0),
                 stale_hits: AtomicU64::new(0),
                 negative_hits: AtomicU64::new(0),
+                repository_metrics: DashMap::new(),
             }),
         }
     }
@@ -316,6 +334,17 @@ impl CacheManager {
         let runtime = self.runtime();
         let requests = self.inner.requests.load(Ordering::Relaxed);
         let hits = self.inner.hits.load(Ordering::Relaxed);
+        let mut repositories: Vec<RepositoryStats> = self
+            .inner
+            .repository_metrics
+            .iter()
+            .map(|entry| RepositoryStats {
+                repository: entry.key().clone(),
+                hits: entry.value().hits.load(Ordering::Relaxed),
+                misses: entry.value().misses.load(Ordering::Relaxed),
+            })
+            .collect();
+        repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
         Ok(CacheStats {
             files: database.files,
             total_size: database.total_size,
@@ -334,8 +363,25 @@ impl CacheManager {
                 hits as f64 / requests as f64
             },
             max_size: runtime.cache.max_size,
+            repositories,
             upstreams: runtime.upstream.statuses(),
         })
+    }
+
+    /// Records one per-repository served request for the statistics endpoint
+    /// and the metrics.
+    fn count_repository_request(&self, repository: &str, hit: bool) {
+        let counters = self
+            .inner
+            .repository_metrics
+            .entry(repository.to_owned())
+            .or_default();
+        let counter = if hit {
+            &counters.hits
+        } else {
+            &counters.misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Writes pending access counters to the database. Called after enough

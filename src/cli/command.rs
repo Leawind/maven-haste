@@ -74,16 +74,23 @@ impl Command {
                     AppError::Runtime(format!("failed to inspect HTTP listener: {error}"))
                 })?;
                 tracing::info!(%bind, "Maven proxy is ready");
+                let reload_tracker = reload::ReloadTracker::default();
                 let reload = reload::spawn(
                     loaded.path.clone(),
                     cli.bind,
                     cache.clone(),
                     loaded.config.clone(),
                     observed,
+                    reload_tracker.clone(),
                 );
                 let maintenance = tokio::spawn(run_maintenance(cache.clone()));
-                let result =
-                    server::serve(listener, loaded.config.server.base_path, cache.clone()).await;
+                let result = server::serve(
+                    listener,
+                    loaded.config.server.base_path,
+                    cache.clone(),
+                    reload_tracker,
+                )
+                .await;
                 maintenance.abort();
                 reload.abort();
                 result

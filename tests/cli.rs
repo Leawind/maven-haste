@@ -399,6 +399,16 @@ fn reloads_configuration_while_running() {
             &format!("/maven/com/example/demo/{version}/demo-{version}.jar"),
         );
         if response.starts_with("HTTP/1.1 503") {
+            let status = wait_for_response(address, "/api/v1/config/reload");
+            assert!(
+                status.contains("\"successful_reloads\":1"),
+                "reload status did not report the applied reload: {status}"
+            );
+            let metrics = wait_for_response(address, "/api/v1/metrics");
+            assert!(
+                metrics.contains("maven_haste_config_reloads_total{status=\"ok\"} 1\n"),
+                "metrics did not report the applied reload: {metrics}"
+            );
             return;
         }
         thread::sleep(Duration::from_millis(50));
