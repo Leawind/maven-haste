@@ -449,6 +449,21 @@ async fn reports_health_and_cache_statistics() {
         metrics.contains("maven_haste_build_info{version=\""),
         "{metrics}"
     );
+    assert_eq!(
+        metrics
+            .matches("# TYPE maven_haste_upstream_circuit_state ")
+            .count(),
+        1,
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("# TYPE maven_haste_requests_total counter\n"),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains("maven_haste_response_duration_seconds_bucket{le=\"+Inf\"}"),
+        "{metrics}"
+    );
     task.abort();
 }
 

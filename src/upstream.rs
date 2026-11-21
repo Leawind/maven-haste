@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, RANGE};
 use reqwest::{Client, StatusCode, Url};
@@ -669,7 +669,10 @@ impl UpstreamClient {
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
             let permit = self.scheduler.acquire(&repository.id, priority).await;
-            match self.send_request(repository, &url, extras).await {
+            let started = Instant::now();
+            let response = self.send_request(repository, &url, extras).await;
+            crate::metrics::UPSTREAM_DURATION.observe(started.elapsed());
+            match response {
                 Ok(response)
                     if response.status() == StatusCode::OK
                         || response.status() == StatusCode::PARTIAL_CONTENT =>

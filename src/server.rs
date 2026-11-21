@@ -114,7 +114,13 @@ async fn metrics(State(state): State<AppState>) -> Response<Body> {
         Ok(stats) => {
             let bytes_served = BYTES_SERVED.load(Ordering::Relaxed);
             let interrupted = INTERRUPTED_REQUESTS.load(Ordering::Relaxed);
-            let body = crate::metrics::render(&stats, bytes_served, interrupted);
+            let body = crate::metrics::render(
+                &stats,
+                bytes_served,
+                interrupted,
+                &crate::metrics::RESPONSE_DURATION.snapshot(),
+                &crate::metrics::UPSTREAM_DURATION.snapshot(),
+            );
             Response::builder()
                 .header(
                     CONTENT_TYPE,
@@ -354,7 +360,9 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     if completion != "complete" {
         INTERRUPTED_REQUESTS.fetch_add(1, Ordering::Relaxed);
     }
-    let elapsed_ms = state.started.elapsed().as_millis() as u64;
+    let elapsed = state.started.elapsed();
+    crate::metrics::RESPONSE_DURATION.observe(elapsed);
+    let elapsed_ms = elapsed.as_millis() as u64;
     let prefix = state.cache.to_ascii_uppercase();
     let mut message = format!(
         "[{}] {} {} {} {}ms {}B upstream={}",
