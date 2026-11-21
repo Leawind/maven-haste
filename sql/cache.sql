@@ -152,6 +152,18 @@ SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, 
  ORDER BY last_accessed, created_at, path
 /
 
+-- name: records_by_access_limit?
+--
+-- Returns the least recently accessed records up to a limit.
+--
+-- param: limit: i64
+SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, etag,
+       last_modified, file_size, created_at, last_refresh_attempt, last_accessed, request_count
+  FROM artifacts
+ ORDER BY last_accessed, created_at, path
+ LIMIT :limit
+/
+
 -- name: records_with_prefix?
 --
 -- Returns artifact records matching an exact path or its descendants.

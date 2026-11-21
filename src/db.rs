@@ -313,6 +313,22 @@ impl Database {
         .await
     }
 
+    pub async fn records_by_access_limit(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ArtifactRecord>, AppError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.with_connection(move |connection| {
+            let mut records = Vec::new();
+            connection.records_by_access_limit(limit, |row| {
+                records.push(artifact_from_row(row)?);
+                Ok(())
+            })?;
+            Ok(records)
+        })
+        .await
+    }
+
     pub async fn records_with_prefix(&self, prefix: &str) -> Result<Vec<ArtifactRecord>, AppError> {
         let prefix = prefix.trim_matches('/').to_owned();
         let descendant = format!("{}/%", escape_like(&prefix));

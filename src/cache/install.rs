@@ -152,21 +152,36 @@ impl crate::cache::CacheManager {
             return Ok(());
         }
         let mut remaining = stats.total_size;
-        let candidates = self
-            .inner
-            .database
-            .records_by_access()
-            .await
-            .map_err(internal)?;
-        for record in candidates {
-            if remaining <= max_size {
+        // Read candidates in bounded batches instead of materializing the
+        // whole cache. A batch without a single eviction means every remaining
+        // candidate is protected or in use, so another query would only repeat
+        // the same head records.
+        const CAPACITY_BATCH: usize = 512;
+        while remaining > max_size {
+            let candidates = self
+                .inner
+                .database
+                .records_by_access_limit(CAPACITY_BATCH)
+                .await
+                .map_err(internal)?;
+            if candidates.is_empty() {
                 break;
             }
-            if protected.contains(record.path.as_str()) || self.path_is_busy(&record.path) {
-                continue;
+            let mut progressed = false;
+            for record in candidates {
+                if remaining <= max_size {
+                    break;
+                }
+                if protected.contains(record.path.as_str()) || self.path_is_busy(&record.path) {
+                    continue;
+                }
+                let removed = self.remove_records(vec![record]).await?;
+                remaining = remaining.saturating_sub(removed.bytes);
+                progressed = true;
             }
-            let removed = self.remove_records(vec![record]).await?;
-            remaining = remaining.saturating_sub(removed.bytes);
+            if !progressed {
+                break;
+            }
         }
         Ok(())
     }
