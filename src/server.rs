@@ -175,6 +175,7 @@ async fn artifact(
             let artifacts = ResponseArtifacts {
                 temporary: cached.temporary.take(),
                 serve_guard: cached.serve_guard.take(),
+                object_guard: cached.object_guard.take(),
             };
             (
                 cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
@@ -222,6 +223,7 @@ async fn artifact(
 struct ResponseArtifacts {
     temporary: Option<SharedTemp>,
     serve_guard: Option<ServeGuard>,
+    object_guard: Option<ServeGuard>,
 }
 
 fn track_response(
@@ -386,6 +388,7 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     let artifacts = &mut state.artifacts;
     drop(artifacts.temporary.take());
     drop(artifacts.serve_guard.take());
+    drop(artifacts.object_guard.take());
 }
 
 async fn cached_response(

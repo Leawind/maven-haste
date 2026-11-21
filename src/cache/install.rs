@@ -233,10 +233,10 @@ impl crate::cache::CacheManager {
 
     async fn collect_objects_locked(&self) -> Result<(), CacheFailure> {
         // A reader may still own an older record after a newer bundle was
-        // published. Keep retired objects until all verified readers finish.
-        if !self.inner.serves.is_empty() {
-            return Ok(());
-        }
+        // published. Such readers are tracked by object hash, so collection
+        // never has to skip an entire pass just because some response is
+        // active. Objects younger than the grace period are also kept because
+        // another process may be reading them.
         let records = self
             .inner
             .database
@@ -274,10 +274,21 @@ impl crate::cache::CacheManager {
         while let Some(entry) = entries.next_entry().await.map_err(internal)? {
             let name = entry.file_name();
             let Some(hash) = name.to_str() else { continue };
-            if object_path(&self.inner.storage.root, hash).is_some()
-                && !retained.contains(hash)
-                && entry.file_type().await.map_err(internal)?.is_file()
+            if object_path(&self.inner.storage.root, hash).is_none()
+                || retained.contains(hash)
+                || self.inner.served_objects.is_busy(hash)
+                || !entry.file_type().await.map_err(internal)?.is_file()
             {
+                continue;
+            }
+            let metadata = entry.metadata().await.map_err(internal)?;
+            let old_enough = self.inner.object_grace.is_zero()
+                || metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+                    .is_some_and(|age| age >= self.inner.object_grace);
+            if old_enough {
                 remove_file_if_exists(&entry.path())
                     .await
                     .map_err(internal)?;

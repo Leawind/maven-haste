@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use serde::Serialize;
@@ -26,6 +27,10 @@ pub use types::{ServeGuard, SharedTemp};
 
 type Flight = OnceCell<Result<DownloadOutcome, CacheFailure>>;
 
+/// Unreferenced objects younger than this may still be held by a response in
+/// another process, so collection leaves them for a later pass.
+const OBJECT_GRACE: Duration = Duration::from_secs(60 * 60);
+
 #[derive(Clone)]
 pub struct CacheManager {
     inner: Arc<CacheInner>,
@@ -41,6 +46,8 @@ struct CacheInner {
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
     serves: ServeRegistry,
+    served_objects: ServeRegistry,
+    object_grace: Duration,
     lifecycle: RwLock<()>,
     requests: AtomicU64,
     hits: AtomicU64,
@@ -62,6 +69,9 @@ pub struct CachedArtifact {
     /// Marks the cached file as being served so capacity eviction and prefix
     /// removal skip it until the response finishes.
     pub serve_guard: Option<ServeGuard>,
+    /// Marks the backing content object as in use so object collection skips
+    /// it even after its record was replaced.
+    pub object_guard: Option<ServeGuard>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +147,26 @@ impl CacheManager {
         case_sensitive: bool,
         caching_disabled: HashSet<String>,
     ) -> Self {
+        Self::new_with_object_grace(
+            storage,
+            cache,
+            database,
+            upstream,
+            case_sensitive,
+            caching_disabled,
+            OBJECT_GRACE,
+        )
+    }
+
+    fn new_with_object_grace(
+        storage: StorageConfig,
+        cache: CacheConfig,
+        database: Database,
+        upstream: UpstreamClient,
+        case_sensitive: bool,
+        caching_disabled: HashSet<String>,
+        object_grace: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(CacheInner {
                 storage,
@@ -148,6 +178,8 @@ impl CacheManager {
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
                 serves: ServeRegistry::default(),
+                served_objects: ServeRegistry::default(),
+                object_grace,
                 lifecycle: RwLock::new(()),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
@@ -266,13 +298,14 @@ mod tests {
             .map(|repository| repository.id.clone())
             .collect();
         (
-            CacheManager::new(
+            CacheManager::new_with_object_grace(
                 storage.clone(),
                 config.cache.clone(),
                 database.clone(),
                 upstream,
                 true,
                 caching_disabled,
+                std::time::Duration::ZERO,
             ),
             database,
         )
@@ -400,7 +433,8 @@ mod tests {
         fs::create_dir_all(shared.parent().unwrap()).await.unwrap();
         fs::write(&shared, b"shared").await.unwrap();
         fs::write(&orphan, b"orphan").await.unwrap();
-        let serving = cache.inner.serves.acquire("retired/path.jar");
+        let orphan_hash = to_hex(&Sha256::digest(b"orphan"));
+        let serving = cache.inner.served_objects.acquire(&orphan_hash);
         cache.run_maintenance().await.unwrap();
         assert!(orphan.exists());
         drop(serving);

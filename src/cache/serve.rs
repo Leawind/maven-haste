@@ -96,6 +96,7 @@ impl CacheManager {
                     status: CacheStatus::Miss,
                     temporary: Some(prepared.temporary),
                     serve_guard: None,
+                    object_guard: None,
                 })
             }
         }
@@ -169,6 +170,10 @@ impl CacheManager {
                     return Ok(None);
                 }
                 file.rewind().await.map_err(internal)?;
+                let object_guard = record
+                    .sha256
+                    .as_deref()
+                    .map(|hash| self.inner.served_objects.acquire(hash));
                 Ok(Some(CachedArtifact {
                     file_path,
                     file: Some(file),
@@ -176,6 +181,7 @@ impl CacheManager {
                     status: CacheStatus::Hit,
                     temporary: None,
                     serve_guard: Some(self.inner.serves.acquire(request.relative())),
+                    object_guard,
                 }))
             }
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),

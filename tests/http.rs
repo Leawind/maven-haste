@@ -1677,6 +1677,44 @@ async fn does_not_cache_artifacts_when_repository_writes_are_disabled() {
 }
 
 #[tokio::test]
+async fn serves_artifacts_larger_than_the_cache_limit_without_caching_them() {
+    let (url, task) = spawn_upstream(content_upstream("artifact-body")).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig {
+            max_size: Some(4),
+            ..CacheConfig::default()
+        },
+        UpstreamConfig::default(),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "artifact-body");
+    }
+
+    assert!(
+        database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .is_none(),
+        "an artifact larger than the cache limit must not be published"
+    );
+    wait_for(|| {
+        std::fs::read_dir(directory.path().join("repository/.maven-haste/tmp"))
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(false)
+    })
+    .await;
+    task.abort();
+}
+
+#[tokio::test]
 async fn concurrent_passthrough_requests_share_one_temporary_file_safely() {
     let calls = Arc::new(AtomicUsize::new(0));
     let handler_calls = Arc::clone(&calls);

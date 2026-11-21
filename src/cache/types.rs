@@ -28,10 +28,6 @@ impl ServeRegistry {
     pub(crate) fn is_busy(&self, path: &str) -> bool {
         self.active.contains_key(path)
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.active.is_empty()
-    }
 }
 
 /// An active-serve mark for one cached file.

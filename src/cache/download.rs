@@ -93,9 +93,17 @@ impl crate::cache::CacheManager {
         }
         match self.prepare_fetch(request, None).await? {
             PreparedFetch::Bundle(files) => {
-                if self.caching_enabled(&files[0].record.upstream) {
+                let fits = self.bundle_fits_capacity(&files);
+                if self.caching_enabled(&files[0].record.upstream) && fits {
                     self.install_bundle(files).await?;
                     return Ok(DownloadOutcome::Installed);
+                }
+                if !fits {
+                    tracing::info!(
+                        path = request.relative(),
+                        size = bundle_size(&files),
+                        "artifact bundle exceeds cache.max_size; serving it without caching"
+                    );
                 }
                 let (main, generated) = files
                     .split_first()
@@ -121,6 +129,15 @@ impl crate::cache::CacheManager {
     ) -> Result<(), CacheFailure> {
         match self.prepare_fetch(request, Some(previous)).await? {
             PreparedFetch::Bundle(files) => {
+                if !self.bundle_fits_capacity(&files) {
+                    tracing::warn!(
+                        path = request.relative(),
+                        size = bundle_size(&files),
+                        "refreshed bundle exceeds cache.max_size; keeping the previous bundle"
+                    );
+                    cleanup_prepared(&files).await;
+                    return self.record_refresh_attempt(request).await;
+                }
                 if self.caching_enabled(&files[0].record.upstream) {
                     return self.install_bundle(files).await;
                 }
@@ -130,29 +147,33 @@ impl crate::cache::CacheManager {
                     "refreshed content is not cached because cache writes are disabled for this repository"
                 );
                 cleanup_prepared(&files).await;
-                return self
-                    .inner
-                    .database
-                    .touch_refresh_attempt(request.relative(), unix_timestamp())
-                    .await
-                    .map_err(internal);
+                self.record_refresh_attempt(request).await
             }
-            PreparedFetch::NotModified => self
-                .inner
-                .database
-                .touch_refresh_attempt(request.relative(), unix_timestamp())
-                .await
-                .map_err(internal),
+            PreparedFetch::NotModified => self.record_refresh_attempt(request).await,
             PreparedFetch::NotFound => {
                 self.log_not_found(request);
-                self.inner
-                    .database
-                    .touch_refresh_attempt(request.relative(), unix_timestamp())
-                    .await
-                    .map_err(internal)
+                self.record_refresh_attempt(request).await
             }
             PreparedFetch::Gateway => Err(CacheFailure::Gateway),
         }
+    }
+
+    async fn record_refresh_attempt(&self, request: &MavenPath) -> Result<(), CacheFailure> {
+        self.inner
+            .database
+            .touch_refresh_attempt(request.relative(), unix_timestamp())
+            .await
+            .map_err(internal)
+    }
+
+    /// Whether a bundle can be stored without immediately exceeding the cache
+    /// size limit. An oversized single artifact is served directly instead of
+    /// evicting the rest of the cache and still staying above the limit.
+    fn bundle_fits_capacity(&self, files: &[PreparedFile]) -> bool {
+        self.inner
+            .config
+            .max_size
+            .is_none_or(|max_size| bundle_size(files) <= max_size)
     }
 
     async fn prepare_fetch(
@@ -706,6 +727,12 @@ impl crate::cache::CacheManager {
         }
         Err(CacheFailure::Gateway)
     }
+}
+
+fn bundle_size(files: &[PreparedFile]) -> u64 {
+    files.iter().fold(0_u64, |total, file| {
+        total.saturating_add(file.record.file_size.max(0) as u64)
+    })
 }
 
 enum BundleError {
