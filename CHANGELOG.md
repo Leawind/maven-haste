@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1]
+
 ### Added
 
 - Repositories can list several upstream URLs: set either `url` or `urls`, and requests try the listed URLs in order, moving to the next one when a URL is unreachable, rejects the request, or reports the artifact missing. Each URL has its own circuit breaker, and confirmed 404s are remembered per URL.
