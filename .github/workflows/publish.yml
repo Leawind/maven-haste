@@ -24,8 +24,8 @@ jobs:
                   deno-version: v2.x
 
             - run: cargo fmt --check
-            - run: cargo clippy --all-targets -- -D warnings
-            - run: cargo test
+            - run: cargo clippy --locked --all-targets -- -D warnings
+            - run: cargo test --locked
             - run: deno fmt --check
 
     build-binaries:
@@ -38,14 +38,27 @@ jobs:
                 include:
                     - name: x86_64-unknown-linux-gnu
                       os: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
                       archive: maven-haste-x86_64-unknown-linux-gnu.tar.gz
+                      binary: maven-haste
+                    - name: aarch64-unknown-linux-gnu
+                      os: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-gnu
+                      archive: maven-haste-aarch64-unknown-linux-gnu.tar.gz
                       binary: maven-haste
                     - name: x86_64-apple-darwin
                       os: macos-latest
+                      target: x86_64-apple-darwin
                       archive: maven-haste-x86_64-apple-darwin.tar.gz
+                      binary: maven-haste
+                    - name: aarch64-apple-darwin
+                      os: macos-latest
+                      target: aarch64-apple-darwin
+                      archive: maven-haste-aarch64-apple-darwin.tar.gz
                       binary: maven-haste
                     - name: x86_64-pc-windows-msvc
                       os: windows-latest
+                      target: x86_64-pc-windows-msvc
                       archive: maven-haste-x86_64-pc-windows-msvc.zip
                       binary: maven-haste.exe
 
@@ -53,19 +66,21 @@ jobs:
             - uses: actions/checkout@v4
 
             - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
 
             - uses: Swatinem/rust-cache@v2
 
-            - run: cargo build --release
+            - run: cargo build --release --locked --target ${{ matrix.target }}
 
             - name: Package Unix binary
               if: runner.os != 'Windows'
-              run: tar -C target/release -czf ${{ matrix.archive }} ${{ matrix.binary }}
+              run: tar -C target/${{ matrix.target }}/release -czf ${{ matrix.archive }} ${{ matrix.binary }}
 
             - name: Package Windows binary
               if: runner.os == 'Windows'
               shell: pwsh
-              run: Compress-Archive -Path target/release/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
+              run: Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }} -DestinationPath ${{ matrix.archive }}
 
             - uses: actions/upload-artifact@v4
               with:
@@ -131,6 +146,13 @@ jobs:
                   path: release-assets
                   merge-multiple: true
 
+            - name: Generate release checksums
+              run: |
+                  cd release-assets
+                  for file in *; do
+                      sha256sum "$file" > "$file.sha256"
+                  done
+
             - uses: softprops/action-gh-release@v2
               with:
                   tag_name: v${{ steps.resolve.outputs.version }}
@@ -169,6 +191,8 @@ jobs:
               id: repo
               run: echo "repository=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+            - uses: docker/setup-qemu-action@v3
+
             - uses: docker/setup-buildx-action@v3
 
             - name: Log in to ghcr.io
@@ -183,6 +207,7 @@ jobs:
               with:
                   context: .
                   push: true
+                  platforms: linux/amd64,linux/arm64
                   tags: |
                       ghcr.io/${{ steps.repo.outputs.repository }}:${{ needs.draft-release.outputs.version }}
                       ghcr.io/${{ steps.repo.outputs.repository }}:latest
