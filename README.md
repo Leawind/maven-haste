@@ -37,7 +37,7 @@ maven-haste ships as a single command-line tool.
       ghcr.io/leawind/maven-haste
   ```
 
-  The image expects a `maven-haste.toml` (or `.json`/`.yaml`/`.yml`) in the mounted `/etc/maven-haste` directory and stores cached artifacts under `/var/lib/maven-haste`; point `[storage].root` there in the config. The image is published for `linux/amd64` and `linux/arm64`, runs as an unprivileged user, and reports container health through HTTP. Set `[server].bind = "0.0.0.0:8080"` inside a container so the published port is reachable. Release archives are published with SHA-256 checksum files.
+  The image expects a `maven-haste.toml` (or `.json`/`.yaml`/`.yml`) in the mounted `/etc/maven-haste` directory and stores cached artifacts under `/var/lib/maven-haste`; point `[storage].root` there in the config. The image is published for `linux/amd64` and `linux/arm64`, runs as an unprivileged user, and reports container health through HTTP. Set `[server].bind = "0.0.0.0:8080"` inside a container so the published port is reachable; the built-in health check expects port 8080. Release archives are published with SHA-256 checksum files.
 
 ## Running
 

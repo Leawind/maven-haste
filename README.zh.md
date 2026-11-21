@@ -37,7 +37,7 @@ maven-haste 以单个命令行工具的形式发布。
       ghcr.io/leawind/maven-haste
   ```
 
-  镜像期望在挂载的 `/etc/maven-haste` 目录中放置 `maven-haste.toml`（或 `.json`/`.yaml`/`.yml`），缓存产物保存在 `/var/lib/maven-haste` 下；请在配置中将 `[storage].root` 指向该目录。镜像提供 `linux/amd64` 与 `linux/arm64` 版本，以非特权用户运行，并通过 HTTP 报告容器健康状态。容器内需设置 `[server].bind = "0.0.0.0:8080"`，否则映射出的端口不可访问。发布压缩包同时提供 SHA-256 校验文件。
+  镜像期望在挂载的 `/etc/maven-haste` 目录中放置 `maven-haste.toml`（或 `.json`/`.yaml`/`.yml`），缓存产物保存在 `/var/lib/maven-haste` 下；请在配置中将 `[storage].root` 指向该目录。镜像提供 `linux/amd64` 与 `linux/arm64` 版本，以非特权用户运行，并通过 HTTP 报告容器健康状态。容器内需设置 `[server].bind = "0.0.0.0:8080"`，否则映射出的端口不可访问；内置健康检查使用 8080 端口。发布压缩包同时提供 SHA-256 校验文件。
 
 ## 跑起来
 
