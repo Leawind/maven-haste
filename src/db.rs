@@ -66,6 +66,12 @@ pub struct DatabaseStats {
     pub files: u64,
     pub total_size: u64,
     pub negative_entries: u64,
+    /// Distinct content objects referenced by records.
+    pub object_files: u64,
+    /// Logical bytes represented by one copy of each referenced object.
+    pub object_size: u64,
+    /// Requests recorded across all currently cached paths.
+    pub recorded_requests: u64,
 }
 
 impl Database {
@@ -335,12 +341,18 @@ impl Database {
                 files: 0,
                 total_size: 0,
                 negative_entries: 0,
+                object_files: 0,
+                object_size: 0,
+                recorded_requests: 0,
             };
             connection.stats(|row| {
                 stats = DatabaseStats {
                     files: row.get::<_, i64>(0)?.max(0) as u64,
                     total_size: row.get::<_, i64>(1)?.max(0) as u64,
                     negative_entries: row.get::<_, i64>(2)?.max(0) as u64,
+                    object_files: row.get::<_, i64>(3)?.max(0) as u64,
+                    object_size: row.get::<_, i64>(4)?.max(0) as u64,
+                    recorded_requests: row.get::<_, i64>(5)?.max(0) as u64,
                 };
                 Ok(())
             })?;
@@ -418,6 +430,20 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Whether an error indicates a corrupt or non-database file rather than a
+/// permissions or configuration problem.
+pub fn is_corruption(error: &AppError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "not a database",
+        "database disk image is malformed",
+        "database corrupt",
+        "sqlite_corrupt",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
 fn worker_error(error: deadpool_sqlite::InteractError) -> AppError {
     AppError::Runtime(format!("SQLite worker failed: {error}"))
 }
@@ -444,6 +470,9 @@ mod tests {
                 files: 0,
                 total_size: 0,
                 negative_entries: 0,
+                object_files: 0,
+                object_size: 0,
+                recorded_requests: 0,
             }
         );
     }

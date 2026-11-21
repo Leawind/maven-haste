@@ -171,7 +171,11 @@ SELECT path, group_id, artifact_id, version, file_type, upstream, sha1, sha256, 
 --
 SELECT (SELECT COUNT(*) FROM artifacts),
        (SELECT COALESCE(SUM(file_size), 0) FROM artifacts),
-       (SELECT COUNT(*) FROM negative_cache)
+       (SELECT COUNT(*) FROM negative_cache),
+       (SELECT COUNT(*) FROM (SELECT DISTINCT sha256 FROM artifacts WHERE sha256 IS NOT NULL)),
+       (SELECT COALESCE(SUM(file_size), 0)
+          FROM (SELECT DISTINCT sha256, file_size FROM artifacts WHERE sha256 IS NOT NULL)),
+       (SELECT COALESCE(SUM(request_count), 0) FROM artifacts)
 /
 
 -- name: ping?

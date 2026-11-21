@@ -126,6 +126,9 @@ impl CacheStatus {
 pub struct CacheStats {
     pub files: u64,
     pub total_size: u64,
+    pub object_files: u64,
+    pub object_bytes: u64,
+    pub recorded_requests: u64,
     pub negative_entries: u64,
     pub requests: u64,
     pub hits: u64,
@@ -257,6 +260,9 @@ impl CacheManager {
         Ok(CacheStats {
             files: database.files,
             total_size: database.total_size,
+            object_files: database.object_files,
+            object_bytes: database.object_size,
+            recorded_requests: database.recorded_requests,
             negative_entries: database.negative_entries,
             requests,
             hits,

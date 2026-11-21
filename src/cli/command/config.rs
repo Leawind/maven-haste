@@ -62,6 +62,8 @@ impl ConfigCommand {
                 if loaded.config.logging.enabled {
                     crate::logging::validate_directory(&loaded.config.logging)?;
                 }
+                let database = crate::db::Database::open(loaded.config.storage.db_path()).await?;
+                database.ping().await?;
                 println!("configuration is valid: {}", loaded.path.display());
                 println!(
                     "storage is ready: {} ({})",
@@ -71,6 +73,10 @@ impl ConfigCommand {
                     } else {
                         "case-insensitive"
                     }
+                );
+                println!(
+                    "database is ready: {}",
+                    loaded.config.storage.db_path().display()
                 );
                 println!(
                     "start the proxy: maven-haste run --config {}",

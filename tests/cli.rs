@@ -445,8 +445,54 @@ fn cache_stats_reports_an_empty_cache() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("files: 0"), "{stdout}");
     assert!(stdout.contains("total size: 0 bytes"), "{stdout}");
+    assert!(stdout.contains("object files: 0"), "{stdout}");
+    assert!(stdout.contains("recorded requests: 0"), "{stdout}");
     assert!(stdout.contains("negative entries: 0"), "{stdout}");
     assert!(stdout.contains("max size: unlimited"), "{stdout}");
+
+    let output = Command::new(binary())
+        .args(["cache", "stats", "--json", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stats["files"], 0);
+    assert_eq!(stats["object_files"], 0);
+}
+
+#[test]
+fn cache_repair_quarantines_a_corrupt_database() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, "127.0.0.1:0");
+    let internal = directory.path().join("repository/.maven-haste");
+    std::fs::create_dir_all(&internal).unwrap();
+    std::fs::write(internal.join("cache.db"), b"not a sqlite database").unwrap();
+
+    let output = Command::new(binary())
+        .args(["cache", "repair", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("quarantined"), "{stdout}");
+    assert!(stdout.contains("created a fresh database"), "{stdout}");
+    assert!(
+        std::fs::read_dir(&internal)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
+        "the corrupt database must be preserved"
+    );
+
+    let stats = Command::new(binary())
+        .args(["cache", "stats", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(stats.status.success());
 }
 
 #[test]

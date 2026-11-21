@@ -99,6 +99,27 @@ pub fn render(
     );
     push_family(
         &mut output,
+        "maven_haste_cache_object_files",
+        "Distinct content objects referenced by cached records.",
+        MetricType::Gauge,
+        &[(Vec::new(), stats.object_files as f64)],
+    );
+    push_family(
+        &mut output,
+        "maven_haste_cache_object_bytes",
+        "Logical bytes represented by one copy of each referenced object.",
+        MetricType::Gauge,
+        &[(Vec::new(), stats.object_bytes as f64)],
+    );
+    push_family(
+        &mut output,
+        "maven_haste_cache_recorded_requests",
+        "Requests recorded for currently cached paths.",
+        MetricType::Gauge,
+        &[(Vec::new(), stats.recorded_requests as f64)],
+    );
+    push_family(
+        &mut output,
         "maven_haste_negative_entries",
         "Number of remembered upstream 404s.",
         MetricType::Gauge,
@@ -334,6 +355,9 @@ mod tests {
         CacheStats {
             files: 3,
             total_size: 1024,
+            object_files: 2,
+            object_bytes: 768,
+            recorded_requests: 42,
             negative_entries: 1,
             requests: 10,
             hits: 7,

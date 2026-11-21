@@ -23,7 +23,14 @@ pub enum CacheCommand {
     },
 
     /// Print cache statistics from the database
-    Stats,
+    Stats {
+        /// Print the statistics as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Quarantine a corrupt database and create a fresh one
+    Repair,
 
     /// Prefetch artifacts listed in a manifest of Maven repository paths
     Warm {
@@ -36,6 +43,9 @@ pub enum CacheCommand {
 
 impl CacheCommand {
     pub async fn execute(&self, cli: &Cli) -> Result<(), AppError> {
+        if matches!(self, CacheCommand::Repair) {
+            return repair(cli).await;
+        }
         let cache = build_cache(cli).await?;
         match self {
             CacheCommand::Verify => {
@@ -61,10 +71,17 @@ impl CacheCommand {
                 println!("removed {} files, {} bytes", removed.files, removed.bytes);
                 Ok(())
             }
-            CacheCommand::Stats => {
+            CacheCommand::Stats { json } => {
                 let stats = cache.stats().await.map_err(app_error)?;
+                if *json {
+                    println!("{}", serde_json::to_string_pretty(&stats)?);
+                    return Ok(());
+                }
                 println!("files: {}", stats.files);
                 println!("total size: {} bytes", stats.total_size);
+                println!("object files: {}", stats.object_files);
+                println!("object bytes: {}", stats.object_bytes);
+                println!("recorded requests: {}", stats.recorded_requests);
                 println!("negative entries: {}", stats.negative_entries);
                 match stats.max_size {
                     Some(max_size) => println!("max size: {max_size} bytes"),
@@ -73,8 +90,64 @@ impl CacheCommand {
                 Ok(())
             }
             CacheCommand::Warm { manifest } => warm(&cache, manifest).await,
+            CacheCommand::Repair => unreachable!("repair is handled before building the cache"),
         }
     }
+}
+
+async fn repair(cli: &Cli) -> Result<(), AppError> {
+    let loaded = Config::load(cli)?;
+    storage::prepare(&loaded.config.storage).await?;
+    let path = loaded.config.storage.db_path();
+    match crate::db::Database::open(path).await {
+        Ok(_) => {
+            println!("database is healthy: {}", path.display());
+            Ok(())
+        }
+        Err(error) if crate::db::is_corruption(&error) => {
+            for quarantined in quarantine_database(path)? {
+                println!("quarantined {}", quarantined.display());
+            }
+            crate::db::Database::open(path).await?;
+            println!("created a fresh database: {}", path.display());
+            println!("existing cache files will be re-fetched as needed");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn quarantine_database(path: &Path) -> Result<Vec<PathBuf>, AppError> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut moved = Vec::new();
+    for (suffix, label) in [
+        ("", "corrupt"),
+        ("-wal", "corrupt-wal"),
+        ("-shm", "corrupt-shm"),
+    ] {
+        let source = append_suffix(path, suffix);
+        if !source.exists() {
+            continue;
+        }
+        let target = append_suffix(path, &format!(".{label}-{stamp}"));
+        std::fs::rename(&source, &target).map_err(|error| {
+            AppError::Runtime(format!(
+                "failed to quarantine {}: {error}",
+                source.display()
+            ))
+        })?;
+        moved.push(target);
+    }
+    Ok(moved)
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 async fn warm(cache: &CacheManager, manifest: &Path) -> Result<(), AppError> {
