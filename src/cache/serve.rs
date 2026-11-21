@@ -184,20 +184,16 @@ impl CacheManager {
                 .map_err(internal)?;
         }
         match outcome.result {
-            FetchResult::Found {
-                repository,
-                repository_id,
-                response,
-            } => {
+            FetchResult::Found { origin, response } => {
                 if negative_enabled {
                     self.inner
                         .database
-                        .delete_negative_entry(request.relative(), &repository_id)
+                        .delete_negative_entry(request.relative(), &origin.identity)
                         .await
                         .map_err(internal)?;
                 }
                 let head = UpstreamHead {
-                    repository: repository.clone(),
+                    repository: origin.repository.clone(),
                     content_length: header_string(response.headers(), CONTENT_LENGTH)
                         .and_then(|value| value.parse().ok()),
                     content_type: header_string(response.headers(), CONTENT_TYPE),
@@ -205,7 +201,7 @@ impl CacheManager {
                     last_modified: header_string(response.headers(), LAST_MODIFIED),
                 };
                 drop(response);
-                runtime.upstream.record_body_success(&repository);
+                runtime.upstream.record_body_success(&origin.circuit);
                 Ok(HeadOutcome::Upstream(head))
             }
             FetchResult::NotModified { .. } => Ok(HeadOutcome::Gateway),

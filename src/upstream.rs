@@ -103,15 +103,23 @@ impl UpstreamResponse {
 
 pub enum FetchResult {
     Found {
-        repository: String,
-        repository_id: String,
+        origin: UpstreamOrigin,
         response: UpstreamResponse,
     },
     NotModified {
-        repository_id: String,
+        origin: UpstreamOrigin,
     },
     NotFound,
     GatewayFailure,
+}
+
+/// The upstream that answered one fetch: its repository, the circuit-breaker
+/// key of the URL that served, and the URL's negative-cache identity.
+#[derive(Clone)]
+pub struct UpstreamOrigin {
+    pub repository: String,
+    pub circuit: String,
+    pub identity: String,
 }
 
 pub struct FetchOutcome {
@@ -317,7 +325,7 @@ impl UpstreamClient {
     ) -> Result<Self, AppError> {
         let allowed_origins: Vec<_> = repositories
             .iter()
-            .map(|repository| repository.url.origin())
+            .flat_map(|repository| repository.urls().iter().map(|url| url.origin()))
             .collect();
         let certificates = config
             .ca_bundle
@@ -513,7 +521,6 @@ impl UpstreamClient {
             .candidates(relative_path)
             .into_iter()
             .filter(|repository| !excluded.contains(&repository.id))
-            .filter(|repository| !negative.contains(&repository_id(repository)))
             .cloned()
             .map(|repository| (repository, None))
             .collect();
@@ -522,6 +529,7 @@ impl UpstreamClient {
             repositories,
             RequestPriority::Foreground,
             RequestMethod::Get,
+            negative,
         )
         .await
     }
@@ -539,7 +547,6 @@ impl UpstreamClient {
             .candidates(relative_path)
             .into_iter()
             .filter(|repository| !excluded.contains(&repository.id))
-            .filter(|repository| !negative.contains(&repository_id(repository)))
             .cloned()
             .map(|repository| (repository, None))
             .collect();
@@ -548,6 +555,7 @@ impl UpstreamClient {
             repositories,
             RequestPriority::Foreground,
             RequestMethod::Head,
+            negative,
         )
         .await
     }
@@ -564,7 +572,6 @@ impl UpstreamClient {
         let mut repositories = Vec::new();
         if !excluded.contains(preferred)
             && let Some(repository) = self.routes.repository(preferred)
-            && !negative.contains(&repository_id(repository))
         {
             repositories.push((
                 repository.clone(),
@@ -583,7 +590,6 @@ impl UpstreamClient {
                 .filter(|repository| {
                     repository.id != preferred && !excluded.contains(&repository.id)
                 })
-                .filter(|repository| !negative.contains(&repository_id(repository)))
                 .cloned()
                 .map(|repository| (repository, None)),
         );
@@ -592,6 +598,7 @@ impl UpstreamClient {
             repositories,
             RequestPriority::Background,
             RequestMethod::Get,
+            negative,
         )
         .await
     }
@@ -610,6 +617,7 @@ impl UpstreamClient {
             vec![(repository, None)],
             priority,
             RequestMethod::Get,
+            &HashSet::new(),
         )
         .await
         .result
@@ -638,6 +646,7 @@ impl UpstreamClient {
             vec![(repository, Some(extras))],
             priority,
             RequestMethod::Get,
+            &HashSet::new(),
         )
         .await
         .result
@@ -659,13 +668,17 @@ impl UpstreamClient {
         self.routes
             .repositories()
             .iter()
-            .map(|repository| {
-                let status = self.circuits.status(&repository.id);
-                UpstreamStatus {
-                    id: repository.id.clone(),
-                    circuit: status.state.into(),
-                    failures: status.failures,
-                }
+            .flat_map(|repository| {
+                let url_count = repository.urls().len();
+                (0..url_count).map(move |index| {
+                    let key = circuit_key(&repository.id, url_count, index);
+                    let status = self.circuits.status(&key);
+                    UpstreamStatus {
+                        id: key,
+                        circuit: status.state.into(),
+                        failures: status.failures,
+                    }
+                })
             })
             .collect()
     }
@@ -673,9 +686,12 @@ impl UpstreamClient {
     pub fn all_candidates_negative(&self, relative_path: &str, negative: &HashSet<String>) -> bool {
         let candidates = self.routes.candidates(relative_path);
         !candidates.is_empty()
-            && candidates
-                .into_iter()
-                .all(|repository| negative.contains(&repository_id(repository)))
+            && candidates.into_iter().all(|repository| {
+                repository
+                    .urls()
+                    .iter()
+                    .all(|url| negative.contains(&repository_identity(url)))
+            })
     }
 
     async fn fetch_ordered(
@@ -684,63 +700,89 @@ impl UpstreamClient {
         repositories: Vec<(RepositoryConfig, Option<RequestExtras>)>,
         priority: RequestPriority,
         method: RequestMethod,
+        negative: &HashSet<String>,
     ) -> FetchOutcome {
         let mut gateway_failure = false;
         let mut not_found = Vec::new();
 
         for (repository, extras) in repositories {
-            if !self.circuits.allow(&repository.id) {
-                tracing::debug!(upstream = %repository.id, path = relative_path, "skipping open circuit");
-                gateway_failure = true;
-                continue;
-            }
-            let url = match build_url(&repository.url, relative_path) {
-                Ok(url) => url,
-                Err(error) => {
-                    tracing::error!(upstream = %repository.id, %error, "failed to build upstream URL");
-                    gateway_failure = true;
+            let url_count = repository.urls().len();
+            let mut answered_not_found = false;
+            let mut failed = false;
+            for (index, base) in repository.urls().iter().enumerate() {
+                let identity = repository_identity(base);
+                if negative.contains(&identity) {
                     continue;
                 }
-            };
+                let key = circuit_key(&repository.id, url_count, index);
+                if !self.circuits.allow(&key) {
+                    tracing::debug!(upstream = %key, path = relative_path, "skipping open circuit");
+                    failed = true;
+                    continue;
+                }
+                let url = match build_url(base, relative_path) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        tracing::error!(upstream = %key, %error, "failed to build upstream URL");
+                        failed = true;
+                        continue;
+                    }
+                };
 
-            match self
-                .fetch_repository(&repository, url, extras.as_ref(), priority, method)
-                .await
-            {
-                RepositoryResult::Found(response) => {
-                    return FetchOutcome {
-                        result: FetchResult::Found {
-                            repository_id: repository_id(&repository),
-                            repository: repository.id,
-                            response,
-                        },
-                        not_found,
-                    };
-                }
-                RepositoryResult::NotModified => {
-                    self.circuits.record_success(&repository.id);
-                    return FetchOutcome {
-                        result: FetchResult::NotModified {
-                            repository_id: repository_id(&repository),
-                        },
-                        not_found,
-                    };
-                }
-                RepositoryResult::NotFound => {
-                    tracing::trace!(upstream = %repository.id, path = relative_path, "upstream artifact was not found");
-                    self.circuits.record_success(&repository.id);
-                    if repository.cache_writes {
-                        not_found.push(repository_id(&repository));
+                match self
+                    .fetch_repository(&repository, &key, url, extras.as_ref(), priority, method)
+                    .await
+                {
+                    RepositoryResult::Found(response) => {
+                        return FetchOutcome {
+                            result: FetchResult::Found {
+                                origin: UpstreamOrigin {
+                                    repository: repository.id.clone(),
+                                    circuit: key,
+                                    identity,
+                                },
+                                response,
+                            },
+                            not_found,
+                        };
+                    }
+                    RepositoryResult::NotModified => {
+                        self.circuits.record_success(&key);
+                        return FetchOutcome {
+                            result: FetchResult::NotModified {
+                                origin: UpstreamOrigin {
+                                    repository: repository.id.clone(),
+                                    circuit: key,
+                                    identity,
+                                },
+                            },
+                            not_found,
+                        };
+                    }
+                    RepositoryResult::NotFound => {
+                        tracing::trace!(upstream = %key, path = relative_path, "upstream artifact was not found");
+                        self.circuits.record_success(&key);
+                        if repository.cache_writes {
+                            not_found.push(identity);
+                        }
+                        answered_not_found = true;
+                    }
+                    RepositoryResult::GatewayFailure { breaker_failure } => {
+                        failed = true;
+                        if breaker_failure {
+                            self.circuits.record_failure(&key);
+                        } else {
+                            self.circuits.record_success(&key);
+                        }
                     }
                 }
-                RepositoryResult::GatewayFailure { breaker_failure } => {
-                    gateway_failure = true;
-                    if breaker_failure {
-                        self.circuits.record_failure(&repository.id);
-                    } else {
-                        self.circuits.record_success(&repository.id);
-                    }
-                }
+            }
+            // The URLs of one repository mirror each other, so a URL that
+            // answered with a 404 settles the repository's answer; only a
+            // repository where every URL failed or was skipped leaves the
+            // possibility that it might still serve the artifact.
+            if failed && !answered_not_found {
+                gateway_failure = true;
             }
         }
 
@@ -755,6 +797,7 @@ impl UpstreamClient {
     async fn fetch_repository(
         &self,
         repository: &RepositoryConfig,
+        circuit: &str,
         url: Url,
         extras: Option<&RequestExtras>,
         priority: RequestPriority,
@@ -785,7 +828,7 @@ impl UpstreamClient {
                     ) =>
                 {
                     tracing::warn!(
-                        upstream = %repository.id,
+                        upstream = %circuit,
                         status = %response.status(),
                         "upstream rejected request"
                     );
@@ -795,14 +838,14 @@ impl UpstreamClient {
                 }
                 Ok(response) if response.status().is_server_error() => {
                     if attempt + 1 < MAX_ATTEMPTS {
-                        tracing::debug!(upstream = %repository.id, status = %response.status(), attempt = attempt + 1, "retryable upstream server error");
+                        tracing::debug!(upstream = %circuit, status = %response.status(), attempt = attempt + 1, "retryable upstream server error");
                     } else {
-                        tracing::warn!(upstream = %repository.id, status = %response.status(), attempt = attempt + 1, "upstream server error after retries");
+                        tracing::warn!(upstream = %circuit, status = %response.status(), attempt = attempt + 1, "upstream server error after retries");
                     }
                 }
                 Ok(response) => {
                     tracing::warn!(
-                        upstream = %repository.id,
+                        upstream = %circuit,
                         status = %response.status(),
                         "unexpected upstream response"
                     );
@@ -813,9 +856,9 @@ impl UpstreamClient {
                 Err(error) => {
                     let error = describe_error(&error);
                     if attempt + 1 < MAX_ATTEMPTS {
-                        tracing::debug!(upstream = %repository.id, attempt = attempt + 1, %error, "retryable upstream request failure");
+                        tracing::debug!(upstream = %circuit, attempt = attempt + 1, %error, "retryable upstream request failure");
                     } else {
-                        tracing::warn!(upstream = %repository.id, attempt = attempt + 1, %error, "upstream request failed after retries");
+                        tracing::warn!(upstream = %circuit, attempt = attempt + 1, %error, "upstream request failed after retries");
                     }
                 }
             }
@@ -919,8 +962,18 @@ fn build_repository_headers(
         .collect()
 }
 
-fn repository_id(repository: &RepositoryConfig) -> String {
-    to_hex(&Sha256::digest(repository.url.as_str().as_bytes()))
+fn repository_identity(url: &Url) -> String {
+    to_hex(&Sha256::digest(url.as_str().as_bytes()))
+}
+
+/// Circuit-breaker key of one upstream URL: the repository id while the
+/// repository has a single URL, indexed when it has several.
+fn circuit_key(repository: &str, url_count: usize, index: usize) -> String {
+    if url_count == 1 {
+        repository.to_owned()
+    } else {
+        format!("{repository}[{index}]")
+    }
 }
 
 enum RepositoryResult {
@@ -978,7 +1031,8 @@ mod tests {
         let repositories = vec![
             RepositoryConfig {
                 id: "a".into(),
-                url: Url::parse("https://a.example/").unwrap(),
+                url: Some(Url::parse("https://a.example/").unwrap()),
+                urls: Vec::new(),
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
@@ -990,7 +1044,8 @@ mod tests {
             },
             RepositoryConfig {
                 id: "b".into(),
-                url: Url::parse("https://b.example/").unwrap(),
+                url: Some(Url::parse("https://b.example/").unwrap()),
+                urls: Vec::new(),
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),
@@ -1032,7 +1087,8 @@ mod tests {
     fn proxied_repository(use_proxy: Option<bool>) -> RepositoryConfig {
         RepositoryConfig {
             id: "a".into(),
-            url: Url::parse("https://a.example/").unwrap(),
+            url: Some(Url::parse("https://a.example/").unwrap()),
+            urls: Vec::new(),
             use_proxy,
             max_concurrency: None,
             rules: Vec::new(),
@@ -1042,6 +1098,64 @@ mod tests {
             password: None,
             bearer_token: None,
         }
+    }
+
+    fn multi_url_repository() -> RepositoryConfig {
+        RepositoryConfig {
+            id: "central".into(),
+            url: None,
+            urls: vec![
+                Url::parse("https://first.example/maven2/").unwrap(),
+                Url::parse("https://second.example/maven2/").unwrap(),
+            ],
+            use_proxy: None,
+            max_concurrency: None,
+            rules: Vec::new(),
+            cache_writes: true,
+            headers: Default::default(),
+            username: None,
+            password: None,
+            bearer_token: None,
+        }
+    }
+
+    fn client_with(repositories: Vec<RepositoryConfig>) -> UpstreamClient {
+        UpstreamClient::new(
+            repositories,
+            &UpstreamConfig::default(),
+            &CircuitBreakerConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn names_single_url_circuits_after_the_repository() {
+        assert_eq!(circuit_key("central", 1, 0), "central");
+        assert_eq!(circuit_key("central", 2, 0), "central[0]");
+        assert_eq!(circuit_key("central", 2, 1), "central[1]");
+    }
+
+    #[test]
+    fn reports_one_circuit_per_repository_url() {
+        let client = client_with(vec![multi_url_repository()]);
+        let ids = client
+            .statuses()
+            .into_iter()
+            .map(|status| status.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["central[0]", "central[1]"]);
+    }
+
+    #[test]
+    fn skips_urls_recorded_as_negative_and_keeps_the_rest() {
+        let client = client_with(vec![multi_url_repository()]);
+        let second = Url::parse("https://second.example/maven2/").unwrap();
+        let negative = HashSet::from([repository_identity(&second)]);
+        assert!(!client.all_candidates_negative("com/example/a.jar", &negative));
+
+        let first = Url::parse("https://first.example/maven2/").unwrap();
+        let negative = HashSet::from([repository_identity(&first), repository_identity(&second)]);
+        assert!(client.all_candidates_negative("com/example/a.jar", &negative));
     }
 
     fn proxied_client(proxies: &[&str], proxy_fallback: bool) -> UpstreamClient {

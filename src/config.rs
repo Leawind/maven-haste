@@ -766,8 +766,14 @@ pub struct RepositoryConfig {
     /// logging, and statistics; use only lowercase letters, digits,
     /// underscores, and hyphens.
     pub id: String,
-    /// Upstream repository base URL.
-    pub url: Url,
+    /// Upstream repository base URL. Set either `url` or `urls`, not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Url>,
+    /// Ordered upstream base URLs; requests try them in order and move to
+    /// the next one when a URL is unreachable, rejects the request, or
+    /// reports the artifact missing. Set either `url` or `urls`, not both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<Url>,
     /// Optional per-repository proxy switch: `true` uses `[upstream].proxy`,
     /// `false` connects directly, omitted follows `[upstream].proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -802,6 +808,17 @@ pub struct RepositoryConfig {
     /// `${ENV_VAR}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
+}
+
+impl RepositoryConfig {
+    /// The ordered upstream base URLs, taken from `url` or `urls`. Validation
+    /// guarantees exactly one of the two is set.
+    pub fn urls(&self) -> &[Url] {
+        match self.url {
+            Some(ref url) => std::slice::from_ref(url),
+            None => &self.urls,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -1016,9 +1033,11 @@ fn normalize(config: &mut Config) {
         }
     }
     for repository in &mut config.repositories {
-        if !repository.url.path().ends_with('/') {
-            let path = format!("{}/", repository.url.path());
-            repository.url.set_path(&path);
+        for url in repository.url.iter_mut().chain(repository.urls.iter_mut()) {
+            if !url.path().ends_with('/') {
+                let path = format!("{}/", url.path());
+                url.set_path(&path);
+            }
         }
     }
 }
@@ -1236,10 +1255,16 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
             )));
         }
         validate_repository_id(&repository.id)?;
-        if !urls.insert(repository.url.as_str().to_owned()) {
+        if repository.url.is_some() && !repository.urls.is_empty() {
             return Err(ConfigError::new(format!(
-                "repository {:?} URL {} is already used by another repository",
-                repository.id, repository.url
+                "repository {:?} must set either url or urls, not both",
+                repository.id
+            )));
+        }
+        if repository.url.is_none() && repository.urls.is_empty() {
+            return Err(ConfigError::new(format!(
+                "repository {:?} requires url or urls",
+                repository.id
             )));
         }
         if repository.use_proxy == Some(true) && config.upstream.proxy.is_empty() {
@@ -1254,23 +1279,31 @@ fn validate_repositories(config: &Config) -> Result<(), ConfigError> {
                 repository.id
             )));
         }
-        if !matches!(repository.url.scheme(), "http" | "https") {
-            return Err(ConfigError::new(format!(
-                "repository {:?} URL must use http or https",
-                repository.id
-            )));
-        }
-        if repository.url.cannot_be_a_base()
-            || repository.url.host_str().is_none()
-            || !repository.url.username().is_empty()
-            || repository.url.password().is_some()
-            || repository.url.query().is_some()
-            || repository.url.fragment().is_some()
-        {
-            return Err(ConfigError::new(format!(
-                "repository {:?} URL must be a base URL without query or fragment",
-                repository.id
-            )));
+        for url in repository.urls() {
+            if !urls.insert(url.as_str().to_owned()) {
+                return Err(ConfigError::new(format!(
+                    "repository {:?} URL {} is already used",
+                    repository.id, url
+                )));
+            }
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err(ConfigError::new(format!(
+                    "repository {:?} URL must use http or https",
+                    repository.id
+                )));
+            }
+            if url.cannot_be_a_base()
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(ConfigError::new(format!(
+                    "repository {:?} URL must be a base URL without query or fragment",
+                    repository.id
+                )));
+            }
         }
         validate_repository_access(repository)?;
         for rule in &repository.rules {
@@ -1464,7 +1497,7 @@ mod tests {
             directory.path().join("repository")
         );
         assert_eq!(
-            loaded.config.repositories[0].url.as_str(),
+            loaded.config.repositories[0].urls()[0].as_str(),
             "https://repo.example/maven2/"
         );
     }
@@ -1485,7 +1518,7 @@ mod tests {
             directory.path().join("repository")
         );
         assert_eq!(
-            loaded.config.repositories[0].url.as_str(),
+            loaded.config.repositories[0].urls()[0].as_str(),
             "https://repo.example/maven2/"
         );
     }
@@ -1526,7 +1559,7 @@ mod tests {
         let loaded = Config::load(&cli(&path)).unwrap();
         assert_eq!(loaded.config.repositories[0].id, "central");
         assert_eq!(
-            loaded.config.repositories[0].url.as_str(),
+            loaded.config.repositories[0].urls()[0].as_str(),
             "https://repo.example/maven2/"
         );
     }
@@ -1749,7 +1782,7 @@ url = "https://repo.example/maven2"
             directory.path().join("repository/.maven-haste/cache.db")
         );
         assert_eq!(
-            loaded.config.repositories[0].url.as_str(),
+            loaded.config.repositories[0].urls()[0].as_str(),
             "https://repo.example/maven2/"
         );
     }
@@ -1868,9 +1901,95 @@ url = "https://repo.example/maven2"
         let cli1 = &cli(&path);
         let error = Config::load(cli1).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("is already used by another repository"),
+            error.to_string().contains("is already used"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn accepts_an_ordered_list_of_repository_urls() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+urls = ["https://mirror.example/maven2", "https://repo.example/maven2/"]
+"#,
+        );
+        let cli1 = &cli(&path);
+        let loaded = Config::load(cli1).unwrap();
+        let urls = loaded.config.repositories[0].urls();
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].as_str(), "https://mirror.example/maven2/");
+        assert_eq!(urls[1].as_str(), "https://repo.example/maven2/");
+    }
+
+    #[test]
+    fn rejects_a_repository_that_sets_url_and_urls_together() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+urls = ["https://mirror.example/"]
+"#,
+        );
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
+        assert!(
+            error.to_string().contains("either url or urls, not both"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_repository_without_url_or_urls() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+"#,
+        );
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
+        assert!(
+            error.to_string().contains("requires url or urls"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_repository_that_lists_one_url_twice() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[[repositories]]
+id = "central"
+urls = ["https://repo.example/", "https://repo.example/"]
+"#,
+        );
+        let cli1 = &cli(&path);
+        let error = Config::load(cli1).unwrap_err();
+        assert!(
+            error.to_string().contains("is already used"),
             "unexpected error: {error}"
         );
     }
@@ -2726,7 +2845,7 @@ cache_writes = false
         );
         assert_eq!(
             defs["RepositoryConfig"]["required"],
-            serde_json::json!(["id", "url"])
+            serde_json::json!(["id"])
         );
     }
 

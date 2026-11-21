@@ -26,19 +26,14 @@ pub(crate) async fn fetch_checksum_file(
     relative: &str,
     priority: RequestPriority,
 ) -> Option<Result<String, CacheFailure>> {
-    let (checksum_repository, response) =
-        match upstream.fetch_from(repository, relative, priority).await {
-            FetchResult::Found {
-                repository,
-                response,
-                ..
-            } => (repository, response),
-            FetchResult::NotFound => return None,
-            _ => return Some(Err(CacheFailure::Gateway)),
-        };
+    let (origin, response) = match upstream.fetch_from(repository, relative, priority).await {
+        FetchResult::Found { origin, response } => (origin, response),
+        FetchResult::NotFound => return None,
+        _ => return Some(Err(CacheFailure::Gateway)),
+    };
     match read_checksum_response(response, MAX_CHECKSUM_BYTES).await {
         Ok(supplied) => {
-            upstream.record_body_success(&checksum_repository);
+            upstream.record_body_success(&origin.circuit);
             Some(Ok(supplied))
         }
         Err(error) => Some(Err(error)),

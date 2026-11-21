@@ -401,7 +401,8 @@ mod tests {
             logging: LoggingConfig::default(),
             repositories: vec![RepositoryConfig {
                 id: id.into(),
-                url: Url::parse("https://repo.example/").unwrap(),
+                url: Some(Url::parse("https://repo.example/").unwrap()),
+                urls: Vec::new(),
                 use_proxy: None,
                 max_concurrency: None,
                 rules: Vec::new(),

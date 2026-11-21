@@ -837,6 +837,147 @@ async fn retries_server_errors_and_respects_excluding_routes() {
 }
 
 #[tokio::test]
+async fn falls_back_to_the_next_repository_url_when_one_reports_the_artifact_missing() {
+    let missing_calls = Arc::new(AtomicUsize::new(0));
+    let missing_handler_calls = Arc::clone(&missing_calls);
+    let missing = Router::new().route(
+        "/{*path}",
+        get(move || {
+            let calls = Arc::clone(&missing_handler_calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                error_response(StatusCode::NOT_FOUND, "missing")
+            }
+        }),
+    );
+    let (missing_url, missing_task) = spawn_upstream(missing).await;
+
+    let serving = Router::new().route(
+        "/{*path}",
+        get(|OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::NOT_FOUND, "missing checksum");
+            }
+            Response::new(Body::from("metadata-from-second-url"))
+        }),
+    );
+    let (serving_url, serving_task) = spawn_upstream(serving).await;
+
+    let directory = TempDir::new().unwrap();
+    let repositories = vec![repository_with_urls(
+        "central",
+        &[missing_url, serving_url],
+        &[],
+    )];
+    let (app, database) = test_app(&directory, repositories).await;
+    let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+    let response = request(&app, Method::GET, metadata).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "metadata-from-second-url");
+    assert_eq!(
+        database
+            .negative_entries("com/example/demo/maven-metadata.xml")
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the 404 is remembered for the URL that reported it, not for the repository"
+    );
+    missing_task.abort();
+    serving_task.abort();
+}
+
+#[tokio::test]
+async fn falls_back_to_the_next_repository_url_when_one_is_unreachable() {
+    let refused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unreachable = Url::parse(&format!("http://{}/", refused.local_addr().unwrap())).unwrap();
+    drop(refused);
+
+    let serving = Router::new().route(
+        "/{*path}",
+        get(|OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::NOT_FOUND, "missing checksum");
+            }
+            Response::new(Body::from("artifact-from-fallback"))
+        }),
+    );
+    let (serving_url, serving_task) = spawn_upstream(serving).await;
+
+    let directory = TempDir::new().unwrap();
+    let repositories = vec![repository_with_urls(
+        "central",
+        &[unreachable, serving_url],
+        &[],
+    )];
+    let upstream_config = UpstreamConfig {
+        connect_timeout: Duration::from_millis(100),
+        read_timeout: Duration::from_millis(100),
+        ..UpstreamConfig::default()
+    };
+    let (app, _) = test_app_with_cache(
+        &directory,
+        repositories,
+        CacheConfig::default(),
+        upstream_config,
+    )
+    .await;
+
+    let response = request(&app, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "artifact-from-fallback");
+    serving_task.abort();
+}
+
+#[tokio::test]
+async fn remembers_the_missing_urls_of_one_repository_after_a_complete_miss() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let missing = Router::new().route(
+        "/{*path}",
+        get(move || {
+            let calls = Arc::clone(&handler_calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                error_response(StatusCode::NOT_FOUND, "missing")
+            }
+        }),
+    );
+    let (first_url, first_task) = spawn_upstream(missing.clone()).await;
+    let (second_url, second_task) = spawn_upstream(missing).await;
+    let directory = TempDir::new().unwrap();
+    let repositories = vec![repository_with_urls(
+        "central",
+        &[first_url, second_url],
+        &[],
+    )];
+    let (app, database) = test_app(&directory, repositories).await;
+    let metadata = "/maven/com/example/demo/maven-metadata.xml";
+
+    assert_eq!(
+        request(&app, Method::GET, metadata).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&app, Method::GET, metadata).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        database
+            .negative_entries("com/example/demo/maven-metadata.xml")
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "each URL that reported the miss is remembered separately"
+    );
+    first_task.abort();
+    second_task.abort();
+}
+
+#[tokio::test]
 async fn returns_not_found_when_every_repository_is_excluded() {
     let directory = TempDir::new().unwrap();
     let unreachable = Url::parse("http://127.0.0.1:9/").unwrap();
@@ -2909,11 +3050,28 @@ fn repository_with_cache(
 ) -> RepositoryConfig {
     RepositoryConfig {
         id: id.into(),
-        url: url.clone(),
+        url: Some(url.clone()),
+        urls: Vec::new(),
         use_proxy: None,
         max_concurrency: None,
         rules: rules.iter().map(|rule| (*rule).into()).collect(),
         cache_writes,
+        headers: Default::default(),
+        username: None,
+        password: None,
+        bearer_token: None,
+    }
+}
+
+fn repository_with_urls(id: &str, urls: &[Url], rules: &[&str]) -> RepositoryConfig {
+    RepositoryConfig {
+        id: id.into(),
+        url: None,
+        urls: urls.to_vec(),
+        use_proxy: None,
+        max_concurrency: None,
+        rules: rules.iter().map(|rule| (*rule).into()).collect(),
+        cache_writes: true,
         headers: Default::default(),
         username: None,
         password: None,

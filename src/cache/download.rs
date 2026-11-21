@@ -16,7 +16,9 @@ use crate::cache::types::{
 };
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
-use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
+use crate::upstream::{
+    FetchResult, RequestPriority, UpstreamClient, UpstreamOrigin, UpstreamResponse,
+};
 
 const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
 const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
@@ -234,15 +236,11 @@ impl crate::cache::CacheManager {
             }
 
             match outcome.result {
-                FetchResult::Found {
-                    repository,
-                    repository_id,
-                    response,
-                } => {
+                FetchResult::Found { origin, response } => {
                     if negative_enabled {
                         self.inner
                             .database
-                            .delete_negative_entry(request.relative(), &repository_id)
+                            .delete_negative_entry(request.relative(), &origin.identity)
                             .await
                             .map_err(internal)?;
                     }
@@ -252,18 +250,18 @@ impl crate::cache::CacheManager {
                     let prefetch = self.start_checksum_prefetch(
                         runtime.upstream.clone(),
                         request,
-                        &repository,
+                        &origin.repository,
                         priority,
                     );
                     let downloaded = match self
-                        .download_main(upstream, request, &repository, response, priority)
+                        .download_main(upstream, request, &origin, response, priority)
                         .await
                     {
                         Ok(downloaded) => downloaded,
                         Err(error) => {
                             upstream_failure = true;
-                            upstream.record_body_failure(&repository);
-                            excluded.insert(repository);
+                            upstream.record_body_failure(&origin.circuit);
+                            excluded.insert(origin.repository.clone());
                             tracing::warn!(%error, "discarding failed upstream download");
                             continue;
                         }
@@ -272,7 +270,7 @@ impl crate::cache::CacheManager {
                         .prepare_bundle(
                             upstream,
                             request,
-                            &repository,
+                            &origin.repository,
                             downloaded,
                             priority,
                             prefetch,
@@ -282,18 +280,18 @@ impl crate::cache::CacheManager {
                         Ok(files) => return Ok(PreparedFetch::Bundle(files)),
                         Err(BundleError::Unstable(error)) => {
                             upstream_failure = true;
-                            excluded.insert(repository.clone());
-                            upstream.record_body_failure(&repository);
-                            tracing::warn!(upstream = %repository, %error, "upstream content remained unstable");
+                            excluded.insert(origin.repository.clone());
+                            upstream.record_body_failure(&origin.circuit);
+                            tracing::warn!(upstream = %origin.repository, %error, "upstream content remained unstable");
                         }
                         Err(BundleError::Internal(error)) => return Err(error),
                     }
                 }
-                FetchResult::NotModified { repository_id } => {
+                FetchResult::NotModified { origin } => {
                     if negative_enabled {
                         self.inner
                             .database
-                            .delete_negative_entry(request.relative(), &repository_id)
+                            .delete_negative_entry(request.relative(), &origin.identity)
                             .await
                             .map_err(internal)?;
                     }
@@ -312,7 +310,7 @@ impl crate::cache::CacheManager {
         &self,
         upstream: &UpstreamClient,
         request: &MavenPath,
-        repository: &str,
+        origin: &UpstreamOrigin,
         response: UpstreamResponse,
         priority: RequestPriority,
     ) -> Result<DownloadedMain, CacheFailure> {
@@ -326,7 +324,7 @@ impl crate::cache::CacheManager {
         for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
             match stream_response_to_file(response, &temporary, resume).await {
                 Ok((size, sha1, sha256, sha512)) => {
-                    upstream.record_body_success(repository);
+                    upstream.record_body_success(&origin.circuit);
                     return Ok(DownloadedMain {
                         temporary,
                         size,
@@ -339,7 +337,7 @@ impl crate::cache::CacheManager {
                 }
                 Err(StreamFailure::Interrupted { error, bytes }) => {
                     tracing::debug!(
-                        upstream = repository,
+                        upstream = %origin.repository,
                         path = request.relative(),
                         bytes,
                         %error,
@@ -360,7 +358,7 @@ impl crate::cache::CacheManager {
                         Some(validator) => {
                             upstream
                                 .fetch_range(
-                                    repository,
+                                    &origin.repository,
                                     request.relative(),
                                     bytes,
                                     validator,
@@ -370,7 +368,7 @@ impl crate::cache::CacheManager {
                         }
                         None => {
                             upstream
-                                .fetch_from(repository, request.relative(), priority)
+                                .fetch_from(&origin.repository, request.relative(), priority)
                                 .await
                         }
                     };
@@ -389,7 +387,7 @@ impl crate::cache::CacheManager {
                                     response: restarted,
                                     ..
                                 } = upstream
-                                    .fetch_from(repository, request.relative(), priority)
+                                    .fetch_from(&origin.repository, request.relative(), priority)
                                     .await
                                 else {
                                     let _ = remove_file_if_exists(&temporary).await;
@@ -593,8 +591,8 @@ impl crate::cache::CacheManager {
                 .fetch_from(repository, request.relative(), priority)
                 .await
             {
-                FetchResult::Found { response, .. } => self
-                    .download_main(upstream, request, repository, response, priority)
+                FetchResult::Found { origin, response } => self
+                    .download_main(upstream, request, &origin, response, priority)
                     .await
                     .ok(),
                 _ => None,

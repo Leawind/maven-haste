@@ -152,9 +152,20 @@
                     "type": "array"
                 },
                 "url": {
-                    "description": "Upstream repository base URL.",
+                    "description": "Upstream repository base URL. Set either `url` or `urls`, not both.",
                     "format": "uri",
-                    "type": "string"
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "urls": {
+                    "description": "Ordered upstream base URLs; requests try them in order and move to\nthe next one when a URL is unreachable, rejects the request, or\nreports the artifact missing. Set either `url` or `urls`, not both.",
+                    "items": {
+                        "format": "uri",
+                        "type": "string"
+                    },
+                    "type": "array"
                 },
                 "use_proxy": {
                     "description": "Optional per-repository proxy switch: `true` uses `[upstream].proxy`,\n`false` connects directly, omitted follows `[upstream].proxy`.",
@@ -172,8 +183,7 @@
                 }
             },
             "required": [
-                "id",
-                "url"
+                "id"
             ],
             "type": "object"
         },
