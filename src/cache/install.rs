@@ -121,7 +121,11 @@ impl crate::cache::CacheManager {
             if !self.inner.serves.is_busy(&conflict) {
                 let path = relative_file_path(&self.inner.storage.root, &conflict);
                 if let Err(error) = remove_file_if_exists(&path).await {
-                    tracing::warn!(%error, "failed to retire a legacy case alias");
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "failed to retire a legacy case alias"
+                    );
                 }
             }
         }

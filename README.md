@@ -218,6 +218,8 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 
 `--verbose` also enables debug logging; if both are set, the environment variable takes precedence.
 
+Each request is logged at info level with the cache status, HTTP status, method, duration, and transferred size in fixed columns, followed by the request path and the serving upstream. Startup prints the endpoint URL to give the build tool, and a configuration reload names the sections it applied.
+
 File logging is disabled by default. Configure `[logging]` with `enabled = true` to enable. The default directory is `<root>/.maven-haste/logs`.
 
 `logging.filter` uses the [`tracing-subscriber` EnvFilter directive syntax][env-filter-directives]. Proxy URLs in logs have their credentials redacted.

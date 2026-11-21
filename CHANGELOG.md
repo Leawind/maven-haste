@@ -21,6 +21,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Log output reports the client-facing endpoint at start-up, prints each request with the cache status, status code, method, duration, and size in fixed columns before the artifact path, records JSON access events as fields without a duplicated message, and names the configuration sections a reload applied.
 - Default configuration discovery now rejects files of different formats across the working directory and the user configuration directory; pass `--config <PATH>` to choose one. Files of the same format still prefer the working directory.
 - The upstream request latency histogram is now labeled per repository URL instead of being reported as one process-wide series; aggregate queries are unaffected.
 - Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.

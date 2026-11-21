@@ -502,32 +502,19 @@ fn finish_access(state: &Arc<Mutex<AccessState>>, completion: &'static str) {
     }
     let elapsed = state.started.elapsed();
     crate::metrics::RESPONSE_DURATION.observe(elapsed);
-    let elapsed_ms = elapsed.as_millis() as u64;
-    let prefix = state.cache.to_ascii_uppercase();
-    let mut message = format!(
-        "[{}] {} {} {} {}ms {}B upstream={}",
-        prefix,
-        state.method,
-        state.path,
-        state.status,
-        elapsed_ms,
-        state.bytes_sent,
-        state.upstream
-    );
-    if completion != "complete" {
-        message.push_str(&format!(" completion={completion}"));
-    }
-    tracing::debug!(
+    // Access events carry structured fields only: the console formatter builds
+    // the human-readable line, and the JSON file log stays queryable without a
+    // duplicated preformatted message.
+    tracing::info!(
         target: "maven_haste::access",
         cache = state.cache,
         method = state.method,
         path = state.path,
         status = state.status,
         upstream = state.upstream,
-        elapsed_ms,
+        elapsed_ms = elapsed.as_millis() as u64,
         bytes_sent = state.bytes_sent,
         completion,
-        "{message}"
     );
     // Releasing the shared temporary removes the file once this response is
     // the last holder; concurrent responses keep their own references. The

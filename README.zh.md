@@ -217,6 +217,8 @@ RUST_LOG=maven_haste=debug maven-haste run -c ./maven-haste.toml
 
 也可以使用 `--verbose` 快速启用调试日志；若同时设置 `RUST_LOG`，环境变量优先。
 
+每个请求都会以 info 级别记录一行：固定列宽缓存状态、HTTP 状态码、方法、耗时和传输字节数，随后是请求路径和实际服务的上游。启动时打印可直接填入构建工具的端点 URL；配置热重载会说明应用了哪些配置段。
+
 文件日志默认关闭。在 `[logging]` 中设置 `enabled = true` 开启；默认目录为 `<root>/.maven-haste/logs`。
 
 `logging.filter` 使用 [`tracing-subscriber` EnvFilter 指令语法][env-filter-directives]。日志中的代理 URL 会隐藏凭据。

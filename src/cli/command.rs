@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use crate::cli::Cli;
@@ -42,12 +43,15 @@ impl Command {
                 for warning in &loaded.warnings {
                     tracing::warn!("{warning}");
                 }
-                tracing::info!(config = %loaded.path.display(), "loaded configuration");
                 tracing::info!(
+                    config = %loaded.path.display(),
+                    version = env!("CARGO_PKG_VERSION"),
                     root = %loaded.config.storage.root.display(),
-                    case_sensitive = storage.case_sensitive,
-                    "storage initialized"
+                    repositories = loaded.config.repositories.len(),
+                    offline = loaded.config.upstream.offline,
+                    "loaded configuration"
                 );
+                tracing::debug!(case_sensitive = storage.case_sensitive, "storage inspected");
                 let database = db::Database::open(loaded.config.storage.db_path()).await?;
                 let upstream = upstream::UpstreamClient::new(
                     loaded.config.repositories.clone(),
@@ -73,7 +77,10 @@ impl Command {
                 let bind = listener.local_addr().map_err(|error| {
                     AppError::Runtime(format!("failed to inspect HTTP listener: {error}"))
                 })?;
-                tracing::info!(%bind, "Maven proxy is ready");
+                tracing::info!(
+                    endpoint = %endpoint_url(bind, &loaded.config.server.base_path),
+                    "Maven proxy is ready"
+                );
                 let reload_tracker = reload::ReloadTracker::default();
                 let reload = reload::spawn(
                     loaded.path.clone(),
@@ -101,6 +108,25 @@ impl Command {
     }
 }
 
+/// Client-facing URL of the Maven endpoint. An unspecified bind address is
+/// replaced with the matching loopback address, so the printed URL can be
+/// pasted into build-tool settings as is.
+fn endpoint_url(bind: SocketAddr, base_path: &str) -> String {
+    let address = if bind.ip().is_unspecified() {
+        match bind {
+            SocketAddr::V4(address) => {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), address.port())
+            }
+            SocketAddr::V6(address) => {
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), address.port())
+            }
+        }
+    } else {
+        bind
+    };
+    format!("http://{address}{base_path}")
+}
+
 /// Runs maintenance on the interval from the current configuration. A short
 /// poll lets a reload change the interval without waiting for the previous
 /// (possibly much longer) one to elapse.
@@ -120,5 +146,28 @@ async fn run_maintenance(cache: cache::CacheManager) {
         } else {
             tokio::time::sleep(wait.min(Duration::from_secs(1))).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prints_a_usable_endpoint_for_unspecified_bind_addresses() {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080);
+        assert_eq!(endpoint_url(bind, "/maven"), "http://127.0.0.1:8080/maven");
+
+        let bind = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 8080);
+        assert_eq!(endpoint_url(bind, "/maven"), "http://[::1]:8080/maven");
+    }
+
+    #[test]
+    fn keeps_an_explicit_bind_address_in_the_endpoint() {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 8080);
+        assert_eq!(
+            endpoint_url(bind, "/maven"),
+            "http://192.168.1.10:8080/maven"
+        );
     }
 }

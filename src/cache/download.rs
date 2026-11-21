@@ -262,7 +262,12 @@ impl crate::cache::CacheManager {
                             upstream_failure = true;
                             upstream.record_body_failure(&origin.circuit);
                             excluded.insert(origin.repository.clone());
-                            tracing::warn!(%error, "discarding failed upstream download");
+                            tracing::warn!(
+                                path = request.relative(),
+                                upstream = %origin.repository,
+                                %error,
+                                "discarding failed upstream download"
+                            );
                             continue;
                         }
                     };

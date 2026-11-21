@@ -127,13 +127,13 @@ pub(crate) fn spawn(
                 continue;
             }
             match reload_once(&path, bind, &cache, &current) {
-                Ok((loaded, restart_required)) => {
+                Ok((loaded, applied)) => {
                     for warning in &loaded.warnings {
                         tracing::warn!("{warning}");
                     }
-                    if !restart_required.is_empty() {
+                    if !applied.restart_required.is_empty() {
                         tracing::warn!(
-                            sections = %restart_required.join(", "),
+                            sections = %applied.restart_required.join(", "),
                             "configuration changes require a restart and were not applied"
                         );
                     }
@@ -141,6 +141,7 @@ pub(crate) fn spawn(
                     tracker.record_success(current.repositories.len());
                     tracing::info!(
                         path = %loaded.path.display(),
+                        applied = %applied.rendered(),
                         repositories = current.repositories.len(),
                         offline = current.upstream.offline,
                         "configuration file reloaded"
@@ -159,6 +160,25 @@ pub(crate) fn spawn(
     })
 }
 
+/// What one reload changed: the sections that were applied in place and the
+/// sections that still require a restart.
+#[derive(Debug)]
+pub(crate) struct Applied {
+    pub(crate) restart_required: Vec<&'static str>,
+    pub(crate) applied: Vec<&'static str>,
+}
+
+impl Applied {
+    /// The applied section names joined for logging.
+    fn rendered(&self) -> String {
+        if self.applied.is_empty() {
+            "none".to_owned()
+        } else {
+            self.applied.join(", ")
+        }
+    }
+}
+
 /// Loads and applies one configuration change. Kept separate from the watch
 /// loop so tests can exercise both YAML and TOML without waiting for timers.
 pub(crate) fn reload_once(
@@ -166,21 +186,17 @@ pub(crate) fn reload_once(
     bind: Option<SocketAddr>,
     cache: &CacheManager,
     previous: &Config,
-) -> Result<(LoadedConfig, Vec<&'static str>), AppError> {
+) -> Result<(LoadedConfig, Applied), AppError> {
     let loaded = Config::load_path(path, bind)?;
-    let restart_required = apply(cache, previous, &loaded.config)?;
-    Ok((loaded, restart_required))
+    let applied = apply(cache, previous, &loaded.config)?;
+    Ok((loaded, applied))
 }
 
 /// Applies every reloadable section, returning the sections that still
 /// require a restart. The upstream client is built before anything is
 /// swapped, so an invalid certificate, header, or repository leaves the
 /// running configuration untouched.
-fn apply(
-    cache: &CacheManager,
-    previous: &Config,
-    next: &Config,
-) -> Result<Vec<&'static str>, AppError> {
+fn apply(cache: &CacheManager, previous: &Config, next: &Config) -> Result<Applied, AppError> {
     let mut restart_required = Vec::new();
     if next.server != previous.server {
         restart_required.push("server");
@@ -192,11 +208,20 @@ fn apply(
         restart_required.push("logging");
     }
 
-    let runtime_changed = next.cache != previous.cache
-        || next.upstream != previous.upstream
-        || next.circuit_breaker != previous.circuit_breaker
-        || next.repositories != previous.repositories;
-    if runtime_changed {
+    let mut applied = Vec::new();
+    if next.cache != previous.cache {
+        applied.push("cache");
+    }
+    if next.upstream != previous.upstream {
+        applied.push("upstream");
+    }
+    if next.circuit_breaker != previous.circuit_breaker {
+        applied.push("circuit_breaker");
+    }
+    if next.repositories != previous.repositories {
+        applied.push("repositories");
+    }
+    if !applied.is_empty() {
         let upstream = UpstreamClient::new(
             next.repositories.clone(),
             &next.upstream,
@@ -210,7 +235,10 @@ fn apply(
             .collect::<HashSet<_>>();
         cache.reload(next.cache.clone(), upstream, caching_disabled);
     }
-    Ok(restart_required)
+    Ok(Applied {
+        restart_required,
+        applied,
+    })
 }
 
 #[cfg(test)]
@@ -296,9 +324,14 @@ repositories:
         let cache = build_cache(&initial.config).await;
 
         fs::write(&path, changed).unwrap();
-        let (loaded, restart_required) = reload_once(&path, None, &cache, &initial.config).unwrap();
+        let (loaded, applied) = reload_once(&path, None, &cache, &initial.config).unwrap();
 
-        assert!(restart_required.is_empty(), "{restart_required:?}");
+        assert!(
+            applied.restart_required.is_empty(),
+            "{:?}",
+            applied.restart_required
+        );
+        assert_eq!(applied.rendered(), "cache, upstream, repositories");
         assert_eq!(
             loaded.config.cache.metadata_ttl,
             std::time::Duration::from_secs(2)
@@ -403,9 +436,10 @@ url = 'https://repo.example/'
 "#,
         )
         .unwrap();
-        let (_, restart_required) = reload_once(&path, None, &cache, &initial.config).unwrap();
+        let (_, applied) = reload_once(&path, None, &cache, &initial.config).unwrap();
 
-        assert_eq!(restart_required, vec!["server"]);
+        assert_eq!(applied.restart_required, vec!["server"]);
+        assert_eq!(applied.rendered(), "cache");
         assert_eq!(
             cache.cache_config().metadata_ttl,
             std::time::Duration::from_secs(2)

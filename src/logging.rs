@@ -152,11 +152,12 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
+        let mut fields = AccessFields::default();
+        event.record(&mut fields);
         ConsoleTime.format_time(&mut writer)?;
         write_colored_level(&mut writer, event.metadata().level())?;
-        write_colored_access_message(&mut writer, &visitor.message)
+        let message = render_access(&fields);
+        write_colored_access_message(&mut writer, &message, access_color(&fields))
     }
 }
 
@@ -175,45 +176,140 @@ fn write_colored_level(writer: &mut Writer<'_>, level: &Level) -> fmt::Result {
     }
 }
 
-fn write_colored_access_message(writer: &mut Writer<'_>, message: &str) -> fmt::Result {
-    if !writer.has_ansi_escapes() {
-        return writeln!(writer, "{message}");
+fn write_colored_access_message(
+    writer: &mut Writer<'_>,
+    message: &str,
+    color: &'static str,
+) -> fmt::Result {
+    if writer.has_ansi_escapes() {
+        writeln!(writer, "\x1b[{color}m{message}\x1b[0m")
+    } else {
+        writeln!(writer, "{message}")
     }
-    let status = message
-        .split_whitespace()
-        .nth(3)
-        .and_then(|token| token.parse::<u16>().ok());
-    let Some(prefix_end) = message.find(']').map(|index| index + 1) else {
-        return writeln!(writer, "{message}");
-    };
-    let (prefix, _) = message.split_at(prefix_end);
-    let color = access_color(status, prefix);
-    writeln!(writer, "\x1b[{color}m{message}\x1b[0m")
 }
 
-fn access_color(status: Option<u16>, prefix: &str) -> &'static str {
-    match status {
+/// Renders one request line. Fixed leading columns keep the status, method,
+/// duration, and size readable while the path, whose length varies, comes
+/// last.
+fn render_access(fields: &AccessFields) -> String {
+    let cache = if fields.cache.is_empty() {
+        "-"
+    } else {
+        fields.cache.as_str()
+    };
+    let status = fields
+        .status
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let method = if fields.method.is_empty() {
+        "-"
+    } else {
+        fields.method.as_str()
+    };
+    let mut line = format!(
+        "[{}] {} {} {} {} {}",
+        cache.to_ascii_uppercase(),
+        status,
+        method,
+        human_duration(fields.elapsed_ms),
+        human_bytes(fields.bytes_sent),
+        fields.path
+    );
+    if !fields.upstream.is_empty() && fields.upstream != "-" {
+        line.push_str(" upstream=");
+        line.push_str(&fields.upstream);
+    }
+    if !fields.completion.is_empty() && fields.completion != "complete" {
+        line.push_str(" completion=");
+        line.push_str(&fields.completion);
+    }
+    line
+}
+
+fn human_duration(millis: u64) -> String {
+    match millis {
+        0 => "<1ms".to_owned(),
+        1..1000 => format!("{millis}ms"),
+        _ => format!("{:.2}s", millis as f64 / 1000.0),
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    match bytes {
+        0 => "-".to_owned(),
+        1..1024 => format!("{bytes}B"),
+        _ if bytes < 1024 * 1024 => format!("{:.1}KB", bytes as f64 / KIB),
+        _ if bytes < 1024 * 1024 * 1024 => {
+            format!("{:.1}MB", bytes as f64 / (KIB * KIB))
+        }
+        _ => format!("{:.2}GB", bytes as f64 / (KIB * KIB * KIB)),
+    }
+}
+
+fn access_color(fields: &AccessFields) -> &'static str {
+    match fields.status {
         Some(400..=499) => "33",
         Some(500..=599) => "31",
-        _ => match prefix {
-            "[HIT]" => "32",
-            "[MISS]" => "33",
-            "[STALE]" => "36",
-            "[ERROR]" => "31",
+        _ => match fields.cache.as_str() {
+            "hit" => "32",
+            "miss" | "none" => "33",
+            "stale" => "36",
+            "error" => "31",
             _ => "37",
         },
     }
 }
 
+/// The structured fields of one access event, collected for the console
+/// formatter.
 #[derive(Default)]
-struct MessageVisitor {
-    message: String,
+struct AccessFields {
+    cache: String,
+    method: String,
+    path: String,
+    status: Option<u16>,
+    upstream: String,
+    elapsed_ms: u64,
+    bytes_sent: u64,
+    completion: String,
 }
 
-impl Visit for MessageVisitor {
+impl Visit for AccessFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "cache" => self.cache = value.to_owned(),
+            "method" => self.method = value.to_owned(),
+            "path" => self.path = value.to_owned(),
+            "upstream" => self.upstream = value.to_owned(),
+            "completion" => self.completion = value.to_owned(),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        match field.name() {
+            "status" => self.status = u16::try_from(value).ok(),
+            "elapsed_ms" => self.elapsed_ms = value,
+            "bytes_sent" => self.bytes_sent = value,
+            _ => {}
+        }
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{value:?}");
+        // Values without a typed recorder (for example a `Display` wrapper)
+        // still render, so a formatter change cannot silently drop a field.
+        let rendered = format!("{value:?}");
+        match field.name() {
+            "cache" => self.cache = rendered,
+            "method" => self.method = rendered,
+            "path" => self.path = rendered,
+            "upstream" => self.upstream = rendered,
+            "completion" => self.completion = rendered,
+            "status" => self.status = rendered.parse().ok(),
+            "elapsed_ms" => self.elapsed_ms = rendered.parse().unwrap_or_default(),
+            "bytes_sent" => self.bytes_sent = rendered.parse().unwrap_or_default(),
+            _ => {}
         }
     }
 }
@@ -309,15 +405,112 @@ mod tests {
         assert!(directory.path().join("unrelated.jsonl").exists());
     }
 
+    fn access_fields(
+        cache: &str,
+        status: Option<u16>,
+        bytes_sent: u64,
+        elapsed_ms: u64,
+    ) -> AccessFields {
+        AccessFields {
+            cache: cache.to_owned(),
+            method: "GET".to_owned(),
+            path: "com/example/demo/1.0/demo-1.0.jar".to_owned(),
+            status,
+            upstream: "central".to_owned(),
+            elapsed_ms,
+            bytes_sent,
+            completion: "complete".to_owned(),
+        }
+    }
+
     #[test]
     fn access_colors_highlight_error_statuses() {
-        assert_eq!(access_color(Some(200), "[HIT]"), "32");
-        assert_eq!(access_color(Some(304), "[HIT]"), "32");
-        assert_eq!(access_color(Some(404), "[NONE]"), "33");
-        assert_eq!(access_color(Some(502), "[NONE]"), "31");
-        assert_eq!(access_color(Some(500), "[ERROR]"), "31");
-        assert_eq!(access_color(None, "[MISS]"), "33");
-        assert_eq!(access_color(None, "unexpected"), "37");
+        assert_eq!(access_color(&access_fields("hit", Some(200), 1, 1)), "32");
+        assert_eq!(access_color(&access_fields("hit", Some(304), 0, 1)), "32");
+        assert_eq!(access_color(&access_fields("none", Some(404), 0, 1)), "33");
+        assert_eq!(access_color(&access_fields("none", Some(502), 0, 1)), "31");
+        assert_eq!(access_color(&access_fields("error", Some(500), 0, 1)), "31");
+        assert_eq!(access_color(&access_fields("miss", Some(200), 1, 1)), "33");
+        assert_eq!(access_color(&access_fields("stale", Some(200), 1, 1)), "36");
+        assert_eq!(access_color(&access_fields("other", Some(200), 1, 1)), "37");
+    }
+
+    #[test]
+    fn access_line_puts_fixed_columns_before_the_path() {
+        let mut fields = access_fields("hit", Some(200), 1234, 3);
+        assert_eq!(
+            render_access(&fields),
+            "[HIT] 200 GET 3ms 1.2KB com/example/demo/1.0/demo-1.0.jar upstream=central"
+        );
+
+        fields.elapsed_ms = 1234;
+        assert_eq!(
+            render_access(&fields),
+            "[HIT] 200 GET 1.23s 1.2KB com/example/demo/1.0/demo-1.0.jar upstream=central"
+        );
+
+        fields.upstream = "-".to_owned();
+        fields.bytes_sent = 0;
+        fields.completion = "aborted".to_owned();
+        fields.status = None;
+        assert_eq!(
+            render_access(&fields),
+            "[HIT] - GET 1.23s - com/example/demo/1.0/demo-1.0.jar completion=aborted"
+        );
+    }
+
+    #[test]
+    fn humanizes_sizes_and_durations() {
+        assert_eq!(human_duration(0), "<1ms");
+        assert_eq!(human_duration(999), "999ms");
+        assert_eq!(human_duration(1500), "1.50s");
+        assert_eq!(human_bytes(0), "-");
+        assert_eq!(human_bytes(512), "512B");
+        assert_eq!(human_bytes(1536), "1.5KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn renders_access_events_recorded_as_structured_fields() {
+        #[derive(Clone)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Buffer(output.clone());
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .event_format(AccessConsoleFormat)
+                .with_ansi(false)
+                .with_writer(move || writer.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "maven_haste::access",
+                cache = "hit",
+                method = "GET",
+                path = "com/example/demo-1.0.jar",
+                status = 200_u16,
+                upstream = "central",
+                elapsed_ms = 3_u64,
+                bytes_sent = 1234_u64,
+                completion = "complete",
+            );
+        });
+
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("[HIT] 200 GET 3ms 1.2KB com/example/demo-1.0.jar upstream=central"),
+            "{text}"
+        );
     }
 
     #[test]
