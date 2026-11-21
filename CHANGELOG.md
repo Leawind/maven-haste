@@ -24,7 +24,7 @@ All notable changes to this project are documented in this file.
 - Default configuration discovery now rejects files of different formats across the working directory and the user configuration directory; pass `--config <PATH>` to choose one. Files of the same format still prefer the working directory.
 - The upstream request latency histogram is now labeled per repository URL instead of being reported as one process-wide series; aggregate queries are unaffected.
 - Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.
-- Require Rust 1.89 or later for standard-library file locks that serialize object publication and collection across server and CLI processes.
+- Require Rust 1.95 or later.
 - Reject persistent checksum mismatches and checksum-fetch failures instead of accepting repeated content or a failed validation retry.
 - Keep GitHub Actions manually triggered while checking Deno formatting in both workflows and linting all Cargo targets before publication.
 - Cache hits verify only the strongest stored digest, and access counters are written in batches instead of one database write per request.
