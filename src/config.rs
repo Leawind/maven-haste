@@ -1474,6 +1474,14 @@ mod tests {
         path
     }
 
+    /// The directory the loader resolves relative paths against: the
+    /// canonicalized directory of the configuration file. Canonicalizing the
+    /// temporary directory keeps Windows assertions from depending on whether
+    /// the OS returns the long or the 8.3 form of the user profile path.
+    fn config_directory(directory: &TempDir) -> PathBuf {
+        dunce::canonicalize(directory.path()).unwrap()
+    }
+
     fn cli(path: &Path) -> Cli {
         Cli::try_parse_from(["maven-haste", "run", "--config", path.to_str().unwrap()]).unwrap()
     }
@@ -1494,7 +1502,7 @@ mod tests {
         let loaded = Config::load(&cli(&path)).unwrap();
         assert_eq!(
             loaded.config.storage.root,
-            directory.path().join("repository")
+            config_directory(&directory).join("repository")
         );
         assert_eq!(
             loaded.config.repositories[0].urls()[0].as_str(),
@@ -1515,7 +1523,7 @@ mod tests {
         let loaded = Config::load(&cli(&path)).unwrap();
         assert_eq!(
             loaded.config.storage.root,
-            directory.path().join("repository")
+            config_directory(&directory).join("repository")
         );
         assert_eq!(
             loaded.config.repositories[0].urls()[0].as_str(),
@@ -1769,17 +1777,15 @@ url = "https://repo.example/maven2"
 
         let cli1 = &cli(&path);
         let loaded = Config::load(cli1).unwrap();
-        assert_eq!(
-            loaded.config.storage.root,
-            directory.path().join("repository")
-        );
+        let root = config_directory(&directory).join("repository");
+        assert_eq!(loaded.config.storage.root, root);
         assert_eq!(
             loaded.config.storage.tmp_dir(),
-            directory.path().join("repository/.maven-haste/tmp")
+            root.join(".maven-haste/tmp")
         );
         assert_eq!(
             loaded.config.storage.db_path(),
-            directory.path().join("repository/.maven-haste/cache.db")
+            root.join(".maven-haste/cache.db")
         );
         assert_eq!(
             loaded.config.repositories[0].urls()[0].as_str(),
@@ -1830,7 +1836,7 @@ url = "https://repo.example/"
         assert!(!loaded.config.logging.enabled);
         assert_eq!(
             loaded.config.logging.directory(),
-            directory.path().join("repository/.maven-haste/logs")
+            config_directory(&directory).join("repository/.maven-haste/logs")
         );
     }
 
@@ -2018,7 +2024,10 @@ url = "https://repo.example/"
         let loaded = Config::load(cli1).unwrap();
         let logging = loaded.config.logging;
         assert!(logging.enabled);
-        assert_eq!(logging.directory(), directory.path().join("audit"));
+        assert_eq!(
+            logging.directory(),
+            config_directory(&directory).join("audit")
+        );
         assert_eq!(logging.retention, Duration::from_secs(7 * 24 * 60 * 60));
     }
 
