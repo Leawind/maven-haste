@@ -333,6 +333,7 @@ pub(crate) async fn cleanup_downloads(downloads: &[DownloadedMain]) {
 /// record is computed during a cache hit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DigestAlgorithm {
+    Md5,
     Sha1,
     Sha256,
     Sha512,
@@ -351,6 +352,7 @@ pub(crate) async fn hash_open_file_with(
     algorithm: DigestAlgorithm,
 ) -> Result<(u64, String), std::io::Error> {
     match algorithm {
+        DigestAlgorithm::Md5 => hash_with::<md5::Md5>(file).await,
         DigestAlgorithm::Sha1 => hash_with::<Sha1>(file).await,
         DigestAlgorithm::Sha256 => hash_with::<Sha256>(file).await,
         DigestAlgorithm::Sha512 => hash_with::<Sha512>(file).await,

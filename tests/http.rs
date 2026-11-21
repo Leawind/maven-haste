@@ -8,8 +8,8 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
 use axum::http::header::{
-    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
-    RANGE,
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED, RANGE,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use axum::routing::{any, get};
@@ -401,6 +401,26 @@ async fn serves_client_validators_and_single_byte_ranges_from_cache() {
     assert_eq!(suffix.headers()[CONTENT_LENGTH], "4");
     assert!(body(suffix).await.is_empty());
 
+    let mut strong_range_headers = HeaderMap::new();
+    strong_range_headers.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
+    strong_range_headers.insert(IF_RANGE, HeaderValue::from_static("\"artifact-tag\""));
+    let strong_range =
+        request_with_headers(&app, Method::GET, ARTIFACT_PATH, strong_range_headers).await;
+    assert_eq!(strong_range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body(strong_range).await, "tifa");
+
+    let mut weak_range_headers = HeaderMap::new();
+    weak_range_headers.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
+    weak_range_headers.insert(IF_RANGE, HeaderValue::from_static("W/\"artifact-tag\""));
+    let weak_range =
+        request_with_headers(&app, Method::GET, ARTIFACT_PATH, weak_range_headers).await;
+    assert_eq!(
+        weak_range.status(),
+        StatusCode::OK,
+        "a weak If-Range validator must not select a partial response"
+    );
+    assert_eq!(body(weak_range).await, "artifact-body");
+
     let mut inverted_headers = HeaderMap::new();
     inverted_headers.insert(RANGE, HeaderValue::from_static("bytes=5-2"));
     let inverted = request_with_headers(&app, Method::GET, ARTIFACT_PATH, inverted_headers).await;
@@ -414,6 +434,69 @@ async fn serves_client_validators_and_single_byte_ranges_from_cache() {
         request_with_headers(&app, Method::GET, ARTIFACT_PATH, unsatisfiable_headers).await;
     assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(unsatisfiable.headers()[CONTENT_RANGE], "bytes */13");
+    task.abort();
+}
+
+#[tokio::test]
+async fn evaluates_http_date_validators_by_time() {
+    let upstream = Router::new().route(
+        "/{*path}",
+        get(|OriginalUri(uri): OriginalUri| async move {
+            if is_checksum_uri(&uri) {
+                return error_response(StatusCode::NOT_FOUND, "missing checksum");
+            }
+            Response::builder()
+                .header(LAST_MODIFIED, "Sun, 06 Nov 1994 08:49:37 GMT")
+                .body(Body::from("artifact-body"))
+                .unwrap()
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    assert_eq!(
+        request(&app, Method::GET, ARTIFACT_PATH).await.status(),
+        StatusCode::OK
+    );
+
+    for supplied in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 09:00:00 GMT",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(IF_MODIFIED_SINCE, HeaderValue::from_str(supplied).unwrap());
+        let response = request_with_headers(&app, Method::GET, ARTIFACT_PATH, headers).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{supplied}");
+    }
+
+    let mut earlier = HeaderMap::new();
+    earlier.insert(
+        IF_MODIFIED_SINCE,
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:00:00 GMT"),
+    );
+    let response = request_with_headers(&app, Method::GET, ARTIFACT_PATH, earlier).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "artifact-body");
+
+    let mut range = HeaderMap::new();
+    range.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
+    range.insert(
+        IF_RANGE,
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
+    );
+    let response = request_with_headers(&app, Method::GET, ARTIFACT_PATH, range).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body(response).await, "tifa");
+
+    let mut stale_range = HeaderMap::new();
+    stale_range.insert(RANGE, HeaderValue::from_static("bytes=2-5"));
+    stale_range.insert(
+        IF_RANGE,
+        HeaderValue::from_static("Sun, 06 Nov 1994 08:00:00 GMT"),
+    );
+    let response = request_with_headers(&app, Method::GET, ARTIFACT_PATH, stale_range).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "artifact-body");
     task.abort();
 }
 
@@ -1457,9 +1540,14 @@ async fn generates_and_serves_missing_checksums() {
         body(request(&app, Method::GET, ARTIFACT_PATH).await).await,
         "abc"
     );
+    let md5_path = format!("{ARTIFACT_PATH}.md5");
     let sha1_path = format!("{ARTIFACT_PATH}.sha1");
     let sha256_path = format!("{ARTIFACT_PATH}.sha256");
     let sha512_path = format!("{ARTIFACT_PATH}.sha512");
+    assert_eq!(
+        body(request(&app, Method::GET, &md5_path).await).await,
+        "900150983cd24fb0d6963f7d28e17f72\n"
+    );
     assert_eq!(
         body(request(&app, Method::GET, &sha1_path).await).await,
         "a9993e364706816aba3e25717850c26c9cd0d89d\n"

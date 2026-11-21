@@ -91,7 +91,8 @@ impl MavenPath {
     pub fn generated_checksum_source(&self) -> Option<Self> {
         let filename = self.segments.last()?;
         let content_filename = filename
-            .strip_suffix(".sha1")
+            .strip_suffix(".md5")
+            .or_else(|| filename.strip_suffix(".sha1"))
             .or_else(|| filename.strip_suffix(".sha256"))
             .or_else(|| filename.strip_suffix(".sha512"))?;
         let mut segments = self.segments.clone();

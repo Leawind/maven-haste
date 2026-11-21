@@ -678,17 +678,31 @@ fn client_cache_is_fresh(
         .get(IF_MODIFIED_SINCE)
         .and_then(|value| value.to_str().ok())
         .zip(last_modified)
-        .is_some_and(|(supplied, cached)| supplied == cached)
+        .is_some_and(|(supplied, cached)| not_modified_since(cached, supplied))
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: Option<&str>, last_modified: Option<&str>) -> bool {
     let Some(supplied) = headers.get(IF_RANGE).and_then(|value| value.to_str().ok()) else {
         return true;
     };
-    if supplied.starts_with('"') || supplied.starts_with("W/\"") {
-        etag.is_some_and(|etag| supplied == etag)
+    if supplied.starts_with('"') || supplied.starts_with("W/") {
+        // If-Range requires a strong validator on both sides.
+        !supplied.starts_with("W/")
+            && etag.is_some_and(|etag| !etag.starts_with("W/") && etag == supplied)
     } else {
-        last_modified.is_some_and(|last_modified| supplied == last_modified)
+        last_modified.is_some_and(|last_modified| not_modified_since(last_modified, supplied))
+    }
+}
+
+/// Whether `cached` is not newer than the HTTP-date supplied by the client.
+/// Invalid dates never satisfy a conditional request.
+fn not_modified_since(cached: &str, supplied: &str) -> bool {
+    match (
+        httpdate::parse_http_date(cached),
+        httpdate::parse_http_date(supplied),
+    ) {
+        (Ok(cached), Ok(supplied)) => cached <= supplied,
+        _ => false,
     }
 }
 

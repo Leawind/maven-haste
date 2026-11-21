@@ -653,6 +653,7 @@ impl crate::cache::CacheManager {
         source: &mut tokio::fs::File,
     ) -> Result<PreparedFile, CacheFailure> {
         let algorithm = match request.file_type.as_str() {
+            "md5" => DigestAlgorithm::Md5,
             "sha1" => DigestAlgorithm::Sha1,
             "sha256" => DigestAlgorithm::Sha256,
             "sha512" => DigestAlgorithm::Sha512,
