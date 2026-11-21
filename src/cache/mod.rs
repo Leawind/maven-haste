@@ -86,6 +86,25 @@ pub struct CachedArtifact {
     pub object_guard: Option<ServeGuard>,
 }
 
+/// Headers learned from an upstream HEAD response when the artifact is not
+/// cached. The body is deliberately not downloaded.
+#[derive(Clone, Debug)]
+pub struct UpstreamHead {
+    pub repository: String,
+    pub content_length: Option<u64>,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+pub enum HeadOutcome {
+    Cached(CachedArtifact),
+    Upstream(UpstreamHead),
+    NotFound,
+    Gateway,
+    Offline,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheStatus {
     Hit,

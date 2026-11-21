@@ -1,25 +1,30 @@
 //! Serving cached artifacts: cache lookup, freshness, request coalescing,
 //! and background refresh scheduling.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use dashmap::mapref::entry::Entry;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use tokio::fs;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::OnceCell;
 
 use crate::cache::io::{
-    DigestAlgorithm, hash_open_file_with, internal, is_fresh, recorded_file_path, unix_timestamp,
+    DigestAlgorithm, hash_open_file_with, header_string, internal, is_fresh, recorded_file_path,
+    unix_timestamp,
 };
 use crate::cache::types::DownloadOutcome;
 use crate::cache::{
     CacheFailure, CacheManager, CacheStatus, CachedArtifact, Flight, HIT_FLUSH_THRESHOLD,
+    HeadOutcome, UpstreamHead,
 };
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
+use crate::upstream::FetchResult;
 
 impl CacheManager {
     /// Resolves a request to a cached artifact, downloading it from an
@@ -106,6 +111,92 @@ impl CacheManager {
                     object_guard: None,
                 })
             }
+        }
+    }
+
+    /// Resolves a client HEAD request. Cached artifacts go through `get`;
+    /// uncached artifacts are probed with an upstream HEAD so a HEAD request
+    /// never downloads a body merely to report its headers.
+    pub async fn head(&self, request: &MavenPath) -> Result<HeadOutcome, CacheFailure> {
+        if request.generated_checksum_source().is_some() {
+            return self.get(request).await.map(HeadOutcome::Cached);
+        }
+        let record = self
+            .inner
+            .database
+            .get(request.relative())
+            .await
+            .map_err(internal)?;
+        if record.is_some() {
+            return self.get(request).await.map(HeadOutcome::Cached);
+        }
+
+        self.inner.requests.fetch_add(1, Ordering::Relaxed);
+        let negative = if request.policy() == CachePolicy::Mutable {
+            self.fresh_negative_entries(request.relative()).await?
+        } else {
+            HashSet::new()
+        };
+        if request.policy() == CachePolicy::Mutable
+            && self
+                .inner
+                .upstream
+                .all_candidates_negative(request.relative(), &negative)
+        {
+            self.inner.hits.fetch_add(1, Ordering::Relaxed);
+            self.inner.negative_hits.fetch_add(1, Ordering::Relaxed);
+            self.log_not_found(request);
+            return Ok(HeadOutcome::NotFound);
+        }
+
+        self.inner.misses.fetch_add(1, Ordering::Relaxed);
+        if self.inner.upstream.offline() {
+            return Ok(HeadOutcome::Offline);
+        }
+        let outcome = self
+            .inner
+            .upstream
+            .head(request.relative(), &HashSet::new(), &negative)
+            .await;
+        if request.policy() == CachePolicy::Mutable && !outcome.not_found.is_empty() {
+            self.inner
+                .database
+                .upsert_negative_entries(
+                    request.relative(),
+                    outcome.not_found.clone(),
+                    unix_timestamp(),
+                )
+                .await
+                .map_err(internal)?;
+        }
+        match outcome.result {
+            FetchResult::Found {
+                repository,
+                repository_id,
+                response,
+            } => {
+                if request.policy() == CachePolicy::Mutable {
+                    self.inner
+                        .database
+                        .delete_negative_entry(request.relative(), &repository_id)
+                        .await
+                        .map_err(internal)?;
+                }
+                let head = UpstreamHead {
+                    repository: repository.clone(),
+                    content_length: header_string(response.headers(), CONTENT_LENGTH)
+                        .and_then(|value| value.parse().ok()),
+                    content_type: header_string(response.headers(), CONTENT_TYPE),
+                    etag: header_string(response.headers(), ETAG),
+                    last_modified: header_string(response.headers(), LAST_MODIFIED),
+                };
+                drop(response);
+                self.inner.upstream.record_body_success(&repository);
+                Ok(HeadOutcome::Upstream(head))
+            }
+            FetchResult::NotModified { .. } => Ok(HeadOutcome::Gateway),
+            FetchResult::NotFound => Ok(HeadOutcome::NotFound),
+            FetchResult::GatewayFailure => Ok(HeadOutcome::Gateway),
         }
     }
 

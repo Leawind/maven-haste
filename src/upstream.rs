@@ -76,6 +76,12 @@ pub enum RequestPriority {
     Background,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestMethod {
+    Get,
+    Head,
+}
+
 pub struct UpstreamResponse {
     response: reqwest::Response,
     permit: RequestPermit,
@@ -394,10 +400,11 @@ impl UpstreamClient {
         repository: &RepositoryConfig,
         url: &Url,
         extras: Option<&RequestExtras>,
+        method: RequestMethod,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut last_error = None;
         for egress in self.egresses(repository) {
-            let failure = match self.send_via(repository, egress, url, extras).await {
+            let failure = match self.send_via(repository, egress, url, extras, method).await {
                 Ok(response) => return Ok(response),
                 Err(error) => error,
             };
@@ -419,8 +426,13 @@ impl UpstreamClient {
         egress: Egress,
         url: &Url,
         extras: Option<&RequestExtras>,
+        method: RequestMethod,
     ) -> Result<reqwest::Response, reqwest::Error> {
-        let mut request = self.client(egress).get(url.clone());
+        let client = self.client(egress);
+        let mut request = match method {
+            RequestMethod::Get => client.get(url.clone()),
+            RequestMethod::Head => client.head(url.clone()),
+        };
         if let Some(headers) = self.repository_headers.get(&repository.id) {
             request = request.headers(headers.clone());
         }
@@ -505,8 +517,39 @@ impl UpstreamClient {
             .cloned()
             .map(|repository| (repository, None))
             .collect();
-        self.fetch_ordered(relative_path, repositories, RequestPriority::Foreground)
-            .await
+        self.fetch_ordered(
+            relative_path,
+            repositories,
+            RequestPriority::Foreground,
+            RequestMethod::Get,
+        )
+        .await
+    }
+
+    /// Probes repositories with HEAD requests, used to answer a cache miss for
+    /// a client HEAD without downloading the artifact body.
+    pub async fn head(
+        &self,
+        relative_path: &str,
+        excluded: &HashSet<String>,
+        negative: &HashSet<String>,
+    ) -> FetchOutcome {
+        let repositories = self
+            .routes
+            .candidates(relative_path)
+            .into_iter()
+            .filter(|repository| !excluded.contains(&repository.id))
+            .filter(|repository| !negative.contains(&repository_id(repository)))
+            .cloned()
+            .map(|repository| (repository, None))
+            .collect();
+        self.fetch_ordered(
+            relative_path,
+            repositories,
+            RequestPriority::Foreground,
+            RequestMethod::Head,
+        )
+        .await
     }
 
     pub async fn refresh(
@@ -544,8 +587,13 @@ impl UpstreamClient {
                 .cloned()
                 .map(|repository| (repository, None)),
         );
-        self.fetch_ordered(relative_path, repositories, RequestPriority::Background)
-            .await
+        self.fetch_ordered(
+            relative_path,
+            repositories,
+            RequestPriority::Background,
+            RequestMethod::Get,
+        )
+        .await
     }
 
     pub async fn fetch_from(
@@ -557,9 +605,14 @@ impl UpstreamClient {
         let Some(repository) = self.routes.repository(repository).cloned() else {
             return FetchResult::GatewayFailure;
         };
-        self.fetch_ordered(relative_path, vec![(repository, None)], priority)
-            .await
-            .result
+        self.fetch_ordered(
+            relative_path,
+            vec![(repository, None)],
+            priority,
+            RequestMethod::Get,
+        )
+        .await
+        .result
     }
 
     /// Fetches `relative_path` from one repository starting at `offset`, to
@@ -580,9 +633,14 @@ impl UpstreamClient {
             if_range: Some(validator.to_owned()),
             ..RequestExtras::default()
         };
-        self.fetch_ordered(relative_path, vec![(repository, Some(extras))], priority)
-            .await
-            .result
+        self.fetch_ordered(
+            relative_path,
+            vec![(repository, Some(extras))],
+            priority,
+            RequestMethod::Get,
+        )
+        .await
+        .result
     }
 
     pub fn offline(&self) -> bool {
@@ -625,6 +683,7 @@ impl UpstreamClient {
         relative_path: &str,
         repositories: Vec<(RepositoryConfig, Option<RequestExtras>)>,
         priority: RequestPriority,
+        method: RequestMethod,
     ) -> FetchOutcome {
         let mut gateway_failure = false;
         let mut not_found = Vec::new();
@@ -645,7 +704,7 @@ impl UpstreamClient {
             };
 
             match self
-                .fetch_repository(&repository, url, extras.as_ref(), priority)
+                .fetch_repository(&repository, url, extras.as_ref(), priority, method)
                 .await
             {
                 RepositoryResult::Found(response) => {
@@ -699,11 +758,12 @@ impl UpstreamClient {
         url: Url,
         extras: Option<&RequestExtras>,
         priority: RequestPriority,
+        method: RequestMethod,
     ) -> RepositoryResult {
         for attempt in 0..MAX_ATTEMPTS {
             let permit = self.scheduler.acquire(&repository.id, priority).await;
             let started = Instant::now();
-            let response = self.send_request(repository, &url, extras).await;
+            let response = self.send_request(repository, &url, extras, method).await;
             crate::metrics::UPSTREAM_DURATION.observe(started.elapsed());
             match response {
                 Ok(response)

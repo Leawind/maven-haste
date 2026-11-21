@@ -12,7 +12,7 @@ use axum::http::header::{
     RANGE,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
-use axum::routing::get;
+use axum::routing::{any, get};
 use http_body_util::BodyExt;
 use maven_haste::cache::CacheManager;
 use maven_haste::config::{
@@ -259,6 +259,54 @@ async fn downloads_once_then_serves_get_and_head_from_permanent_cache() {
     assert_eq!(record.artifact_id, "demo");
     assert_eq!(record.upstream, "central");
     assert_eq!(record.request_count, 4);
+    task.abort();
+}
+
+#[tokio::test]
+async fn head_misses_probe_upstream_without_downloading_the_body() {
+    let get_calls = Arc::new(AtomicUsize::new(0));
+    let head_calls = Arc::new(AtomicUsize::new(0));
+    let handler_get = Arc::clone(&get_calls);
+    let handler_head = Arc::clone(&head_calls);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |method: Method| {
+            let get_calls = Arc::clone(&handler_get);
+            let head_calls = Arc::clone(&handler_head);
+            async move {
+                if method == Method::HEAD {
+                    head_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::builder()
+                        .header(CONTENT_LENGTH, "999")
+                        .header(ETAG, "\"head-tag\"")
+                        .body(Body::empty())
+                        .unwrap()
+                } else {
+                    get_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(Body::from("artifact-body"))
+                }
+            }
+        }),
+    );
+    let (url, task) = spawn_upstream(upstream).await;
+    let directory = TempDir::new().unwrap();
+    let (app, database) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+
+    let response = request(&app, Method::HEAD, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_LENGTH], "999");
+    assert_eq!(response.headers()[ETAG], "\"head-tag\"");
+    assert!(body(response).await.is_empty());
+    assert_eq!(get_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(head_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        database
+            .get("com/example/demo/1.0/demo-1.0.jar")
+            .await
+            .unwrap()
+            .is_none(),
+        "a HEAD probe must not publish a cache record"
+    );
     task.abort();
 }
 

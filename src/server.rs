@@ -22,7 +22,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
-use crate::cache::{CacheFailure, CacheManager, CachedArtifact, ServeGuard, SharedTemp};
+use crate::cache::{
+    CacheFailure, CacheManager, CachedArtifact, HeadOutcome, ServeGuard, SharedTemp, UpstreamHead,
+};
 use crate::error::AppError;
 use crate::request_path::{CachePolicy, MavenPath};
 
@@ -174,52 +176,10 @@ async fn artifact(
             );
         }
     };
-    let (response, cache_status, upstream, artifacts) = match state.cache.get(&request).await {
-        Ok(mut cached) => {
-            let cache_status = cached.status.as_str();
-            let upstream = cached.record.upstream.clone();
-            let artifacts = ResponseArtifacts {
-                temporary: cached.temporary.take(),
-                serve_guard: cached.serve_guard.take(),
-                object_guard: cached.object_guard.take(),
-            };
-            (
-                cached_response(cached, request.policy(), method == Method::HEAD, &headers).await,
-                cache_status,
-                Some(upstream),
-                artifacts,
-            )
-        }
-        Err(CacheFailure::NotFound) => (
-            error_response(StatusCode::NOT_FOUND, "artifact not found"),
-            "none",
-            None,
-            ResponseArtifacts::default(),
-        ),
-        Err(CacheFailure::Gateway) => (
-            error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed"),
-            "none",
-            None,
-            ResponseArtifacts::default(),
-        ),
-        Err(CacheFailure::Offline) => (
-            error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "offline mode: artifact is not cached",
-            ),
-            "none",
-            None,
-            ResponseArtifacts::default(),
-        ),
-        Err(CacheFailure::Internal(error)) => {
-            tracing::error!(path = request.relative(), %error, "cache request failed");
-            (
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error"),
-                "error",
-                None,
-                ResponseArtifacts::default(),
-            )
-        }
+    let (response, cache_status, upstream, artifacts) = if method == Method::HEAD {
+        head_artifact_response(&state, &request, &headers).await
+    } else {
+        get_artifact_response(&state, &request, &headers).await
     };
     track_response(
         response,
@@ -230,6 +190,160 @@ async fn artifact(
         started,
         artifacts,
     )
+}
+
+type ArtifactResponse = (
+    Response<Body>,
+    &'static str,
+    Option<String>,
+    ResponseArtifacts,
+);
+
+async fn get_artifact_response(
+    state: &AppState,
+    request: &MavenPath,
+    headers: &HeaderMap,
+) -> ArtifactResponse {
+    match state.cache.get(request).await {
+        Ok(mut cached) => {
+            let cache_status = cached.status.as_str();
+            let upstream = cached.record.upstream.clone();
+            let artifacts = take_response_artifacts(&mut cached);
+            (
+                cached_response(cached, request.policy(), false, headers).await,
+                cache_status,
+                Some(upstream),
+                artifacts,
+            )
+        }
+        Err(error) => failure_response(request, error),
+    }
+}
+
+async fn head_artifact_response(
+    state: &AppState,
+    request: &MavenPath,
+    headers: &HeaderMap,
+) -> ArtifactResponse {
+    match state.cache.head(request).await {
+        Ok(HeadOutcome::Cached(mut cached)) => {
+            let cache_status = cached.status.as_str();
+            let upstream = cached.record.upstream.clone();
+            let artifacts = take_response_artifacts(&mut cached);
+            (
+                cached_response(cached, request.policy(), true, headers).await,
+                cache_status,
+                Some(upstream),
+                artifacts,
+            )
+        }
+        Ok(HeadOutcome::Upstream(head)) => {
+            let upstream = head.repository.clone();
+            (
+                upstream_head_response(head, request, headers),
+                "miss",
+                Some(upstream),
+                ResponseArtifacts::default(),
+            )
+        }
+        Ok(HeadOutcome::NotFound) => failure_response(request, CacheFailure::NotFound),
+        Ok(HeadOutcome::Gateway) => failure_response(request, CacheFailure::Gateway),
+        Ok(HeadOutcome::Offline) => failure_response(request, CacheFailure::Offline),
+        Err(error) => failure_response(request, error),
+    }
+}
+
+fn take_response_artifacts(cached: &mut CachedArtifact) -> ResponseArtifacts {
+    ResponseArtifacts {
+        temporary: cached.temporary.take(),
+        serve_guard: cached.serve_guard.take(),
+        object_guard: cached.object_guard.take(),
+    }
+}
+
+fn failure_response(request: &MavenPath, error: CacheFailure) -> ArtifactResponse {
+    match error {
+        CacheFailure::NotFound => (
+            error_response(StatusCode::NOT_FOUND, "artifact not found"),
+            "none",
+            None,
+            ResponseArtifacts::default(),
+        ),
+        CacheFailure::Gateway => (
+            error_response(StatusCode::BAD_GATEWAY, "upstream repositories failed"),
+            "none",
+            None,
+            ResponseArtifacts::default(),
+        ),
+        CacheFailure::Offline => (
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "offline mode: artifact is not cached",
+            ),
+            "none",
+            None,
+            ResponseArtifacts::default(),
+        ),
+        CacheFailure::Internal(error) => {
+            tracing::error!(path = request.relative(), %error, "cache request failed");
+            (
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal cache error"),
+                "error",
+                None,
+                ResponseArtifacts::default(),
+            )
+        }
+    }
+}
+
+fn upstream_head_response(
+    head: UpstreamHead,
+    request: &MavenPath,
+    request_headers: &HeaderMap,
+) -> Response<Body> {
+    let cache_control = match request.policy() {
+        CachePolicy::Permanent => "public, max-age=31536000, immutable",
+        CachePolicy::Mutable => "no-cache",
+    };
+    if client_cache_is_fresh(
+        request_headers,
+        head.etag.as_deref(),
+        head.last_modified.as_deref(),
+    ) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        insert_common_headers(
+            response.headers_mut(),
+            cache_control,
+            head.etag.as_deref(),
+            head.last_modified.as_deref(),
+        );
+        return response;
+    }
+
+    let content_type = head.content_type.unwrap_or_else(|| {
+        mime_guess::from_path(request.relative())
+            .first_or_octet_stream()
+            .to_string()
+    });
+    let mut response = Response::new(Body::empty());
+    let headers = response.headers_mut();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&content_type).expect("MIME guesses are valid header values"),
+    );
+    if let Some(length) = head.content_length
+        && let Ok(value) = HeaderValue::from_str(&length.to_string())
+    {
+        headers.insert(CONTENT_LENGTH, value);
+    }
+    insert_common_headers(
+        headers,
+        cache_control,
+        head.etag.as_deref(),
+        head.last_modified.as_deref(),
+    );
+    response
 }
 
 /// Cache-owned resources tied to one response: released when the response
