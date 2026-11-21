@@ -98,7 +98,7 @@ pub struct UpstreamHead {
 }
 
 pub enum HeadOutcome {
-    Cached(CachedArtifact),
+    Cached(Box<CachedArtifact>),
     Upstream(UpstreamHead),
     NotFound,
     Gateway,

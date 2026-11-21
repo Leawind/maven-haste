@@ -147,6 +147,9 @@ impl crate::cache::CacheManager {
         let Some(max_size) = self.inner.config.max_size else {
             return Ok(());
         };
+        // Recent hits determine the eviction order, so persist them before
+        // reading the least recently used records.
+        self.flush_hits().await;
         let stats = self.inner.database.stats().await.map_err(internal)?;
         if stats.total_size <= max_size {
             return Ok(());

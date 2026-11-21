@@ -31,6 +31,12 @@ pub struct HistogramSnapshot {
     pub sum: f64,
 }
 
+impl Default for Histogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Histogram {
     pub const fn new() -> Self {
         Self {

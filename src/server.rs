@@ -229,9 +229,9 @@ async fn head_artifact_response(
         Ok(HeadOutcome::Cached(mut cached)) => {
             let cache_status = cached.status.as_str();
             let upstream = cached.record.upstream.clone();
-            let artifacts = take_response_artifacts(&mut cached);
+            let artifacts = take_response_artifacts(cached.as_mut());
             (
-                cached_response(cached, request.policy(), true, headers).await,
+                cached_response(*cached, request.policy(), true, headers).await,
                 cache_status,
                 Some(upstream),
                 artifacts,

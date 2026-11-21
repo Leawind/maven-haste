@@ -126,7 +126,10 @@ impl CacheManager {
     /// never downloads a body merely to report its headers.
     pub async fn head(&self, request: &MavenPath) -> Result<HeadOutcome, CacheFailure> {
         if request.generated_checksum_source().is_some() {
-            return self.get(request).await.map(HeadOutcome::Cached);
+            return self
+                .get(request)
+                .await
+                .map(|cached| HeadOutcome::Cached(Box::new(cached)));
         }
         let record = self
             .inner
@@ -135,7 +138,10 @@ impl CacheManager {
             .await
             .map_err(internal)?;
         if record.is_some() {
-            return self.get(request).await.map(HeadOutcome::Cached);
+            return self
+                .get(request)
+                .await
+                .map(|cached| HeadOutcome::Cached(Box::new(cached)));
         }
 
         self.inner.requests.fetch_add(1, Ordering::Relaxed);

@@ -64,6 +64,11 @@ impl ConfigCommand {
                 }
                 let database = crate::db::Database::open(loaded.config.storage.db_path()).await?;
                 database.ping().await?;
+                crate::upstream::UpstreamClient::new(
+                    loaded.config.repositories.clone(),
+                    &loaded.config.upstream,
+                    &loaded.config.circuit_breaker,
+                )?;
                 println!("configuration is valid: {}", loaded.path.display());
                 println!(
                     "storage is ready: {} ({})",

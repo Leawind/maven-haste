@@ -1256,15 +1256,19 @@ fn validate_repository_access(repository: &RepositoryConfig) -> Result<(), Confi
             repository.id
         )));
     }
-    if repository
-        .bearer_token
-        .as_deref()
-        .is_some_and(|token| token.is_empty())
-    {
-        return Err(ConfigError::new(format!(
-            "repository {:?} bearer_token must not be empty",
-            repository.id
-        )));
+    if let Some(token) = repository.bearer_token.as_deref() {
+        if token.is_empty() {
+            return Err(ConfigError::new(format!(
+                "repository {:?} bearer_token must not be empty",
+                repository.id
+            )));
+        }
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| {
+            ConfigError::new(format!(
+                "repository {:?} has an invalid bearer_token: {error}",
+                repository.id
+            ))
+        })?;
     }
     if basic && repository.bearer_token.is_some() {
         return Err(ConfigError::new(format!(

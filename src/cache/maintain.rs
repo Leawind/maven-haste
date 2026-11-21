@@ -15,7 +15,7 @@ impl CacheManager {
     /// schedules this periodically so the size limit holds even when no new
     /// files are written.
     pub async fn run_maintenance(&self) -> Result<(), CacheFailure> {
-        crate::storage::cleanup_stale_parts(&self.inner.storage.tmp_dir())
+        crate::storage::cleanup_stale_parts(self.inner.storage.tmp_dir())
             .await
             .map_err(|error| CacheFailure::Internal(error.to_string()))?;
         self.enforce_capacity(&HashSet::new()).await?;
