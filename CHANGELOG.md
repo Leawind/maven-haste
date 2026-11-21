@@ -9,6 +9,11 @@ All notable changes to this project are documented in this file.
 - `[upstream].proxy` now accepts an ordered list of proxy URLs (a single URL still works). Requests try the proxies in the listed order and hand the request to the next one when a proxy cannot be reached; each proxy has its own circuit breaker and is skipped for `circuit_breaker.recovery_timeout` after `circuit_breaker.failure_threshold` consecutive failures, then probed again.
 - Added `upstream.proxy_fallback` (default `true`): when every configured proxy cannot be reached, requests retry directly instead of failing. Repositories with `use_proxy = true` and `proxy_fallback = false` keep requiring the proxies.
 - `config init` and `config example` accept `--format json|yaml|toml`. Init defaults to YAML (`./maven-haste.yaml`) when neither a path nor a format is given; a path still decides its format by extension, and a `--format` that conflicts with the path's extension is rejected.
+- Repositories can send custom headers, HTTP Basic credentials, or a bearer token. Values support `${ENV_VAR}` expansion, and `[upstream].ca_bundle` adds root certificates for private certificate authorities.
+- `[upstream].offline` serves only cached content and fails uncached requests without contacting an upstream.
+- `cache warm` prefetches Maven paths from a manifest, `cache stats --json` prints machine-readable statistics, and `cache repair` recovers from a corrupt database.
+- `cache.negative_cache_permanent` optionally applies the negative TTL to immutable artifacts as well.
+- Missing `.md5` checksums are generated from verified cached bytes.
 
 ### Changed
 
@@ -16,6 +21,11 @@ All notable changes to this project are documented in this file.
 - Require Rust 1.89 or later for standard-library file locks that serialize object publication and collection across server and CLI processes.
 - Reject persistent checksum mismatches and checksum-fetch failures instead of accepting repeated content or a failed validation retry.
 - Keep GitHub Actions manually triggered while checking Deno formatting in both workflows and linting all Cargo targets before publication.
+- Cache hits verify only the strongest stored digest, and access counters are written in batches instead of one database write per request.
+- Capacity enforcement reads least-recently-used candidates in bounded batches.
+- `HEAD` requests for uncached artifacts probe upstreams with `HEAD` instead of downloading the body.
+- Unreferenced content objects are collected after a grace period, and incomplete downloads are swept only after 24 hours so concurrent commands cannot interrupt active downloads.
+- The container image builds from the lockfile, runs as a non-root user, exposes a health check, and is published for amd64 and arm64. Release archives now cover Linux and macOS on arm64 and publish SHA-256 checksums.
 
 ### Fixed
 
@@ -26,6 +36,13 @@ All notable changes to this project are documented in this file.
 - Refresh generated checksums together with their source artifact, and prevent regeneration from publishing a checksum for an obsolete source.
 - Refuse to overwrite release tags pointing at different commits; retries may reuse lightweight or annotated tags already pointing at the current commit.
 - Log the full transport error chain for failed upstream requests instead of only reqwest's `error sending request` headline, so proxy, DNS, and TLS failures are identifiable.
+- Redact proxy credentials from `config show` and proxy log messages.
+- Emit one `HELP` and one `TYPE` line per Prometheus metric family and declare counters correctly.
+- Evaluate `If-Modified-Since` and `If-Range` dates as HTTP dates, and require a strong validator for `If-Range`.
+- Record the checksum refresh attempt even when the source returns `304 Not Modified` or fails, preventing repeated conditional requests.
+- Create the internal storage directory before taking the object lock, so external temporary and database paths work on the first download.
+- A single artifact larger than the configured cache limit is served without evicting the rest of the cache.
+- Do not let CLI commands delete partial downloads that another process is still writing.
 
 ## [0.3.0]
 

@@ -1,378 +1,378 @@
 {
-  "$defs": {
-    "CacheConfig": {
-      "additionalProperties": false,
-      "description": "Optional cache settings; omit this table to use the defaults below.",
-      "properties": {
-        "maintenance_interval": {
-          "default": "1m",
-          "description": "Interval between background maintenance passes that enforce the cache\nsize limit and purge expired negative entries.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        },
-        "max_size": {
-          "default": null,
-          "description": "Optional maximum number of cached artifact bytes; omit to retain\ncached files indefinitely.",
-          "format": "uint64",
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "metadata_ttl": {
-          "default": "5m",
-          "description": "How long mutable metadata may be served before a background refresh\nstarts.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        },
-        "negative_cache_permanent": {
-          "default": false,
-          "description": "Also remember confirmed 404s for immutable artifacts, not only mutable\nmetadata and snapshot aliases. Defaults to `false`.",
-          "type": "boolean"
-        },
-        "negative_ttl": {
-          "default": "5m",
-          "description": "How long a confirmed 404 is remembered for one path in one upstream\nrepository.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "CircuitBreakerConfig": {
-      "additionalProperties": false,
-      "description": "Optional circuit-breaker settings; omit this table to use the defaults\nbelow.",
-      "properties": {
-        "failure_threshold": {
-          "default": 3,
-          "description": "Consecutive upstream failures required before temporarily skipping\nthat repository.",
-          "format": "uint32",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "recovery_timeout": {
-          "default": "30s",
-          "description": "Time to wait before probing an upstream repository after its circuit\nopens.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "LoggingConfig": {
-      "additionalProperties": false,
-      "description": "Optional JSON Lines file logging settings.",
-      "properties": {
-        "directory": {
-          "description": "Directory for daily JSON Lines log files; defaults to\n`<root>/.maven-haste/logs`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "enabled": {
-          "default": false,
-          "description": "Write JSON Lines logs to daily files.",
-          "type": "boolean"
-        },
-        "filter": {
-          "default": "maven_haste=info,maven_haste::access=debug",
-          "description": "Rust EnvFilter expression for file output; see\n<https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives>.",
-          "type": "string"
-        },
-        "retention": {
-          "default": "30days",
-          "description": "Retention period for completed daily log files.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "RepositoryConfig": {
-      "additionalProperties": false,
-      "description": "One upstream Maven repository; at least one entry is required.",
-      "properties": {
-        "bearer_token": {
-          "description": "Optional bearer token sent as `Authorization: Bearer`. Supports\n`${ENV_VAR}`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "cache_writes": {
-          "default": true,
-          "description": "Per-repository cache switch; defaults to `true`. `false` stops writing\nnew artifacts, checksums, and negative entries from this repository:\npreviously cached content is still served and nothing is deleted.",
-          "type": "boolean"
-        },
-        "headers": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "description": "Extra request headers sent to this repository, for example an API key\nor a vendor-specific header. Values support `${ENV_VAR}` expansion.",
-          "type": "object"
-        },
-        "id": {
-          "description": "Required unique repository id used for routing, circuit breaking,\nlogging, and statistics; use only lowercase letters, digits,\nunderscores, and hyphens.",
-          "type": "string"
-        },
-        "max_concurrency": {
-          "description": "Optional per-repository override of\n`default_repository_max_concurrency`.",
-          "format": "uint",
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "password": {
-          "description": "Optional HTTP Basic authentication password. Supports `${ENV_VAR}`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "rules": {
-          "default": [],
-          "description": "Optional ordered request-path glob rules; the first matching rule\ndecides participation. Prefix a rule with `!` to exclude it; `*`\nmatches within one path segment and `**` may match across path\nseparators.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "url": {
-          "description": "Upstream repository base URL.",
-          "format": "uri",
-          "type": "string"
-        },
-        "use_proxy": {
-          "description": "Optional per-repository proxy switch: `true` uses `[upstream].proxy`,\n`false` connects directly, omitted follows `[upstream].proxy`.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "username": {
-          "description": "Optional HTTP Basic authentication username. Supports `${ENV_VAR}`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "id",
-        "url"
-      ],
-      "type": "object"
-    },
-    "ServerConfig": {
-      "additionalProperties": false,
-      "description": "Optional server settings; omit this table to use `127.0.0.1:8080` and\n`/maven`.",
-      "properties": {
-        "base_path": {
-          "default": "/maven",
-          "description": "URL prefix for the local Maven repository endpoint. The root path and\n`/api` namespace are reserved for Maven Haste itself.",
-          "type": "string"
-        },
-        "bind": {
-          "default": "127.0.0.1:8080",
-          "description": "Address on which Maven Haste accepts HTTP requests.",
-          "examples": [
-            "127.0.0.1:8080"
-          ],
-          "pattern": "^(\\[[0-9a-fA-F:]+\\]|[0-9.]+):\\d+$",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "StorageConfig": {
-      "additionalProperties": false,
-      "description": "Storage layout: the cache root plus the internal directories, all resolved\nrelative to the configuration file's directory.",
-      "properties": {
-        "db_path": {
-          "description": "Optional SQLite database path; defaults to\n`<root>/.maven-haste/cache.db`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "root": {
-          "description": "Directory used for cached artifacts, temporary downloads, and the\nSQLite database. Relative paths are resolved against the configuration\nfile's directory.",
-          "type": "string"
-        },
-        "tmp_dir": {
-          "description": "Optional directory for temporary downloads; defaults to\n`<root>/.maven-haste/tmp`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "root"
-      ],
-      "type": "object"
-    },
-    "UpstreamConfig": {
-      "additionalProperties": false,
-      "description": "Optional upstream settings; omit this table to use the defaults below.",
-      "properties": {
-        "ca_bundle": {
-          "description": "Optional PEM or DER file with additional root certificates for\nupstream TLS connections. Relative paths are resolved against the\nconfiguration file's directory.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "connect_timeout": {
-          "default": "10s",
-          "description": "Maximum time allowed to establish a connection to an upstream\nrepository.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
-        },
-        "default_repository_max_concurrency": {
-          "default": 10,
-          "description": "Per-repository concurrency limit when a repository does not override\nit.",
-          "format": "uint",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "foreground_priority_burst": {
-          "default": 8,
-          "description": "Admit one queued cache refresh after this many foreground downloads\nwhile both are waiting.",
-          "format": "uint",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "max_concurrency": {
-          "default": 32,
-          "description": "Maximum number of simultaneous requests across all upstream\nrepositories.",
-          "format": "uint",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "offline": {
-          "default": false,
-          "description": "Serve only cached content. Cache misses fail without contacting an\nupstream repository.",
-          "type": "boolean"
-        },
-        "proxy": {
-          "description": "Ordered upstream proxies. Requests try each proxy in the listed order\nand move to the next one when a proxy cannot be reached. Accepts a\nsingle URL or a list of URLs.",
-          "oneOf": [
-            {
-              "format": "uri",
-              "type": "string"
+    "$defs": {
+        "CacheConfig": {
+            "additionalProperties": false,
+            "description": "Optional cache settings; omit this table to use the defaults below.",
+            "properties": {
+                "maintenance_interval": {
+                    "default": "1m",
+                    "description": "Interval between background maintenance passes that enforce the cache\nsize limit and purge expired negative entries.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                },
+                "max_size": {
+                    "default": null,
+                    "description": "Optional maximum number of cached artifact bytes; omit to retain\ncached files indefinitely.",
+                    "format": "uint64",
+                    "minimum": 1,
+                    "type": [
+                        "integer",
+                        "null"
+                    ]
+                },
+                "metadata_ttl": {
+                    "default": "5m",
+                    "description": "How long mutable metadata may be served before a background refresh\nstarts.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                },
+                "negative_cache_permanent": {
+                    "default": false,
+                    "description": "Also remember confirmed 404s for immutable artifacts, not only mutable\nmetadata and snapshot aliases. Defaults to `false`.",
+                    "type": "boolean"
+                },
+                "negative_ttl": {
+                    "default": "5m",
+                    "description": "How long a confirmed 404 is remembered for one path in one upstream\nrepository.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                }
             },
-            {
-              "items": {
-                "format": "uri",
-                "type": "string"
-              },
-              "type": "array"
-            }
-          ]
+            "type": "object"
         },
-        "proxy_fallback": {
-          "default": true,
-          "description": "Try the upstream repositories directly when none of the configured\nproxies can be reached; defaults to `true`. Repositories with\n`use_proxy = true` keep using the proxies, and a proxy is retried\nafter `circuit_breaker.recovery_timeout`.",
-          "type": "boolean"
+        "CircuitBreakerConfig": {
+            "additionalProperties": false,
+            "description": "Optional circuit-breaker settings; omit this table to use the defaults\nbelow.",
+            "properties": {
+                "failure_threshold": {
+                    "default": 3,
+                    "description": "Consecutive upstream failures required before temporarily skipping\nthat repository.",
+                    "format": "uint32",
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "recovery_timeout": {
+                    "default": "30s",
+                    "description": "Time to wait before probing an upstream repository after its circuit\nopens.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                }
+            },
+            "type": "object"
         },
-        "read_timeout": {
-          "default": "1m",
-          "description": "Maximum idle time while reading each upstream response body; this is\nnot a limit on the total download time of a large file.",
-          "examples": [
-            "5m"
-          ],
-          "type": "string"
+        "LoggingConfig": {
+            "additionalProperties": false,
+            "description": "Optional JSON Lines file logging settings.",
+            "properties": {
+                "directory": {
+                    "description": "Directory for daily JSON Lines log files; defaults to\n`<root>/.maven-haste/logs`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "enabled": {
+                    "default": false,
+                    "description": "Write JSON Lines logs to daily files.",
+                    "type": "boolean"
+                },
+                "filter": {
+                    "default": "maven_haste=info,maven_haste::access=debug",
+                    "description": "Rust EnvFilter expression for file output; see\n<https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives>.",
+                    "type": "string"
+                },
+                "retention": {
+                    "default": "30days",
+                    "description": "Retention period for completed daily log files.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                }
+            },
+            "type": "object"
+        },
+        "RepositoryConfig": {
+            "additionalProperties": false,
+            "description": "One upstream Maven repository; at least one entry is required.",
+            "properties": {
+                "bearer_token": {
+                    "description": "Optional bearer token sent as `Authorization: Bearer`. Supports\n`${ENV_VAR}`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "cache_writes": {
+                    "default": true,
+                    "description": "Per-repository cache switch; defaults to `true`. `false` stops writing\nnew artifacts, checksums, and negative entries from this repository:\npreviously cached content is still served and nothing is deleted.",
+                    "type": "boolean"
+                },
+                "headers": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "description": "Extra request headers sent to this repository, for example an API key\nor a vendor-specific header. Values support `${ENV_VAR}` expansion.",
+                    "type": "object"
+                },
+                "id": {
+                    "description": "Required unique repository id used for routing, circuit breaking,\nlogging, and statistics; use only lowercase letters, digits,\nunderscores, and hyphens.",
+                    "type": "string"
+                },
+                "max_concurrency": {
+                    "description": "Optional per-repository override of\n`default_repository_max_concurrency`.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": [
+                        "integer",
+                        "null"
+                    ]
+                },
+                "password": {
+                    "description": "Optional HTTP Basic authentication password. Supports `${ENV_VAR}`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "rules": {
+                    "default": [],
+                    "description": "Optional ordered request-path glob rules; the first matching rule\ndecides participation. Prefix a rule with `!` to exclude it; `*`\nmatches within one path segment and `**` may match across path\nseparators.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "type": "array"
+                },
+                "url": {
+                    "description": "Upstream repository base URL.",
+                    "format": "uri",
+                    "type": "string"
+                },
+                "use_proxy": {
+                    "description": "Optional per-repository proxy switch: `true` uses `[upstream].proxy`,\n`false` connects directly, omitted follows `[upstream].proxy`.",
+                    "type": [
+                        "boolean",
+                        "null"
+                    ]
+                },
+                "username": {
+                    "description": "Optional HTTP Basic authentication username. Supports `${ENV_VAR}`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                }
+            },
+            "required": [
+                "id",
+                "url"
+            ],
+            "type": "object"
+        },
+        "ServerConfig": {
+            "additionalProperties": false,
+            "description": "Optional server settings; omit this table to use `127.0.0.1:8080` and\n`/maven`.",
+            "properties": {
+                "base_path": {
+                    "default": "/maven",
+                    "description": "URL prefix for the local Maven repository endpoint. The root path and\n`/api` namespace are reserved for Maven Haste itself.",
+                    "type": "string"
+                },
+                "bind": {
+                    "default": "127.0.0.1:8080",
+                    "description": "Address on which Maven Haste accepts HTTP requests.",
+                    "examples": [
+                        "127.0.0.1:8080"
+                    ],
+                    "pattern": "^(\\[[0-9a-fA-F:]+\\]|[0-9.]+):\\d+$",
+                    "type": "string"
+                }
+            },
+            "type": "object"
+        },
+        "StorageConfig": {
+            "additionalProperties": false,
+            "description": "Storage layout: the cache root plus the internal directories, all resolved\nrelative to the configuration file's directory.",
+            "properties": {
+                "db_path": {
+                    "description": "Optional SQLite database path; defaults to\n`<root>/.maven-haste/cache.db`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "root": {
+                    "description": "Directory used for cached artifacts, temporary downloads, and the\nSQLite database. Relative paths are resolved against the configuration\nfile's directory.",
+                    "type": "string"
+                },
+                "tmp_dir": {
+                    "description": "Optional directory for temporary downloads; defaults to\n`<root>/.maven-haste/tmp`.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                }
+            },
+            "required": [
+                "root"
+            ],
+            "type": "object"
+        },
+        "UpstreamConfig": {
+            "additionalProperties": false,
+            "description": "Optional upstream settings; omit this table to use the defaults below.",
+            "properties": {
+                "ca_bundle": {
+                    "description": "Optional PEM or DER file with additional root certificates for\nupstream TLS connections. Relative paths are resolved against the\nconfiguration file's directory.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "connect_timeout": {
+                    "default": "10s",
+                    "description": "Maximum time allowed to establish a connection to an upstream\nrepository.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                },
+                "default_repository_max_concurrency": {
+                    "default": 10,
+                    "description": "Per-repository concurrency limit when a repository does not override\nit.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "foreground_priority_burst": {
+                    "default": 8,
+                    "description": "Admit one queued cache refresh after this many foreground downloads\nwhile both are waiting.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "max_concurrency": {
+                    "default": 32,
+                    "description": "Maximum number of simultaneous requests across all upstream\nrepositories.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "offline": {
+                    "default": false,
+                    "description": "Serve only cached content. Cache misses fail without contacting an\nupstream repository.",
+                    "type": "boolean"
+                },
+                "proxy": {
+                    "description": "Ordered upstream proxies. Requests try each proxy in the listed order\nand move to the next one when a proxy cannot be reached. Accepts a\nsingle URL or a list of URLs.",
+                    "oneOf": [
+                        {
+                            "format": "uri",
+                            "type": "string"
+                        },
+                        {
+                            "items": {
+                                "format": "uri",
+                                "type": "string"
+                            },
+                            "type": "array"
+                        }
+                    ]
+                },
+                "proxy_fallback": {
+                    "default": true,
+                    "description": "Try the upstream repositories directly when none of the configured\nproxies can be reached; defaults to `true`. Repositories with\n`use_proxy = true` keep using the proxies, and a proxy is retried\nafter `circuit_breaker.recovery_timeout`.",
+                    "type": "boolean"
+                },
+                "read_timeout": {
+                    "default": "1m",
+                    "description": "Maximum idle time while reading each upstream response body; this is\nnot a limit on the total download time of a large file.",
+                    "examples": [
+                        "5m"
+                    ],
+                    "type": "string"
+                }
+            },
+            "type": "object"
         }
-      },
-      "type": "object"
-    }
-  },
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "description": "Everything maven-haste needs to run: server, storage, cache, upstream,\ncircuit breaker, logging, and repository settings.",
-  "properties": {
-    "$schema": {
-      "description": "Editor and linter hint that locates the JSON schema describing this\nconfiguration; maven-haste accepts and ignores this key.",
-      "type": [
-        "string",
-        "null"
-      ]
     },
-    "cache": {
-      "$ref": "#/$defs/CacheConfig",
-      "default": {
-        "maintenance_interval": "1m",
-        "max_size": null,
-        "metadata_ttl": "5m",
-        "negative_cache_permanent": false,
-        "negative_ttl": "5m"
-      }
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Everything maven-haste needs to run: server, storage, cache, upstream,\ncircuit breaker, logging, and repository settings.",
+    "properties": {
+        "$schema": {
+            "description": "Editor and linter hint that locates the JSON schema describing this\nconfiguration; maven-haste accepts and ignores this key.",
+            "type": [
+                "string",
+                "null"
+            ]
+        },
+        "cache": {
+            "$ref": "#/$defs/CacheConfig",
+            "default": {
+                "maintenance_interval": "1m",
+                "max_size": null,
+                "metadata_ttl": "5m",
+                "negative_cache_permanent": false,
+                "negative_ttl": "5m"
+            }
+        },
+        "circuit_breaker": {
+            "$ref": "#/$defs/CircuitBreakerConfig",
+            "default": {
+                "failure_threshold": 3,
+                "recovery_timeout": "30s"
+            }
+        },
+        "logging": {
+            "$ref": "#/$defs/LoggingConfig",
+            "default": {
+                "enabled": false,
+                "filter": "maven_haste=info,maven_haste::access=debug",
+                "retention": "30days"
+            }
+        },
+        "repositories": {
+            "items": {
+                "$ref": "#/$defs/RepositoryConfig"
+            },
+            "type": "array"
+        },
+        "server": {
+            "$ref": "#/$defs/ServerConfig",
+            "default": {
+                "base_path": "/maven",
+                "bind": "127.0.0.1:8080"
+            }
+        },
+        "storage": {
+            "$ref": "#/$defs/StorageConfig"
+        },
+        "upstream": {
+            "$ref": "#/$defs/UpstreamConfig",
+            "default": {
+                "connect_timeout": "10s",
+                "default_repository_max_concurrency": 10,
+                "foreground_priority_burst": 8,
+                "max_concurrency": 32,
+                "offline": false,
+                "proxy_fallback": true,
+                "read_timeout": "1m"
+            }
+        }
     },
-    "circuit_breaker": {
-      "$ref": "#/$defs/CircuitBreakerConfig",
-      "default": {
-        "failure_threshold": 3,
-        "recovery_timeout": "30s"
-      }
-    },
-    "logging": {
-      "$ref": "#/$defs/LoggingConfig",
-      "default": {
-        "enabled": false,
-        "filter": "maven_haste=info,maven_haste::access=debug",
-        "retention": "30days"
-      }
-    },
-    "repositories": {
-      "items": {
-        "$ref": "#/$defs/RepositoryConfig"
-      },
-      "type": "array"
-    },
-    "server": {
-      "$ref": "#/$defs/ServerConfig",
-      "default": {
-        "base_path": "/maven",
-        "bind": "127.0.0.1:8080"
-      }
-    },
-    "storage": {
-      "$ref": "#/$defs/StorageConfig"
-    },
-    "upstream": {
-      "$ref": "#/$defs/UpstreamConfig",
-      "default": {
-        "connect_timeout": "10s",
-        "default_repository_max_concurrency": 10,
-        "foreground_priority_burst": 8,
-        "max_concurrency": 32,
-        "offline": false,
-        "proxy_fallback": true,
-        "read_timeout": "1m"
-      }
-    }
-  },
-  "required": [
-    "storage",
-    "repositories"
-  ],
-  "title": "Maven Haste Configuration",
-  "type": "object"
+    "required": [
+        "storage",
+        "repositories"
+    ],
+    "title": "Maven Haste Configuration",
+    "type": "object"
 }
