@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -450,6 +450,50 @@ fn cache_stats_reports_an_empty_cache() {
 }
 
 #[test]
+fn cache_warm_prefetches_manifest_entries() {
+    let upstream = spawn_raw_upstream("artifact-body");
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("maven-haste.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[storage]\nroot = './repository'\n\n[[repositories]]\nid = 'central'\nurl = '{upstream}'\n"
+        ),
+    )
+    .unwrap();
+    let manifest = directory.path().join("warm.txt");
+    std::fs::write(
+        &manifest,
+        "# warmed from a build lockfile\ncom/example/demo/1.0/demo-1.0.jar\n",
+    )
+    .unwrap();
+
+    let output = Command::new(binary())
+        .args(["cache", "warm"])
+        .arg(&manifest)
+        .arg("--config")
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("warmed 1 artifacts, 0 failures"),
+        "{stdout}"
+    );
+
+    let stats = Command::new(binary())
+        .args(["cache", "stats", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(stats.status.success());
+    let stdout = String::from_utf8(stats.stdout).unwrap();
+    assert!(stdout.contains("files: 4"), "{stdout}");
+}
+
+#[test]
 fn cache_remove_prefix_reports_removed_files_and_rejects_unsafe_prefixes() {
     let directory = TempDir::new().unwrap();
     let config = write_config(&directory, "127.0.0.1:0");
@@ -471,6 +515,50 @@ fn cache_remove_prefix_reports_removed_files_and_rejects_unsafe_prefixes() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("non-empty safe relative path"), "{stderr}");
+}
+
+/// Serves one artifact body for every non-checksum path and 404 for checksum
+/// files, which is enough for `cache warm` to generate its checksums.
+fn spawn_raw_upstream(content: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let Ok(reader_stream) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(reader_stream);
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line == "\r\n" => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let checksum = [".sha1", ".sha256", ".sha512", ".md5"]
+                .iter()
+                .any(|suffix| path.ends_with(suffix));
+            let (status, body) = if checksum {
+                ("404 Not Found", "missing")
+            } else {
+                ("200 OK", content)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"raw\"\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{address}/")
 }
 
 fn binary() -> &'static str {

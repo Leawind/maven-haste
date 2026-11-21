@@ -1,9 +1,11 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
-use crate::cache::CacheManager;
+use crate::cache::{CacheFailure, CacheManager};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::AppError;
+use crate::request_path::MavenPath;
 use crate::{cache, db, storage, upstream};
 use clap::Subcommand;
 
@@ -22,6 +24,14 @@ pub enum CacheCommand {
 
     /// Print cache statistics from the database
     Stats,
+
+    /// Prefetch artifacts listed in a manifest of Maven repository paths
+    Warm {
+        /// Text file with one Maven relative path per line; blank lines and
+        /// lines starting with `#` are ignored
+        #[arg(value_name = "MANIFEST")]
+        manifest: PathBuf,
+    },
 }
 
 impl CacheCommand {
@@ -62,8 +72,53 @@ impl CacheCommand {
                 }
                 Ok(())
             }
+            CacheCommand::Warm { manifest } => warm(&cache, manifest).await,
         }
     }
+}
+
+async fn warm(cache: &CacheManager, manifest: &Path) -> Result<(), AppError> {
+    let source = std::fs::read_to_string(manifest).map_err(|error| {
+        AppError::Runtime(format!(
+            "failed to read warm manifest {}: {error}",
+            manifest.display()
+        ))
+    })?;
+    let mut warmed = 0_usize;
+    let mut failures = Vec::new();
+    for entry in manifest_entries(&source) {
+        let request = match MavenPath::parse(&format!("/{entry}"), "/") {
+            Ok(request) => request,
+            Err(error) => {
+                failures.push(format!("{entry}: {error}"));
+                continue;
+            }
+        };
+        match cache.get(&request).await {
+            Ok(_) => warmed += 1,
+            Err(CacheFailure::NotFound) => failures.push(format!("{entry}: not found")),
+            Err(error) => failures.push(format!("{entry}: {error}")),
+        }
+    }
+    for failure in &failures {
+        eprintln!("{failure}");
+    }
+    println!("warmed {warmed} artifacts, {} failures", failures.len());
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Runtime(format!(
+            "failed to warm {} artifacts",
+            failures.len()
+        )))
+    }
+}
+
+fn manifest_entries(source: &str) -> impl Iterator<Item = &str> {
+    source.lines().filter_map(|line| {
+        let line = line.trim();
+        (!line.is_empty() && !line.starts_with('#')).then(|| line.trim_start_matches('/'))
+    })
 }
 
 /// Assembles the cache manager from a loaded configuration, mirroring the
@@ -96,4 +151,25 @@ async fn build_cache(cli: &Cli) -> Result<CacheManager, AppError> {
 
 fn app_error(error: crate::cache::CacheFailure) -> AppError {
     AppError::Runtime(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_entries_skip_comments_and_blank_lines() {
+        let entries = manifest_entries(
+            "# comment\n\ncom/example/demo/1.0/demo-1.0.jar\n  /com/example/demo/1.0/demo-1.0.pom  \n",
+        )
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            entries,
+            vec![
+                "com/example/demo/1.0/demo-1.0.jar",
+                "com/example/demo/1.0/demo-1.0.pom"
+            ]
+        );
+    }
 }

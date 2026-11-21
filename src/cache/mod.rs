@@ -130,6 +130,8 @@ pub enum CacheFailure {
     NotFound,
     #[error("all eligible upstream repositories failed")]
     Gateway,
+    #[error("offline mode: the artifact is not cached")]
+    Offline,
     #[error("cache operation failed: {0}")]
     Internal(String),
 }

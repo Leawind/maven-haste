@@ -63,6 +63,9 @@ impl CacheManager {
         }
 
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
+        if self.inner.upstream.offline() {
+            return Err(CacheFailure::Offline);
+        }
         match self.synchronous_download(request).await? {
             DownloadOutcome::Installed => {
                 if record.is_none() {
@@ -235,6 +238,9 @@ impl CacheManager {
     /// Starts a background refresh for stale mutable metadata, at most one per
     /// path at a time.
     fn trigger_refresh(&self, request: MavenPath, record: ArtifactRecord) {
+        if self.inner.upstream.offline() {
+            return;
+        }
         let source = request.generated_checksum_source();
         let key = source.as_ref().unwrap_or(&request).relative().to_owned();
         let Entry::Vacant(entry) = self.inner.refreshes.entry(key.clone()) else {

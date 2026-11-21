@@ -688,6 +688,10 @@ pub struct UpstreamConfig {
     /// configuration file's directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_bundle: Option<PathBuf>,
+    /// Serve only cached content. Cache misses fail without contacting an
+    /// upstream repository.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 impl Default for UpstreamConfig {
@@ -701,6 +705,7 @@ impl Default for UpstreamConfig {
             proxy: Vec::new(),
             proxy_fallback: true,
             ca_bundle: None,
+            offline: false,
         }
     }
 }
@@ -2096,6 +2101,29 @@ headers = { "X-Api-Key" = "key-value" }
             redact_url(&Url::parse("http://host.example:8080/").unwrap()),
             "http://host.example:8080/"
         );
+    }
+
+    #[test]
+    fn parses_offline_mode() {
+        let directory = TempDir::new().unwrap();
+        let path = write_config(
+            &directory,
+            r#"
+[storage]
+root = "repository"
+
+[upstream]
+offline = true
+
+[[repositories]]
+id = "central"
+url = "https://repo.example/"
+"#,
+        );
+
+        let loaded = Config::load(&cli(&path)).unwrap();
+
+        assert!(loaded.config.upstream.offline);
     }
 
     #[test]

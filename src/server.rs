@@ -202,6 +202,15 @@ async fn artifact(
             None,
             ResponseArtifacts::default(),
         ),
+        Err(CacheFailure::Offline) => (
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "offline mode: artifact is not cached",
+            ),
+            "none",
+            None,
+            ResponseArtifacts::default(),
+        ),
         Err(CacheFailure::Internal(error)) => {
             tracing::error!(path = request.relative(), %error, "cache request failed");
             (

@@ -40,6 +40,7 @@ pub struct UpstreamClient {
     proxies: Arc<[ProxyEgress]>,
     direct_client: Client,
     proxy_fallback: bool,
+    offline: bool,
     routes: RouteEngine,
     circuits: Arc<CircuitBreaker>,
     scheduler: RequestScheduler,
@@ -345,6 +346,7 @@ impl UpstreamClient {
             proxies: proxies.into(),
             direct_client,
             proxy_fallback: config.proxy_fallback,
+            offline: config.offline,
             routes: RouteEngine::new(repositories),
             circuits: Arc::new(CircuitBreaker::new(
                 circuit.failure_threshold,
@@ -581,6 +583,10 @@ impl UpstreamClient {
         self.fetch_ordered(relative_path, vec![(repository, Some(extras))], priority)
             .await
             .result
+    }
+
+    pub fn offline(&self) -> bool {
+        self.offline
     }
 
     pub fn record_body_success(&self, repository: &str) {

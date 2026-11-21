@@ -181,6 +181,9 @@ impl crate::cache::CacheManager {
         request: &MavenPath,
         previous: Option<&ArtifactRecord>,
     ) -> Result<PreparedFetch, CacheFailure> {
+        if self.inner.upstream.offline() {
+            return Err(CacheFailure::Offline);
+        }
         let priority = if previous.is_some() {
             RequestPriority::Background
         } else {

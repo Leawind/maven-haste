@@ -261,6 +261,11 @@
           "minimum": 1,
           "type": "integer"
         },
+        "offline": {
+          "default": false,
+          "description": "Serve only cached content. Cache misses fail without contacting an\nupstream repository.",
+          "type": "boolean"
+        },
         "proxy": {
           "description": "Ordered upstream proxies. Requests try each proxy in the listed order\nand move to the next one when a proxy cannot be reached. Accepts a\nsingle URL or a list of URLs.",
           "oneOf": [
@@ -352,6 +357,7 @@
         "default_repository_max_concurrency": 10,
         "foreground_priority_burst": 8,
         "max_concurrency": 32,
+        "offline": false,
         "proxy_fallback": true,
         "read_timeout": "1m"
       }

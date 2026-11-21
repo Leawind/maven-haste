@@ -1822,6 +1822,52 @@ async fn serves_artifacts_larger_than_the_cache_limit_without_caching_them() {
 }
 
 #[tokio::test]
+async fn offline_mode_serves_cached_artifacts() {
+    let (url, task) = spawn_upstream(content_upstream("cached-body")).await;
+    let directory = TempDir::new().unwrap();
+    let (online, _) = test_app(&directory, vec![repository("central", &url, &[])]).await;
+    assert_eq!(
+        request(&online, Method::GET, ARTIFACT_PATH).await.status(),
+        StatusCode::OK
+    );
+
+    let (offline, _) = test_app_with_cache(
+        &directory,
+        vec![repository("central", &url, &[])],
+        CacheConfig::default(),
+        UpstreamConfig {
+            offline: true,
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+    let response = request(&offline, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body(response).await, "cached-body");
+    task.abort();
+}
+
+#[tokio::test]
+async fn offline_mode_returns_service_unavailable_for_uncached_artifacts() {
+    let directory = TempDir::new().unwrap();
+    let repository = repository("central", &Url::parse("http://127.0.0.1:1/").unwrap(), &[]);
+    let (offline, _) = test_app_with_cache(
+        &directory,
+        vec![repository],
+        CacheConfig::default(),
+        UpstreamConfig {
+            offline: true,
+            ..UpstreamConfig::default()
+        },
+    )
+    .await;
+
+    let response = request(&offline, Method::GET, ARTIFACT_PATH).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body(response).await, "offline mode: artifact is not cached");
+}
+
+#[tokio::test]
 async fn sends_repository_headers_and_basic_auth_to_upstream() {
     let upstream = Router::new().route(
         "/{*path}",
