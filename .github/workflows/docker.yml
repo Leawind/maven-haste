@@ -1,0 +1,57 @@
+name: Docker
+
+on:
+    # Keep runs manual to control GitHub Actions resource usage.
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    smoke:
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Build image
+              run: docker build --tag maven-haste:ci .
+
+            - name: Run container smoke test
+              run: |
+                  config_dir="${RUNNER_TEMP}/maven-haste-config"
+                  mkdir -p "$config_dir"
+                  cat > "$config_dir/maven-haste.toml" <<'EOF'
+                  [server]
+                  bind = "0.0.0.0:8080"
+
+                  [storage]
+                  root = "/var/lib/maven-haste"
+
+                  [[repositories]]
+                  id = "central"
+                  url = "https://repo.example/"
+                  rules = ["!**"]
+                  EOF
+                  trap 'docker logs maven-haste-ci || true; docker rm --force maven-haste-ci || true' EXIT
+                  docker run --detach --name maven-haste-ci \
+                      --publish 18080:8080 \
+                      --volume "$config_dir:/etc/maven-haste:ro" \
+                      maven-haste:ci
+                  for attempt in $(seq 1 30); do
+                      if curl --fail --silent http://127.0.0.1:18080/api/v1/health >/dev/null; then
+                          break
+                      fi
+                      sleep 1
+                  done
+                  curl --fail --silent http://127.0.0.1:18080/api/v1/health
+                  test "$(docker exec maven-haste-ci id -u)" = "10001"
+                  for attempt in $(seq 1 45); do
+                      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' maven-haste-ci)"
+                      if [ "$status" = "healthy" ]; then
+                          break
+                      fi
+                      sleep 1
+                  done
+                  test "$status" = "healthy"
