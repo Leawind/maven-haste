@@ -169,7 +169,10 @@ fn locate(explicit: Option<&Path>) -> Result<PathBuf, ConfigError> {
 
 /// Finds the default configuration by probing each supported file name, first
 /// in the working directory and then in the user configuration directory.
-/// Several present formats in one directory are an error instead of a choice.
+/// Several present configurations in one directory are an error instead of a
+/// choice. Configurations of different formats in different directories are
+/// also an error: silently preferring one would hide the other, so the user
+/// must pass `--config`.
 fn find_default_config(
     current_dir: &Path,
     config_dir: Option<&Path>,
@@ -180,6 +183,7 @@ fn find_default_config(
     }
 
     let mut attempted = Vec::new();
+    let mut found_by_directory = Vec::new();
     for directory in &directories {
         let mut found = Vec::new();
         for name in CONFIG_FILE_NAMES {
@@ -189,32 +193,47 @@ fn find_default_config(
                 found.push(path);
             }
         }
-        match found.len() {
-            0 => continue,
-            1 => return canonical_config_path(&found[0]),
-            _ => {
-                let paths = found
-                    .iter()
-                    .map(|path| format!("  - {}", path.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(ConfigError::new(format!(
-                    "multiple configuration files found in {}:\n{paths}\n\
-                     keep only one format or pass --config <PATH>",
-                    directory.display()
-                )));
-            }
+        found_by_directory.push(found);
+    }
+
+    for (directory, found) in directories.iter().zip(&found_by_directory) {
+        if found.len() > 1 {
+            return Err(ConfigError::new(format!(
+                "multiple configuration files found in {}:\n{}\n\
+                 keep only one format or pass --config <PATH>",
+                directory.display(),
+                configuration_list(found)
+            )));
         }
     }
 
-    let paths = attempted
+    let found = found_by_directory.into_iter().flatten().collect::<Vec<_>>();
+    let Some(first) = found.first() else {
+        let paths = configuration_list(&attempted);
+        return Err(ConfigError::new(format!(
+            "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
+        )));
+    };
+    let formats = found
+        .iter()
+        .map(|path| format_for_path(path).map(ConfigFormat::name))
+        .collect::<Result<HashSet<_>, _>>()?;
+    if formats.len() > 1 {
+        return Err(ConfigError::new(format!(
+            "configuration files in different formats were found:\n{}\n\
+             pass --config <PATH> to choose one",
+            configuration_list(&found)
+        )));
+    }
+    canonical_config_path(first)
+}
+
+fn configuration_list(paths: &[PathBuf]) -> String {
+    paths
         .iter()
         .map(|path| format!("  - {}", path.display()))
         .collect::<Vec<_>>()
-        .join("\n");
-    Err(ConfigError::new(format!(
-        "configuration file not found; attempted:\n{paths}\nrun `maven-haste config init` or pass --config <PATH>"
-    )))
+        .join("\n")
 }
 
 /// Parses configuration source in the format selected by the path's file
@@ -472,7 +491,7 @@ fn unknown_field_warnings(source: &str, format: ConfigFormat) -> Vec<String> {
 
 /// Everything maven-haste needs to run: server, storage, cache, upstream,
 /// circuit breaker, logging, and repository settings.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "Maven Haste Configuration")]
 pub struct Config {
     /// Editor and linter hint that locates the JSON schema describing this
@@ -494,7 +513,7 @@ pub struct Config {
 }
 
 /// Optional JSON Lines file logging settings.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct LoggingConfig {
     /// Write JSON Lines logs to daily files.
@@ -533,7 +552,7 @@ impl Default for LoggingConfig {
 
 /// Optional server settings; omit this table to use `127.0.0.1:8080` and
 /// `/maven`.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct ServerConfig {
     /// Address on which Maven Haste accepts HTTP requests.
@@ -555,7 +574,7 @@ impl Default for ServerConfig {
 
 /// Storage layout: the cache root plus the internal directories, all resolved
 /// relative to the configuration file's directory.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct StorageConfig {
     /// Directory used for cached artifacts, temporary downloads, and the
     /// SQLite database. Relative paths are resolved against the configuration
@@ -605,7 +624,7 @@ impl StorageConfig {
 }
 
 /// Optional cache settings; omit this table to use the defaults below.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct CacheConfig {
     /// Optional maximum number of cached artifact bytes; omit to retain
@@ -646,7 +665,7 @@ impl Default for CacheConfig {
 }
 
 /// Optional upstream settings; omit this table to use the defaults below.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct UpstreamConfig {
     /// Maximum time allowed to establish a connection to an upstream
@@ -717,7 +736,7 @@ impl Default for UpstreamConfig {
 
 /// Optional circuit-breaker settings; omit this table to use the defaults
 /// below.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct CircuitBreakerConfig {
     /// Consecutive upstream failures required before temporarily skipping
@@ -741,7 +760,7 @@ impl Default for CircuitBreakerConfig {
 }
 
 /// One upstream Maven repository; at least one entry is required.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 pub struct RepositoryConfig {
     /// Required unique repository id used for routing, circuit breaking,
     /// logging, and statistics; use only lowercase letters, digits,
@@ -820,6 +839,21 @@ impl Config {
     }
 
     pub fn load(cli: &Cli) -> Result<LoadedConfig, ConfigError> {
+        let path = Self::resolve_path(cli)?;
+        Self::load_path(&path, cli.bind)
+    }
+
+    /// Resolves the configuration path exactly as `load` does, without
+    /// reading it. The reload watcher keeps watching the file the server
+    /// started with instead of discovering a different file later.
+    pub fn resolve_path(cli: &Cli) -> Result<PathBuf, ConfigError> {
+        locate(cli.config.as_deref())
+    }
+
+    /// Loads one absolute configuration path, applying the same overrides and
+    /// validation as `load`. Relative storage paths are resolved against the
+    /// file's directory.
+    pub fn load_path(path: &Path, bind: Option<SocketAddr>) -> Result<LoadedConfig, ConfigError> {
         fn resolve_paths(
             storage: &mut StorageConfig,
             logging: &mut LoggingConfig,
@@ -870,15 +904,14 @@ impl Config {
             }
         }
 
-        let path = locate(cli.config.as_deref())?;
-        let source = std::fs::read_to_string(&path).map_err(|error| {
+        let source = std::fs::read_to_string(path).map_err(|error| {
             ConfigError::new(format!(
                 "failed to read configuration {}: {error}",
                 path.display()
             ))
         })?;
-        let mut config: Config = parse_config(&source, &path)?;
-        let warnings = unknown_field_warnings(&source, format_for_path(&path)?);
+        let mut config: Config = parse_config(&source, path)?;
+        let warnings = unknown_field_warnings(&source, format_for_path(path)?);
 
         expand_repository_environment(&mut config.repositories)?;
         validate_raw_storage_paths(&config.storage)?;
@@ -904,13 +937,13 @@ impl Config {
             config_dir,
         );
         normalize(&mut config);
-        if let Some(bind) = cli.bind {
+        if let Some(bind) = bind {
             config.server.bind = bind;
         }
         validate(&config)?;
 
         Ok(LoadedConfig {
-            path,
+            path: path.to_owned(),
             config,
             warnings,
         })
@@ -1643,6 +1676,47 @@ mod tests {
         );
         assert!(message.contains("maven-haste.json"), "{message}");
         assert!(message.contains("maven-haste.toml"), "{message}");
+    }
+
+    #[test]
+    fn rejects_default_configurations_of_different_formats_across_directories() {
+        let current = TempDir::new().unwrap();
+        let user = TempDir::new().unwrap();
+        fs::write(
+            current.path().join("maven-haste.toml"),
+            "[storage]\nroot = 'repository'\n\n[[repositories]]\n",
+        )
+        .unwrap();
+        fs::write(
+            user.path().join("maven-haste.yaml"),
+            "storage:\n  root: repository\nrepositories: []\n",
+        )
+        .unwrap();
+
+        let error = find_default_config(current.path(), Some(user.path())).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("different formats"), "{message}");
+        assert!(message.contains("maven-haste.toml"), "{message}");
+        assert!(message.contains("maven-haste.yaml"), "{message}");
+        assert!(message.contains("--config"), "{message}");
+    }
+
+    #[test]
+    fn prefers_the_working_directory_for_the_same_configuration_format() {
+        let current = TempDir::new().unwrap();
+        let user = TempDir::new().unwrap();
+        let local = current.path().join("maven-haste.yaml");
+        fs::write(&local, "storage:\n  root: repository\nrepositories: []\n").unwrap();
+        fs::write(
+            user.path().join("maven-haste.yml"),
+            "storage:\n  root: repository\nrepositories: []\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_default_config(current.path(), Some(user.path())).unwrap(),
+            dunce::canonicalize(local).unwrap()
+        );
     }
 
     #[test]

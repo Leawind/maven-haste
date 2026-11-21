@@ -94,7 +94,19 @@ Recommended steps:
 4. Tune cache TTLs, upstream timeouts, concurrency, and circuit breaker parameters to match your network.
 5. Run `maven-haste config check -c <config>` to validate the config, storage directory, and database before starting.
 
-Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, `maven-haste.yaml`, or `maven-haste.yml` in the current directory and the system user config directory; if several of these files exist, it stops instead of picking one. The parser is chosen by the file extension (`json`, `yaml`, `yml`, or `toml`); an unsupported or missing extension is an error rather than a TOML fallback. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
+Without `-c/--config`, maven-haste looks for `maven-haste.json`, `maven-haste.toml`, `maven-haste.yaml`, or `maven-haste.yml` in the current directory and the system user config directory. If several files are present in one directory, or files of different formats exist across those directories, it stops and asks for `--config` instead of picking one; files of the same format may exist in both locations, and the working directory wins. The parser is chosen by the file extension (`json`, `yaml`, `yml`, or `toml`); an unsupported or missing extension is an error rather than a TOML fallback. Global flags can temporarily override the listen address or enable debug logging at startup; persistent settings belong in the config file.
+
+### Hot Reload
+
+`maven-haste run` keeps watching the configuration file it started with. When the file changes, the new content is parsed using the file extension and applied within about a second:
+
+- Reloadable: `[cache]`, `[upstream]`, `[circuit_breaker]`, and `[[repositories]]`, including URLs, routing rules, credentials, custom headers, proxy settings, concurrency, `cache_writes`, and `[upstream].offline`.
+- Requires a restart: `[server]` (`bind` and `base_path`), `[storage]`, and `[logging]`. Changes to these sections are logged and ignored.
+- A file that cannot be parsed or validated, or whose new upstream client cannot be built, is reported and the previous configuration stays active.
+- Reloads never interrupt an active download; new requests see the reloaded settings.
+- `${ENV_VAR}` references are expanded again on reload, so after changing an environment variable, save or touch the file to trigger it.
+
+Only `run` watches the file; `config` and `cache` commands read the configuration once and exit.
 
 ### Schema-Assisted Editing
 

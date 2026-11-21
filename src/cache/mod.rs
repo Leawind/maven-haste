@@ -8,13 +8,13 @@ mod types;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use serde::Serialize;
 use tokio::fs;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::OnceCell;
 
 use crate::cache::io::internal;
 use crate::config::{CacheConfig, StorageConfig};
@@ -48,11 +48,9 @@ pub struct CacheManager {
 
 struct CacheInner {
     storage: StorageConfig,
-    config: CacheConfig,
+    runtime: RwLock<Arc<RuntimeConfig>>,
     database: Database,
-    upstream: UpstreamClient,
     case_sensitive: bool,
-    caching_disabled: HashSet<String>,
     flights: DashMap<String, Arc<Flight>>,
     refreshes: DashMap<String, ()>,
     serves: ServeRegistry,
@@ -60,12 +58,21 @@ struct CacheInner {
     object_grace: Duration,
     pending_hits: Mutex<HashMap<String, PendingHit>>,
     pending_hit_ops: AtomicUsize,
-    lifecycle: RwLock<()>,
+    lifecycle: tokio::sync::RwLock<()>,
     requests: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     stale_hits: AtomicU64,
     negative_hits: AtomicU64,
+}
+
+/// Settings that a configuration reload can replace as one unit. A fetch
+/// takes a snapshot when it starts, so a reload never mixes old and new
+/// upstream rules within one download.
+struct RuntimeConfig {
+    cache: CacheConfig,
+    upstream: Arc<UpstreamClient>,
+    caching_disabled: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -206,11 +213,13 @@ impl CacheManager {
         Self {
             inner: Arc::new(CacheInner {
                 storage,
-                config: cache,
+                runtime: RwLock::new(Arc::new(RuntimeConfig {
+                    cache,
+                    upstream: Arc::new(upstream),
+                    caching_disabled,
+                })),
                 database,
-                upstream,
                 case_sensitive,
-                caching_disabled,
                 flights: DashMap::new(),
                 refreshes: DashMap::new(),
                 serves: ServeRegistry::default(),
@@ -218,7 +227,7 @@ impl CacheManager {
                 object_grace,
                 pending_hits: Mutex::new(HashMap::new()),
                 pending_hit_ops: AtomicUsize::new(0),
-                lifecycle: RwLock::new(()),
+                lifecycle: tokio::sync::RwLock::new(()),
                 requests: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -228,9 +237,58 @@ impl CacheManager {
         }
     }
 
+    /// Returns the current reloadable settings. A snapshot keeps one set of
+    /// upstream rules for the operation that holds it.
+    fn runtime(&self) -> Arc<RuntimeConfig> {
+        self.inner
+            .runtime
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces all reloadable settings at once. Storage paths, the listen
+    /// address, the endpoint prefix, and logging are fixed at startup.
+    pub(crate) fn reload(
+        &self,
+        cache: CacheConfig,
+        upstream: UpstreamClient,
+        caching_disabled: HashSet<String>,
+    ) {
+        let runtime = RuntimeConfig {
+            cache,
+            upstream: Arc::new(upstream),
+            caching_disabled,
+        };
+        *self
+            .inner
+            .runtime
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(runtime);
+    }
+
+    pub(crate) fn maintenance_interval(&self) -> Duration {
+        self.runtime().cache.maintenance_interval
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_config(&self) -> CacheConfig {
+        self.runtime().cache.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn upstream_is_offline(&self) -> bool {
+        self.runtime().upstream.offline()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn caching_enabled_for(&self, id: &str) -> bool {
+        self.caching_enabled(id)
+    }
+
     /// Whether new cache entries may be written for artifacts fetched from `id`.
     fn caching_enabled(&self, id: &str) -> bool {
-        !self.inner.caching_disabled.contains(id)
+        !self.runtime().caching_disabled.contains(id)
     }
 
     pub async fn health(&self) -> Result<(), CacheFailure> {
@@ -255,6 +313,7 @@ impl CacheManager {
     pub async fn stats(&self) -> Result<CacheStats, CacheFailure> {
         self.flush_hits().await;
         let database = self.inner.database.stats().await.map_err(internal)?;
+        let runtime = self.runtime();
         let requests = self.inner.requests.load(Ordering::Relaxed);
         let hits = self.inner.hits.load(Ordering::Relaxed);
         Ok(CacheStats {
@@ -274,8 +333,8 @@ impl CacheManager {
             } else {
                 hits as f64 / requests as f64
             },
-            max_size: self.inner.config.max_size,
-            upstreams: self.inner.upstream.statuses(),
+            max_size: runtime.cache.max_size,
+            upstreams: runtime.upstream.statuses(),
         })
     }
 

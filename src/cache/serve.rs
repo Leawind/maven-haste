@@ -22,6 +22,7 @@ use crate::cache::{
     CacheFailure, CacheManager, CacheStatus, CachedArtifact, Flight, HIT_FLUSH_THRESHOLD,
     HeadOutcome, UpstreamHead,
 };
+use crate::config::CacheConfig;
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
 use crate::upstream::FetchResult;
@@ -30,6 +31,7 @@ impl CacheManager {
     /// Resolves a request to a cached artifact, downloading it from an
     /// upstream repository on a miss.
     pub async fn get(&self, request: &MavenPath) -> Result<CachedArtifact, CacheFailure> {
+        let runtime = self.runtime();
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
         let mut record = self
             .inner
@@ -46,7 +48,7 @@ impl CacheManager {
 
         if request.policy() == CachePolicy::Mutable {
             if let Some(mut cached) = self.positive_cache(request, record.as_ref()).await? {
-                let stale = !is_fresh(&cached.record, self.inner.config.metadata_ttl);
+                let stale = !is_fresh(&cached.record, runtime.cache.metadata_ttl);
                 if stale {
                     cached.status = CacheStatus::Stale;
                     self.inner.stale_hits.fetch_add(1, Ordering::Relaxed);
@@ -60,10 +62,9 @@ impl CacheManager {
             return Ok(cached);
         }
 
-        if self.negative_caching_enabled(request.policy()) {
+        if self.negative_caching_enabled(request.policy(), &runtime.cache) {
             let negative = self.fresh_negative_entries(request.relative()).await?;
-            if self
-                .inner
+            if runtime
                 .upstream
                 .all_candidates_negative(request.relative(), &negative)
             {
@@ -75,7 +76,7 @@ impl CacheManager {
         }
 
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
-        if self.inner.upstream.offline() {
+        if runtime.upstream.offline() {
             return Err(CacheFailure::Offline);
         }
         match self.synchronous_download(request).await? {
@@ -117,8 +118,8 @@ impl CacheManager {
         }
     }
 
-    fn negative_caching_enabled(&self, policy: CachePolicy) -> bool {
-        policy == CachePolicy::Mutable || self.inner.config.negative_cache_permanent
+    fn negative_caching_enabled(&self, policy: CachePolicy, cache: &CacheConfig) -> bool {
+        policy == CachePolicy::Mutable || cache.negative_cache_permanent
     }
 
     /// Resolves a client HEAD request. Cached artifacts go through `get`;
@@ -145,15 +146,15 @@ impl CacheManager {
         }
 
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        let negative_enabled = self.negative_caching_enabled(request.policy());
+        let runtime = self.runtime();
+        let negative_enabled = self.negative_caching_enabled(request.policy(), &runtime.cache);
         let negative = if negative_enabled {
             self.fresh_negative_entries(request.relative()).await?
         } else {
             HashSet::new()
         };
         if negative_enabled
-            && self
-                .inner
+            && runtime
                 .upstream
                 .all_candidates_negative(request.relative(), &negative)
         {
@@ -164,11 +165,10 @@ impl CacheManager {
         }
 
         self.inner.misses.fetch_add(1, Ordering::Relaxed);
-        if self.inner.upstream.offline() {
+        if runtime.upstream.offline() {
             return Ok(HeadOutcome::Offline);
         }
-        let outcome = self
-            .inner
+        let outcome = runtime
             .upstream
             .head(request.relative(), &HashSet::new(), &negative)
             .await;
@@ -205,7 +205,7 @@ impl CacheManager {
                     last_modified: header_string(response.headers(), LAST_MODIFIED),
                 };
                 drop(response);
-                self.inner.upstream.record_body_success(&repository);
+                runtime.upstream.record_body_success(&repository);
                 Ok(HeadOutcome::Upstream(head))
             }
             FetchResult::NotModified { .. } => Ok(HeadOutcome::Gateway),
@@ -359,7 +359,7 @@ impl CacheManager {
     /// Starts a background refresh for stale mutable metadata, at most one per
     /// path at a time.
     fn trigger_refresh(&self, request: MavenPath, record: ArtifactRecord) {
-        if self.inner.upstream.offline() {
+        if self.runtime().upstream.offline() {
             return;
         }
         let source = request.generated_checksum_source();

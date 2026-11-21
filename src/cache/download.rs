@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use reqwest::header::{ETAG, LAST_MODIFIED};
 use sha2::{Digest as _, Sha256};
@@ -15,7 +16,7 @@ use crate::cache::types::{
 };
 use crate::db::ArtifactRecord;
 use crate::request_path::{CachePolicy, MavenPath};
-use crate::upstream::{FetchResult, RequestPriority, UpstreamResponse};
+use crate::upstream::{FetchResult, RequestPriority, UpstreamClient, UpstreamResponse};
 
 const MAX_CHECKSUM_VALIDATION_ATTEMPTS: usize = 3;
 const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
@@ -170,8 +171,8 @@ impl crate::cache::CacheManager {
     /// size limit. An oversized single artifact is served directly instead of
     /// evicting the rest of the cache and still staying above the limit.
     fn bundle_fits_capacity(&self, files: &[PreparedFile]) -> bool {
-        self.inner
-            .config
+        self.runtime()
+            .cache
             .max_size
             .is_none_or(|max_size| bundle_size(files) <= max_size)
     }
@@ -181,7 +182,9 @@ impl crate::cache::CacheManager {
         request: &MavenPath,
         previous: Option<&ArtifactRecord>,
     ) -> Result<PreparedFetch, CacheFailure> {
-        if self.inner.upstream.offline() {
+        let runtime = self.runtime();
+        let upstream = runtime.upstream.as_ref();
+        if upstream.offline() {
             return Err(CacheFailure::Offline);
         }
         let priority = if previous.is_some() {
@@ -192,7 +195,7 @@ impl crate::cache::CacheManager {
         let mut excluded = HashSet::new();
         let mut upstream_failure = false;
         let negative_enabled =
-            request.policy() == CachePolicy::Mutable || self.inner.config.negative_cache_permanent;
+            request.policy() == CachePolicy::Mutable || runtime.cache.negative_cache_permanent;
         let mut negative = if negative_enabled {
             self.fresh_negative_entries(request.relative()).await?
         } else {
@@ -201,8 +204,7 @@ impl crate::cache::CacheManager {
 
         loop {
             let outcome = if let Some(previous) = previous {
-                self.inner
-                    .upstream
+                upstream
                     .refresh(
                         request.relative(),
                         &previous.upstream,
@@ -213,8 +215,7 @@ impl crate::cache::CacheManager {
                     )
                     .await
             } else {
-                self.inner
-                    .upstream
+                upstream
                     .fetch(request.relative(), &excluded, &negative)
                     .await
             };
@@ -248,29 +249,41 @@ impl crate::cache::CacheManager {
                     // The checksum files are fetched while the main body
                     // streams, so a slow artifact download no longer waits on
                     // extra checksum round-trips afterwards.
-                    let prefetch = self.start_checksum_prefetch(request, &repository, priority);
+                    let prefetch = self.start_checksum_prefetch(
+                        runtime.upstream.clone(),
+                        request,
+                        &repository,
+                        priority,
+                    );
                     let downloaded = match self
-                        .download_main(request, &repository, response, priority)
+                        .download_main(upstream, request, &repository, response, priority)
                         .await
                     {
                         Ok(downloaded) => downloaded,
                         Err(error) => {
                             upstream_failure = true;
-                            self.inner.upstream.record_body_failure(&repository);
+                            upstream.record_body_failure(&repository);
                             excluded.insert(repository);
                             tracing::warn!(%error, "discarding failed upstream download");
                             continue;
                         }
                     };
                     match self
-                        .prepare_bundle(request, &repository, downloaded, priority, prefetch)
+                        .prepare_bundle(
+                            upstream,
+                            request,
+                            &repository,
+                            downloaded,
+                            priority,
+                            prefetch,
+                        )
                         .await
                     {
                         Ok(files) => return Ok(PreparedFetch::Bundle(files)),
                         Err(BundleError::Unstable(error)) => {
                             upstream_failure = true;
                             excluded.insert(repository.clone());
-                            self.inner.upstream.record_body_failure(&repository);
+                            upstream.record_body_failure(&repository);
                             tracing::warn!(upstream = %repository, %error, "upstream content remained unstable");
                         }
                         Err(BundleError::Internal(error)) => return Err(error),
@@ -297,6 +310,7 @@ impl crate::cache::CacheManager {
     /// already written when the upstream connection breaks mid-body.
     async fn download_main(
         &self,
+        upstream: &UpstreamClient,
         request: &MavenPath,
         repository: &str,
         response: UpstreamResponse,
@@ -312,7 +326,7 @@ impl crate::cache::CacheManager {
         for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
             match stream_response_to_file(response, &temporary, resume).await {
                 Ok((size, sha1, sha256, sha512)) => {
-                    self.inner.upstream.record_body_success(repository);
+                    upstream.record_body_success(repository);
                     return Ok(DownloadedMain {
                         temporary,
                         size,
@@ -344,8 +358,7 @@ impl crate::cache::CacheManager {
                         .filter(|value| value.starts_with('"') && value.ends_with('"'));
                     let outcome = match validator {
                         Some(validator) => {
-                            self.inner
-                                .upstream
+                            upstream
                                 .fetch_range(
                                     repository,
                                     request.relative(),
@@ -356,8 +369,7 @@ impl crate::cache::CacheManager {
                                 .await
                         }
                         None => {
-                            self.inner
-                                .upstream
+                            upstream
                                 .fetch_from(repository, request.relative(), priority)
                                 .await
                         }
@@ -376,9 +388,7 @@ impl crate::cache::CacheManager {
                                 let FetchResult::Found {
                                     response: restarted,
                                     ..
-                                } = self
-                                    .inner
-                                    .upstream
+                                } = upstream
                                     .fetch_from(repository, request.relative(), priority)
                                     .await
                                 else {
@@ -428,6 +438,7 @@ impl crate::cache::CacheManager {
     /// artifact, overlapping their round-trips with the main body download.
     fn start_checksum_prefetch(
         &self,
+        upstream: Arc<UpstreamClient>,
         request: &MavenPath,
         repository: &str,
         priority: RequestPriority,
@@ -435,7 +446,6 @@ impl crate::cache::CacheManager {
         if request.is_checksum() {
             return ChecksumPrefetch::none();
         }
-        let upstream = self.inner.upstream.clone();
         let repository = repository.to_owned();
         let relative = request.relative().to_owned();
         ChecksumPrefetch::spawn(async move {
@@ -445,6 +455,7 @@ impl crate::cache::CacheManager {
 
     async fn prepare_bundle(
         &self,
+        upstream: &UpstreamClient,
         request: &MavenPath,
         repository: &str,
         downloaded: DownloadedMain,
@@ -452,7 +463,9 @@ impl crate::cache::CacheManager {
         prefetch: ChecksumPrefetch,
     ) -> Result<Vec<PreparedFile>, BundleError> {
         let downloaded = self
-            .select_stable_download(request, repository, downloaded, priority, prefetch)
+            .select_stable_download(
+                upstream, request, repository, downloaded, priority, prefetch,
+            )
             .await?;
         let now = unix_timestamp();
         let refresh_attempt = (request.policy() == CachePolicy::Mutable).then_some(now);
@@ -523,6 +536,7 @@ impl crate::cache::CacheManager {
 
     async fn select_stable_download(
         &self,
+        upstream: &UpstreamClient,
         request: &MavenPath,
         repository: &str,
         initial: DownloadedMain,
@@ -538,7 +552,14 @@ impl crate::cache::CacheManager {
         let mut candidate = initial;
         for attempt in 1..=MAX_CHECKSUM_VALIDATION_ATTEMPTS {
             let issues = self
-                .checksum_issues(request, repository, &candidate, priority, prefetched.take())
+                .checksum_issues(
+                    upstream,
+                    request,
+                    repository,
+                    &candidate,
+                    priority,
+                    prefetched.take(),
+                )
                 .await;
             if issues.is_empty() {
                 cleanup_downloads(&rejected).await;
@@ -568,14 +589,12 @@ impl crate::cache::CacheManager {
                 )));
             }
 
-            let retry = match self
-                .inner
-                .upstream
+            let retry = match upstream
                 .fetch_from(repository, request.relative(), priority)
                 .await
             {
                 FetchResult::Found { response, .. } => self
-                    .download_main(request, repository, response, priority)
+                    .download_main(upstream, request, repository, response, priority)
                     .await
                     .ok(),
                 _ => None,
@@ -598,6 +617,7 @@ impl crate::cache::CacheManager {
     /// three files are fetched concurrently.
     async fn checksum_issues(
         &self,
+        upstream: &UpstreamClient,
         request: &MavenPath,
         repository: &str,
         downloaded: &DownloadedMain,
@@ -606,15 +626,7 @@ impl crate::cache::CacheManager {
     ) -> Vec<String> {
         let files = match prefetched {
             Some(files) => files,
-            None => {
-                fetch_all_checksums(
-                    &self.inner.upstream,
-                    repository,
-                    request.relative(),
-                    priority,
-                )
-                .await
-            }
+            None => fetch_all_checksums(upstream, repository, request.relative(), priority).await,
         };
         let mut issues = Vec::new();
         for (extension, expected) in [

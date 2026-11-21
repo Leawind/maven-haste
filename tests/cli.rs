@@ -381,6 +381,44 @@ fn running_binary_serves_health_endpoint() {
 }
 
 #[test]
+fn reloads_configuration_while_running() {
+    let upstream = spawn_raw_upstream("artifact-body");
+    let directory = TempDir::new().unwrap();
+    let (address, _, _child) = spawn_server(&directory, |bind| {
+        write_reload_config(&directory, bind, &upstream, false);
+    });
+    let response = wait_for_response(address, "/maven/com/example/demo/1.0/demo-1.0.jar");
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    write_reload_config(&directory, &address.to_string(), &upstream, true);
+
+    for attempt in 0..100 {
+        let version = format!("9.{attempt}");
+        let response = wait_for_response(
+            address,
+            &format!("/maven/com/example/demo/{version}/demo-{version}.jar"),
+        );
+        if response.starts_with("HTTP/1.1 503") {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("configuration reload did not take effect");
+}
+
+fn write_reload_config(directory: &TempDir, bind: &str, upstream: &str, offline: bool) {
+    std::fs::write(
+        directory.path().join("maven-haste.toml"),
+        format!(
+            "[server]\nbind = '{bind}'\n\n[storage]\nroot = './repository'\n\n\
+             [upstream]\noffline = {offline}\n\n\
+             [[repositories]]\nid = 'local'\nurl = '{upstream}'\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
 fn file_logging_writes_daily_json_access_events() {
     let directory = TempDir::new().unwrap();
     let (address, _, mut child) = spawn_server(&directory, |bind| {

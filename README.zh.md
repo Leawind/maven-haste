@@ -94,7 +94,19 @@ maven-haste cache repair
 4. 按网络环境调整缓存 TTL、上游超时、并发和熔断参数。
 5. 用 `maven-haste config check -c <配置文件>` 验证配置、存储目录和数据库，再启动服务。
 
-程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`、`maven-haste.yml`；若同时存在多个格式则报错停止，而不是选择其中一个。解析器由文件扩展名决定（`json`、`yaml`、`yml`、`toml`）；无法识别或缺失的扩展名会直接报错，不再回退为 TOML。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入配置文件。
+程序未指定 `-c/--config` 时，会依次查找当前目录和系统用户配置目录中的 `maven-haste.json`、`maven-haste.toml`、`maven-haste.yaml`、`maven-haste.yml`。同一目录下存在多个配置，或两个目录中存在不同格式的配置时，程序会报错并要求用 `--config` 明确指定，而不是自行选择；两个目录中可以存在相同格式的配置，此时优先使用当前目录。解析器由文件扩展名决定（`json`、`yaml`、`yml`、`toml`）；无法识别或缺失的扩展名会直接报错，不再回退为 TOML。启动时可以用全局参数临时覆盖监听地址或启用调试日志；长期配置应写入配置文件。
+
+### 热重载
+
+`maven-haste run` 会持续监视启动时使用的配置文件。文件变化后，程序按扩展名重新解析新内容，并在约一秒内应用：
+
+- 可热重载：`[cache]`、`[upstream]`、`[circuit_breaker]` 和 `[[repositories]]`，包括仓库 URL、路由规则、认证、自定义请求头、代理设置、并发数、`cache_writes` 以及 `[upstream].offline`。
+- 需要重启：`[server]`（`bind` 和 `base_path`）、`[storage]` 与 `[logging]`。这些部分的变更会记录警告并被忽略。
+- 新文件无法解析、校验失败，或无法根据新配置创建上游客户端时，程序会记录错误并继续使用旧配置。
+- 重载不会中断正在进行的下载；新请求使用重载后的配置。
+- `${ENV_VAR}` 会在每次重载时重新展开；修改环境变量后，需要保存或 touch 配置文件才会触发重载。
+
+只有 `run` 会监视配置文件；`config` 和 `cache` 命令只读取一次配置然后退出。
 
 ### 借助 Schema 编辑
 

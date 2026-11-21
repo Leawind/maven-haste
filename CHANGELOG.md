@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `maven-haste run` hot-reloads the configuration file it started with, for YAML, YML, TOML, and JSON. Cache, upstream, circuit breaker, and repository settings apply within about a second; invalid reloads keep the previous configuration, and active downloads are not interrupted.
 - `[upstream].proxy` now accepts an ordered list of proxy URLs (a single URL still works). Requests try the proxies in the listed order and hand the request to the next one when a proxy cannot be reached; each proxy has its own circuit breaker and is skipped for `circuit_breaker.recovery_timeout` after `circuit_breaker.failure_threshold` consecutive failures, then probed again.
 - Added `upstream.proxy_fallback` (default `true`): when every configured proxy cannot be reached, requests retry directly instead of failing. Repositories with `use_proxy = true` and `proxy_fallback = false` keep requiring the proxies.
 - `config init` and `config example` accept `--format json|yaml|toml`. Init defaults to YAML (`./maven-haste.yaml`) when neither a path nor a format is given; a path still decides its format by extension, and a `--format` that conflicts with the path's extension is rejected.
@@ -17,6 +18,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Default configuration discovery now rejects files of different formats across the working directory and the user configuration directory; pass `--config <PATH>` to choose one. Files of the same format still prefer the working directory.
 - Store new cache bundles as SHA-256 content objects and publish all records in one SQLite transaction. Existing Maven-layout caches remain readable without a migration; maintenance collects retired objects and replaced legacy files.
 - Require Rust 1.89 or later for standard-library file locks that serialize object publication and collection across server and CLI processes.
 - Reject persistent checksum mismatches and checksum-fetch failures instead of accepting repeated content or a failed validation retry.

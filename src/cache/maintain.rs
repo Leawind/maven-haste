@@ -19,7 +19,7 @@ impl CacheManager {
             .await
             .map_err(|error| CacheFailure::Internal(error.to_string()))?;
         self.enforce_capacity(&HashSet::new()).await?;
-        let ttl = self.inner.config.negative_ttl.as_secs() as i64;
+        let ttl = self.runtime().cache.negative_ttl.as_secs() as i64;
         let cutoff = unix_timestamp().saturating_sub(ttl);
         self.inner
             .database

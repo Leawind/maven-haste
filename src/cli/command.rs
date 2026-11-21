@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::AppError;
-use crate::{cache, db, logging, server, storage, upstream};
+use crate::{cache, db, logging, reload, server, storage, upstream};
 use clap::Subcommand;
 use config::ConfigCommand;
 
@@ -12,7 +13,7 @@ mod config;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Start the server
+    /// Start the server; the configuration file is hot-reloaded when it changes
     Run,
 
     /// Verify and maintain the local artifact cache
@@ -32,7 +33,9 @@ impl Command {
     pub async fn execute(&self, cli: &Cli) -> Result<(), AppError> {
         match self {
             Command::Run => {
-                let loaded = Config::load(cli)?;
+                let path = Config::resolve_path(cli)?;
+                let observed = reload::signature(&path).await;
+                let loaded = Config::load_path(&path, cli.bind)?;
                 let storage = storage::prepare(&loaded.config.storage).await?;
 
                 let _logging_guard = logging::init(cli.verbose, &loaded.config.logging)?;
@@ -71,24 +74,44 @@ impl Command {
                     AppError::Runtime(format!("failed to inspect HTTP listener: {error}"))
                 })?;
                 tracing::info!(%bind, "Maven proxy is ready");
-                let maintenance_cache = cache.clone();
-                let maintenance_interval = loaded.config.cache.maintenance_interval;
-                let maintenance = tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(maintenance_interval);
-                    loop {
-                        interval.tick().await;
-                        if let Err(error) = maintenance_cache.run_maintenance().await {
-                            tracing::warn!(%error, "cache maintenance pass failed");
-                        }
-                    }
-                });
+                let reload = reload::spawn(
+                    loaded.path.clone(),
+                    cli.bind,
+                    cache.clone(),
+                    loaded.config.clone(),
+                    observed,
+                );
+                let maintenance = tokio::spawn(run_maintenance(cache.clone()));
                 let result =
                     server::serve(listener, loaded.config.server.base_path, cache.clone()).await;
                 maintenance.abort();
+                reload.abort();
                 result
             }
             Command::Cache { command } => command.execute(cli).await,
             Command::Config { command } => command.execute(cli).await,
+        }
+    }
+}
+
+/// Runs maintenance on the interval from the current configuration. A short
+/// poll lets a reload change the interval without waiting for the previous
+/// (possibly much longer) one to elapse.
+async fn run_maintenance(cache: cache::CacheManager) {
+    let mut last_run: Option<Instant> = None;
+    loop {
+        let interval = cache.maintenance_interval();
+        let wait = match last_run {
+            Some(last) => interval.saturating_sub(last.elapsed()),
+            None => Duration::ZERO,
+        };
+        if wait.is_zero() {
+            if let Err(error) = cache.run_maintenance().await {
+                tracing::warn!(%error, "cache maintenance pass failed");
+            }
+            last_run = Some(Instant::now());
+        } else {
+            tokio::time::sleep(wait.min(Duration::from_secs(1))).await;
         }
     }
 }

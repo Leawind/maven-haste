@@ -144,7 +144,7 @@ impl crate::cache::CacheManager {
         &self,
         protected: &HashSet<&str>,
     ) -> Result<(), CacheFailure> {
-        let Some(max_size) = self.inner.config.max_size else {
+        let Some(max_size) = self.runtime().cache.max_size else {
             return Ok(());
         };
         // Recent hits determine the eviction order, so persist them before
@@ -334,10 +334,10 @@ impl crate::cache::CacheManager {
             .negative_entries(path)
             .await
             .map_err(internal)?;
-        let (fresh, expired): (Vec<NegativeCacheEntry>, Vec<NegativeCacheEntry>) =
-            entries.into_iter().partition(|entry| {
-                is_timestamp_fresh(entry.observed_at, self.inner.config.negative_ttl)
-            });
+        let negative_ttl = self.runtime().cache.negative_ttl;
+        let (fresh, expired): (Vec<NegativeCacheEntry>, Vec<NegativeCacheEntry>) = entries
+            .into_iter()
+            .partition(|entry| is_timestamp_fresh(entry.observed_at, negative_ttl));
         self.inner
             .database
             .delete_negative_entries(
