@@ -940,6 +940,16 @@ fn expand_repository_environment(repositories: &mut [RepositoryConfig]) -> Resul
 }
 
 fn expand_environment(value: &str, field: &str) -> Result<String, ConfigError> {
+    expand_environment_with(value, field, |name| std::env::var(name))
+}
+
+/// Shared expansion logic with an injectable lookup so tests do not depend on
+/// ambient process environment variables.
+fn expand_environment_with(
+    value: &str,
+    field: &str,
+    lookup: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, ConfigError> {
     let mut expanded = String::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
@@ -954,7 +964,7 @@ fn expand_environment(value: &str, field: &str) -> Result<String, ConfigError> {
                 "{field} has an empty environment reference"
             )));
         }
-        let resolved = std::env::var(name).map_err(|error| {
+        let resolved = lookup(name).map_err(|error| {
             ConfigError::new(format!(
                 "{field} references environment variable {name}: {error}"
             ))
@@ -2216,14 +2226,25 @@ username = "user"
     }
 
     #[test]
-    fn expands_environment_references_in_repository_values() {
-        let path = std::env::var("PATH").expect("the test environment has a PATH");
+    fn expands_environment_references_and_reports_invalid_syntax() {
+        fn lookup(name: &str) -> Result<String, std::env::VarError> {
+            match name {
+                "MAVEN_HASTE_TEST_TOKEN" => Ok("s3cret".to_owned()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        }
+
         assert_eq!(
-            expand_environment("before-${PATH}-after", "test").unwrap(),
-            format!("before-{path}-after")
+            expand_environment_with("before-${MAVEN_HASTE_TEST_TOKEN}-after", "test", lookup)
+                .unwrap(),
+            "before-s3cret-after"
         );
-        assert!(expand_environment("${MAVEN_HASTE_UNDEFINED_TEST_VARIABLE}", "test").is_err());
-        assert!(expand_environment("${unterminated", "test").is_err());
+        assert!(
+            expand_environment_with("${MAVEN_HASTE_UNKNOWN_TEST_TOKEN}", "test", lookup).is_err()
+        );
+        assert!(expand_environment_with("${}", "test", lookup).is_err());
+        assert!(expand_environment_with("${unterminated", "test", lookup).is_err());
+        assert_eq!(expand_environment("plain", "test").unwrap(), "plain");
     }
 
     #[test]
